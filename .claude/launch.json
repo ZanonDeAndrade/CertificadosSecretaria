@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "consulta",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["certificados-consulta/app.py"],
+      "port": 8001
+    }
+  ]
+}

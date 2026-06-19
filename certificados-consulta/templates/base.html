@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}Consulta de Certificados{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}" />
+  </head>
+  <body>
+    <main class="shell">
+      <div class="card">
+        <header class="masthead">
+          <p class="eyebrow">Consulta pública</p>
+          <h1>Certificados</h1>
+          <p class="subtitle">
+            Encontre e baixe o seu certificado pelo nome ou pelo código de validação.
+          </p>
+        </header>
+
+        {% block content %}{% endblock %}
+      </div>
+
+      <footer class="footnote">Secretaria Acadêmica</footer>
+    </main>
+  </body>
+</html>

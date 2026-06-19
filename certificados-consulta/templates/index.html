@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="search-grid">
+    <form class="search-card" action="/" method="get" role="search">
+      <label class="field-label" for="nome">Buscar por nome</label>
+      <p class="field-hint">Digite o nome do aluno — a busca é parcial e ignora maiúsculas/minúsculas.</p>
+      <div class="field-row">
+        <input
+          id="nome"
+          name="nome"
+          type="text"
+          placeholder="Ex.: Ana Carolina"
+          value="{{ query if search_type == 'nome' else '' }}"
+          autocomplete="off"
+        />
+        <button type="submit" class="btn btn-primary">Buscar</button>
+      </div>
+    </form>
+
+    <form class="search-card" action="/" method="get" role="search">
+      <label class="field-label" for="codigo">Buscar por código</label>
+      <p class="field-hint">Digite o código impresso no certificado.</p>
+      <div class="field-row">
+        <input
+          id="codigo"
+          name="codigo"
+          type="text"
+          class="mono"
+          placeholder="Ex.: CERT-2026-AB1234"
+          value="{{ query if search_type == 'codigo' else '' }}"
+          autocomplete="off"
+        />
+        <button type="submit" class="btn btn-primary">Buscar</button>
+      </div>
+    </form>
+  </section>
+
+  {% if error %}
+    <div class="alert alert-warn">{{ error }}</div>
+  {% endif %}
+
+  {% if results is not none and not error %}
+    {% if results|length == 0 %}
+      <div class="alert alert-empty">
+        Nenhum certificado encontrado
+        {% if search_type == 'codigo' %}
+          para o código <strong>{{ query }}</strong>.
+        {% else %}
+          para <strong>{{ query }}</strong>.
+        {% endif %}
+      </div>
+    {% else %}
+      <section class="results">
+        <div class="results-head">
+          <p class="eyebrow amber">Resultados</p>
+          <h2>
+            {{ total }}
+            {% if total == 1 %}certificado encontrado{% else %}certificados encontrados{% endif %}
+          </h2>
+        </div>
+
+        <div class="results-list">
+          {% for cert in results %}
+            <article class="result-item">
+              <div class="result-info">
+                <h3>{{ cert.participant_name }}</h3>
+                <p class="result-event">{{ cert.event_name }}</p>
+                {% if cert.course_name %}<p class="result-course">{{ cert.course_name }}{% if cert.workload_hours %} · {{ cert.workload_hours }}h{% endif %}</p>{% endif %}
+                {% if cert.issue_date %}<p class="result-date">{{ cert.issue_date }}</p>{% endif %}
+                <p class="result-code mono">{{ cert.unique_code }}</p>
+              </div>
+              {% if cert.status == 'revogado' %}
+                <span class="badge badge-revoked">Revogado</span>
+              {% else %}
+                <a class="btn btn-download" href="/certificado/{{ cert.unique_code }}/download">
+                  Baixar PDF
+                </a>
+              {% endif %}
+            </article>
+          {% endfor %}
+        </div>
+
+        {% if search_type == 'nome' and total_pages > 1 %}
+          <nav class="pagination">
+            {% if page > 1 %}
+              <a class="btn btn-page" href="/?nome={{ query | urlencode }}&page={{ page - 1 }}">← Anterior</a>
+            {% endif %}
+            <span class="page-info">Página {{ page }} de {{ total_pages }}</span>
+            {% if page < total_pages %}
+              <a class="btn btn-page" href="/?nome={{ query | urlencode }}&page={{ page + 1 }}">Próxima →</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      </section>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+
+# Variáveis de ambiente
+.env
+
+# Credenciais do Google (Service Account) — NUNCA comitar
+service-account*.json
+*service-account*.json
+*.serviceaccount.json
+credentials*.json
+gcp-*.json
+
+# Frontend do admin
+certificados-admin/frontend/node_modules/
+certificados-admin/frontend/dist/
+certificados-admin/frontend/*.tsbuildinfo
+
+# Banco e storage compartilhados (gerados em runtime)
+database/certificates.db
+database/certificates.db-wal
+database/certificates.db-shm
+storage/pdfs/*.pdf
+
+# Stores/artefatos gerados pelo admin
+certificados-admin/backEnd/visual_templates.json
+certificados-admin/backEnd/visual_template_backgrounds/
+certificados-admin/backEnd/certificates.json
+certificados-admin/backEnd/output/certificados/*.pdf
+
+# Logs
+*.log
