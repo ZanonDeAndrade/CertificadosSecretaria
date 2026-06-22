@@ -1,719 +1,942 @@
 # Certificados Secretaria
 
-Sistema de certificados acadêmicos dividido em **dois projetos independentes**
-que compartilham o **mesmo banco de dados SQLite** e a **mesma pasta de PDFs**:
+Plataforma web para **emitir, administrar, validar e baixar certificados
+acadêmicos**. A secretaria importa uma planilha, revisa os dados, gera PDFs com
+código único e QR Code e acompanha o histórico. O aluno usa uma área pública
+para verificar a autenticidade do certificado e, quando autorizado, baixar o
+arquivo.
 
-| Projeto | Para quem | O que faz |
-|---|---|---|
-| **`certificados-admin`** | Secretaria (uso interno) | Gera os certificados em PDF, grava cada um no banco e exibe o **código único** para anotar/enviar ao aluno. FastAPI + React. |
-| **`certificados-consulta`** | Alunos (site público) | Busca por nome ou código; download direto por código e confirmação de documento após busca nominal. FastAPI + Jinja2. |
+O sistema é composto por um painel administrativo em React, duas aplicações
+FastAPI, um PostgreSQL compartilhado e uma camada de arquivos que usa Google
+Drive privado em produção.
 
-Os dois apontam para o mesmo `database/certificates.db` e `storage/pdfs/`, então
-tudo que o admin gera aparece imediatamente na consulta.
+> **Resumo:** os dados e metadados ficam no PostgreSQL; os PDFs definitivos
+> ficam no Google Drive; credenciais de produção ficam no Google Secret Manager.
+> O navegador nunca recebe credenciais ou links internos do Drive.
 
-## Estrutura de pastas
+## Sumário
+
+- [Funcionalidades](#funcionalidades)
+- [Arquitetura](#arquitetura)
+- [Tecnologias](#tecnologias)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Persistência](#persistência)
+- [Fluxos principais](#fluxos-principais)
+- [Segurança e privacidade](#segurança-e-privacidade)
+- [Executar localmente](#executar-localmente)
+- [Executar com Docker](#executar-com-docker)
+- [Configuração](#configuração)
+- [Google Drive](#google-drive)
+- [Banco e migrations](#banco-e-migrations)
+- [API](#api)
+- [Testes e qualidade](#testes-e-qualidade)
+- [Operação e observabilidade](#operação-e-observabilidade)
+- [Deploy em produção](#deploy-em-produção)
+- [Documentação complementar](#documentação-complementar)
+
+## Funcionalidades
+
+### Secretaria
+
+- Login administrativo com sessão revogável no servidor.
+- Perfis de acesso `admin`, `secretaria` e `auditor`.
+- Importação de planilhas Excel `.xlsx`.
+- Validação prévia da planilha, sem persistir ou gerar arquivos.
+- Separação entre linhas válidas e inválidas, com motivo por linha.
+- Geração em lote somente das linhas válidas.
+- Código público único no formato `CERT-ANO-XXXXXX`.
+- QR Code apontando para a página oficial de validação.
+- Histórico com busca e filtros por nome, código, curso, evento e status.
+- Download individual ou em ZIP, com limite e relatório de arquivos ignorados.
+- Revogação com motivo obrigatório e preservação da rastreabilidade.
+- Reemissão segura, mantendo o mesmo código e o template original.
+- Visualização de metadados e estado de integridade do arquivo.
+- Editor visual do template global.
+- Versionamento imutável de templates e ativação explícita de uma versão.
+- Registro de ações relevantes em trilha de auditoria.
+- Métricas operacionais da API administrativa.
+
+### Alunos e público externo
+
+- Validação por código único.
+- Página canônica acessível pelo QR Code.
+- Busca nominal normalizada, sem diferenciar maiúsculas ou acentos.
+- Consulta do estado: ativo, revogado ou inexistente.
+- Download de certificado ativo sem expor o Google Drive.
+- Confirmação por documento ou matrícula após busca nominal.
+- Respostas públicas minimizadas, sem e-mail, documento ou IDs internos.
+- Bloqueio de download para certificados revogados ou com falha de integridade.
+
+### Administração e manutenção
+
+- Migrations versionadas com Alembic.
+- Reconciliação entre banco e Google Drive.
+- Reparação de emissões interrompidas.
+- Verificação periódica de integridade dos PDFs.
+- Migração de PDFs locais antigos para o Drive.
+- Migração de datas legadas para o padrão ISO.
+- Health checks de processo e prontidão.
+- Logs JSON com identificador de correlação.
+
+## Arquitetura
+
+```text
+                         ┌──────────────────────────┐
+ Secretaria ──HTTPS────▶ │ Painel administrativo    │
+                         │ React + TypeScript        │
+                         └────────────┬─────────────┘
+                                      │ /api
+                                      ▼
+                         ┌──────────────────────────┐
+                         │ API administrativa       │
+                         │ FastAPI + Python         │
+                         └────────┬─────────┬───────┘
+                                  │         │
+                                  │         └──────────────┐
+                                  ▼                        ▼
+                         ┌────────────────┐       ┌─────────────────┐
+                         │ PostgreSQL     │       │ Google Drive     │
+                         │ metadados      │       │ PDFs privados    │
+                         └───────▲────────┘       └────────▲────────┘
+                                 │                         │
+                         ┌───────┴─────────────────────────┴───────┐
+ Aluno ─────HTTPS──────▶ │ Consulta pública                       │
+                         │ FastAPI + Jinja2                        │
+                         └─────────────────────────────────────────┘
+```
+
+### Componentes
+
+| Componente | Responsabilidade |
+|---|---|
+| `certificados-admin/frontend` | SPA administrativa, emissão, histórico e editor visual. |
+| `certificados-admin/backEnd` | Autenticação, regras de negócio, geração, templates, auditoria e operações administrativas. |
+| `certificados-consulta` | Site e API públicos de busca, validação e download. |
+| `database` | Modelos ORM, engine, transações, repositórios e migrations. |
+| `storage_service` | Interface comum para armazenamento local ou Google Drive. |
+| `observability` | Logs estruturados, `correlation_id` e métricas. |
+| `deploy` | Containers, Nginx, Caddy e automação de deploy. |
+
+### Decisões arquiteturais
+
+- **Dois backends independentes:** a área administrativa e a pública podem
+  escalar e ser implantadas separadamente.
+- **Banco compartilhado:** as duas aplicações consultam o mesmo PostgreSQL.
+- **Arquivos fora do banco:** PDFs não ocupam o banco; apenas IDs e metadados
+  necessários para recuperá-los são persistidos.
+- **Storage abstrato:** regras de negócio não dependem diretamente do Drive.
+- **Repositórios:** as rotas não espalham SQL; o acesso passa pela camada de
+  persistência.
+- **Saga de emissão:** PostgreSQL e Drive não participam da mesma transação
+  ACID, portanto o sistema usa etapas e compensações explícitas.
+- **Falha fechada em produção:** configurações inseguras ou ausentes impedem o
+  início da aplicação.
+
+## Tecnologias
+
+### Frontend administrativo
+
+| Tecnologia | Uso |
+|---|---|
+| React 19 | Interface e componentes do painel. |
+| TypeScript 6 | Tipagem estática do frontend. |
+| Vite 8 | Servidor de desenvolvimento e build. |
+| Tailwind CSS 4 | Estilos e composição visual. |
+| Axios | Comunicação HTTP com as APIs. |
+| Fabric.js 7 | Canvas do editor visual de templates. |
+| Vitest | Testes unitários do frontend. |
+| Testing Library | Testes de interação e acessibilidade. |
+
+O editor e o Fabric.js são carregados sob demanda com `React.lazy`, reduzindo o
+JavaScript inicial do painel.
+
+### Backend e dados
+
+| Tecnologia/biblioteca | Uso |
+|---|---|
+| Python 3.11+ | Linguagem dos backends e utilitários. |
+| FastAPI | APIs administrativa e pública. |
+| Uvicorn | Servidor ASGI. |
+| Pydantic | Validação dos contratos da API. |
+| Jinja2 | Renderização do site público. |
+| SQLAlchemy 2 | ORM, sessões, transações e consultas. |
+| Alembic | Versionamento do schema. |
+| psycopg 3 | Driver PostgreSQL. |
+| Pandas | Normalização e processamento tabular. |
+| OpenPyXL | Leitura segura e validada de `.xlsx`. |
+| Pillow | Composição de imagens e geração do PDF. |
+| qrcode | QR Code de validação. |
+| bcrypt | Hash de senhas. |
+| PyJWT | Tokens de sessão assinados. |
+| Google API Client | Upload e download no Google Drive. |
+| google-auth / oauthlib | Autenticação com o Google. |
+
+### Infraestrutura e qualidade
+
+| Tecnologia | Uso |
+|---|---|
+| PostgreSQL | Persistência principal de produção. |
+| SQLite | Desenvolvimento e testes sem PostgreSQL. |
+| Google Drive API | Armazenamento privado dos PDFs. |
+| Google Cloud Run | Hospedagem dos três serviços web. |
+| Google Secret Manager | Entrega de segredos aos containers. |
+| Google Cloud Build | Build das imagens de produção. |
+| Artifact Registry | Registro das imagens Docker. |
+| Docker / Docker Compose | Empacotamento e ambientes locais/alternativos. |
+| Nginx | Serviço do frontend e proxy no Cloud Run. |
+| Caddy | TLS e gateway na alternativa com Compose. |
+| GitHub Actions | CI de backend, frontend, migrations e segurança. |
+| Ruff | Análise estática do Python. |
+| Pytest | Testes do backend. |
+| pip-audit / npm audit | Auditoria de dependências. |
+| Gitleaks | Detecção de segredos no histórico Git. |
+
+## Estrutura do projeto
 
 ```text
 CertificadosSecretaria/
-├── database/
-│   ├── schema.sql          # criação da tabela certificates
-│   ├── db.py               # conexão + queries compartilhadas (importado pelos dois)
-│   └── certificates.db     # SQLite (criado automaticamente no 1º uso)
-├── storage/
-│   └── pdfs/               # PDFs gerados ficam aqui
-├── certificados-admin/     # Projeto 1 — secretaria (FastAPI + React)
-│   ├── backEnd/            # API FastAPI + geração de PDF
-│   └── frontend/           # interface React + Vite + Tailwind (inclui o editor visual)
-├── certificados-consulta/  # Projeto 2 — site público (FastAPI + Jinja2)
-│   ├── app.py
-│   ├── templates/
-│   ├── static/
+├── certificados-admin/
+│   ├── backEnd/
+│   │   ├── main.py                 # API administrativa
+│   │   ├── auth.py                 # login, JWT, cookie e papéis
+│   │   ├── services/               # emissão, PDF, template e integridade
+│   │   ├── tests/                  # testes Pytest
+│   │   ├── templates/              # modelo inicial
+│   │   └── requirements.txt
+│   └── frontend/
+│       ├── src/                    # aplicação React
+│       ├── package.json
+│       └── vite.config.ts
+├── certificados-consulta/
+│   ├── app.py                      # site/API pública
+│   ├── templates/                  # páginas Jinja2
+│   ├── static/                     # CSS público
 │   └── requirements.txt
-├── .env.example            # config compartilhada opcional (DATABASE_PATH, STORAGE_DIR)
+├── database/
+│   ├── models.py                   # fonte de verdade do schema
+│   ├── repositories.py             # consultas e persistência
+│   ├── engine.py                   # engine, pool e transações
+│   ├── db.py                       # fachada compartilhada
+│   └── migrations/                 # revisões Alembic
+├── storage_service/
+│   ├── base.py                     # contrato de armazenamento
+│   ├── local.py                    # filesystem para desenvolvimento
+│   └── google_drive.py             # Drive para produção
+├── observability/                  # logs e métricas
+├── deploy/
+│   ├── cloudrun/                   # scripts do Cloud Run
+│   ├── Dockerfile.web              # painel para Compose
+│   └── Dockerfile.cloudrun-web     # painel para Cloud Run
+├── docs/                           # arquitetura, deploy e recuperação
+├── storage/pdfs/                   # PDFs locais de desenvolvimento
+├── .env.example                    # referência completa de configuração
+├── alembic.ini
+├── docker-compose.yml              # desenvolvimento com PostgreSQL local
+├── compose.production.yaml         # alternativa de produção com Compose
+├── Dockerfile                      # imagem dos backends
 └── README.md
 ```
 
-## Pré-requisitos
+## Persistência
 
-- **Python 3.11+** (testado em 3.14) — para os dois backends
-- **Node 18+** — apenas para o frontend do admin
-- **PostgreSQL 13+** — em **produção** (dev/teste usam SQLite automaticamente)
+### Produção atual
 
-## Persistência (banco e storage)
-
-A arquitetura de persistência separa **metadados** (banco) de **arquivo
-definitivo** (Google Drive):
-
-- **Banco** — acesso via **SQLAlchemy** (camada de repositórios em
-  `database/repositories.py`, sem SQL espalhado pelas rotas) com **pool de
-  conexões** e **transações** (`database/engine.py`).
-  - **Produção:** **PostgreSQL** por `DATABASE_URL` (obrigatório).
-  - **Dev/teste:** **SQLite** local automático (quando `DATABASE_URL` está vazio).
-- **Armazenamento dos PDFs** — em produção, **Google Drive é o único
-  armazenamento definitivo**. O banco **nunca** guarda o PDF: apenas o
-  `drive_file_id`, `checksum_sha256`, `file_size` e demais metadados. O storage
-  local existe **só para desenvolvimento** (sem fallback em produção).
-- **Código único** no formato **`CERT-ANO-XXXXXX`** (ex.: `CERT-2026-AB1234`).
-
-O banco guarda **somente metadados**: código, participante, curso, evento,
-datas, status, `business_key`, **template usado** (`template_used`),
-`drive_file_id`, `checksum_sha256`, `file_size` e a trilha de auditoria. O
-schema completo é a fonte única em `database/models.py`. (`pdf_path` permanece
-como ponteiro **legado/dev** para compatibilidade com certificados antigos.)
-
-### Migrations (Alembic)
-
-O schema de produção é versionado com **Alembic** (`database/migrations/`):
-
-```bash
-# a partir da raiz do repo, com DATABASE_URL apontando para o PostgreSQL
-alembic upgrade head            # aplica as migrations
-alembic revision --autogenerate -m "mensagem"   # cria uma nova migration
-alembic downgrade -1            # reverte a última
-```
-
-Em **desenvolvimento/teste** (SQLite) as tabelas são criadas automaticamente a
-partir dos modelos ORM no primeiro start (e uma auto-migração leve adiciona
-colunas novas a bancos SQLite antigos, sem perder dados).
-
-### Configuração (opcional, via `.env`)
-
-Sem nenhuma configuração já funciona com os caminhos padrão acima. Para apontar
-para outros caminhos, copie `.env.example` para `.env` na **raiz** e ajuste —
-os **dois projetos** leem o mesmo `.env`:
-
-Veja todos os nomes e descrições em [.env.example](.env.example). Principais:
-
-| Variável | Padrão | Descrição |
+| Tipo | Local | Conteúdo |
 |---|---|---|
-| `APP_ENV` | `development` | `development`/`production` (cookie Secure + fail-closed) |
-| `DATABASE_URL` | — | **PostgreSQL em produção (obrigatório)**; vazio em dev → SQLite |
-| `DATABASE_URL_FILE` | — | arquivo secreto contendo a connection string; alternativa a `DATABASE_URL` |
-| `DB_PATH` | `database/certificates.db` | arquivo SQLite **só** quando `DATABASE_URL` vazio (dev) |
-| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | pool de conexões (PostgreSQL) |
-| `STORAGE_PROVIDER` | `local` (dev) / `google_drive` (prod) | em produção deve ser `google_drive` (sem fallback) |
-| `LOCAL_STORAGE_PATH` | `storage/` | raiz dos PDFs locais (`<path>/pdfs`) |
-| `GOOGLE_DRIVE_AUTH_MODE` | `service_account` | `service_account` (Drive compartilhado) ou `oauth_user` (Meu Drive pessoal) |
-| `GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID` | — | pasta do Drive onde os PDFs são salvos |
-| `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` | — | credenciais da Service Account em base64 (produção) |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | — | caminho do JSON da Service Account (dev local) |
-| `GOOGLE_OAUTH_TOKEN_JSON_BASE64` | — | token offline OAuth em base64 (produção/container) |
-| `GOOGLE_OAUTH_TOKEN_FILE` | — | caminho do token OAuth criado pelo utilitário (dev local) |
-| `PUBLIC_VALIDATION_BASE_URL` | `http://localhost:8001` (dev) | URL base da validação pública; explícita e HTTPS em produção |
-| `ADMIN_FRONTEND_URL` | `http://localhost:5173` | origem administrativa permitida no CORS/CSRF; HTTPS obrigatório em produção |
-| `CORS_ALLOWED_ORIGINS` | — | allowlist administrativa que substitui `ADMIN_FRONTEND_URL`; nunca aceita `*` |
-| `JWT_SECRET` | (efêmero apenas em dev) | 32+ bytes aleatórios, com rejeição de baixa entropia; obrigatório em produção |
-| `DOCUMENT_HASH_SECRET` | fallback somente em dev | HMAC de documentos/desafios; 32+ bytes aleatórios e obrigatório em produção |
-| `TRUSTED_PROXY_CIDRS` | vazio | proxies autorizados a fornecer `X-Forwarded-For`; redes `/0` são rejeitadas |
-| `PUBLIC_RATE_LIMIT_REQUESTS` / `PUBLIC_RATE_LIMIT_WINDOW_SECONDS` | `60` / `60` | limite público persistido no banco, compartilhado entre workers |
-| `PUBLIC_NAME_SEARCH_MIN_LENGTH` / `PUBLIC_MAX_PAGE` | `3` / `100` | limites contra enumeração e paginação extrema |
-| `MINIMIZE_DOCUMENT_PLAINTEXT` | `true` | persiste somente HMAC normalizado do documento |
-| `PRIVATE_DATA_RETENTION_DAYS` | `0` | se >0, expurga e-mail/documento legado em claro após o prazo |
-| `JWT_EXPIRES_IN_MINUTES` | `480` | validade do token de sessão |
-| `AUTH_COOKIE_SECURE` / `AUTH_COOKIE_SAMESITE` | segue ambiente / `lax` | flags do cookie HttpOnly; Secure não pode ser desativado em produção |
-| `AUTH_SESSION_RETENTION_DAYS` | `30` | retenção antes da limpeza de sessões expiradas |
-| `LOGIN_MAX_FAILURES_PER_USER` / `LOGIN_MAX_FAILURES_PER_IP` | `8` / `20` | limites combinados persistidos no banco compartilhado |
-| `LOGIN_RATE_LIMIT_WINDOW_SECONDS` / `LOGIN_LOCKOUT_SECONDS` | `900` / `900` | janela e bloqueio temporário do login |
-| `LOGIN_BACKOFF_BASE_MS` / `LOGIN_BACKOFF_MAX_MS` | `250` / `4000` | atraso exponencial assíncrono após falhas |
-| `ADMIN_INITIAL_USERNAME` / `ADMIN_INITIAL_PASSWORD` / `ADMIN_INITIAL_ROLE` | — / — / `admin` | usuário inicial e papel (`admin`, `secretaria`, `auditor`) |
-| `MAX_SPREADSHEET_SIZE_MB` / `MAX_SPREADSHEET_ROWS` | `10` / `2000` | limites da planilha |
-| `ISSUE_LOCATION` / `SIGNATORY_NAME` / `SIGNATORY_TITLE` | — | local de emissão e assinante (impressos no PDF) |
+| Banco | PostgreSQL gerenciado no Neon | Certificados, usuários, sessões, auditoria, rate limits e templates. |
+| PDFs | Pasta privada no Google Drive | Arquivos definitivos dos certificados. |
+| Segredos | Google Secret Manager | URL do banco, token do Drive, segredo JWT e segredo de HMAC. |
+| Containers | Google Cloud Run | Aplicações efêmeras; não guardam dados permanentes. |
 
-> Nomes antigos (`DATABASE_PATH`, `STORAGE_DIR`, `FRONTEND_ADMIN_URL`,
-> `JWT_TTL_MINUTES`, `ADMIN_USERNAME`/`ADMIN_PASSWORD`,
-> `MAX_SPREADSHEET_FILE_SIZE_MB`) continuam aceitos como **alias**.
->
-> ⚠️ Os dois projetos precisam usar **exatamente os mesmos valores** de
-> `DB_PATH`/`LOCAL_STORAGE_PATH`, senão a consulta não encontra o que o admin gerou.
+O banco guarda o `drive_file_id`, tamanho, tipo MIME e checksum SHA-256, mas não
+guarda o PDF. A imagem de fundo do template é uma exceção intencional: ela fica
+no banco como binário para que cada versão do template seja durável.
 
-## Autenticação da secretaria (área administrativa)
+### Desenvolvimento
 
-A área administrativa exige **login**. As senhas são guardadas com **bcrypt** e
-o JWT é entregue somente por cookie **Secure + HttpOnly + SameSite**; o token não
-é devolvido no corpo. Cada `jti` possui uma linha em `auth_sessions`, portanto
-logout, revogação global, expiração e desativação do usuário são efetivos no
-servidor. `Authorization: Bearer` continua aceito para integrações, mas o login
-web é cookie-only. As rotas públicas de consulta continuam abertas.
+- Sem `DATABASE_URL`, a aplicação usa `database/certificates.db` em SQLite.
+- Com `STORAGE_PROVIDER=local`, os PDFs ficam em `storage/pdfs/`.
+- É possível usar PostgreSQL e Google Drive também no ambiente local.
+- Arquivos `.db`, PDFs, planilhas, `.env` e a pasta `secrets/` estão ignorados
+  pelo Git.
 
-O login usa limites combinados por hash de IP e usuário, atraso exponencial e
-bloqueio temporário. O estado fica em `login_throttles` no PostgreSQL
-compartilhado, funcionando entre workers/deploys sem armazenamento em memória.
-Sucessos, falhas e bloqueios são auditados sem senha. CAPTCHA não é a primeira
-defesa.
+### Principais tabelas
 
-**Criar o usuário inicial** (duas opções):
+| Tabela | Finalidade |
+|---|---|
+| `certificates` | Dados acadêmicos, estado e metadados dos arquivos. |
+| `admin_users` | Usuários administrativos, papéis e hash de senha. |
+| `auth_sessions` | Sessões JWT revogáveis no servidor. |
+| `login_throttles` | Bloqueios persistentes por usuário/IP. |
+| `public_rate_limits` | Limites compartilhados da área pública. |
+| `audit_log` | Trilha de ações administrativas e incidentes. |
+| `template_versions` | Layouts imutáveis e imagem de fundo do template. |
 
-```powershell
-# 1) Via variáveis de ambiente (criado automaticamente ao subir o backend)
-#    no .env: ADMIN_INITIAL_USERNAME=secretaria ADMIN_INITIAL_PASSWORD=troque-esta-senha ADMIN_INITIAL_ROLE=admin
+### Dados do certificado
 
-# 2) Via script seguro
-cd certificados-admin\backEnd
-python create_admin.py secretaria "uma-senha-forte"
-```
+Entre os principais campos estão nome, e-mail opcional, hash do documento,
+curso, evento, carga horária, datas, texto, código único, status, versão do
+template, usuário emissor, revogação e metadados do arquivo.
 
-**Em produção, defina obrigatoriamente:**
+Os status permitidos são:
 
-- `JWT_SECRET` gerado com pelo menos 32 bytes aleatórios; ausência, tamanho
-  insuficiente ou baixa entropia aparente abortam o startup.
-- `APP_ENV=production`, HTTPS e cookie Secure (não pode ser desativado).
-- `ADMIN_FRONTEND_URL` HTTPS ou `CORS_ALLOWED_ORIGINS`; sem allowlist o startup
-  aborta e `*` é rejeitado.
+- `pending`: reservado no banco, mas ainda não finalizado;
+- `ativo`: emitido e disponível;
+- `revogado`: preservado para consulta, sem download;
+- `failed`: emissão que não pôde ser concluída.
 
-Operações mutáveis autenticadas por cookie validam explicitamente `Origin` ou
-`Referer` contra a mesma allowlist. Requisições Bearer não dependem de cookie e
-não passam por essa defesa CSRF.
+## Fluxos principais
 
-Rotas de autenticação:
+### Emissão por planilha
 
-| Rota | Método | Função |
-|---|---|---|
-| `/auth/login` | POST | `{username, password}` → cria sessão e seta cookie HttpOnly; não retorna JWT |
-| `/auth/logout` | POST | revoga a sessão no servidor e limpa o cookie |
-| `/auth/me` | GET | dados do usuário autenticado |
-| `/auth/sessions/revoke-all` | POST | revoga todas as sessões do próprio usuário |
-| `/auth/users/{id}/sessions/revoke-all` | POST | revoga sessões de outro usuário; somente `admin` |
+1. A secretaria envia um arquivo `.xlsx`.
+2. O backend valida o formato OOXML e os limites de tamanho/complexidade.
+3. OpenPyXL e Pandas normalizam cabeçalhos, datas, cursos e carga horária.
+4. A interface mostra um preview com linhas válidas e inválidas.
+5. Após a confirmação, cada linha válida inicia uma emissão.
+6. O banco reserva uma `business_key` e um código público em estado `pending`.
+7. Pillow compõe o certificado com a versão ativa do template.
+8. O QR Code recebe `PUBLIC_VALIDATION_BASE_URL/validar/{code}`.
+9. O PDF é enviado ao storage configurado.
+10. O banco recebe o ID do arquivo, checksum e tamanho e muda para `ativo`.
+11. A ação e eventuais falhas são registradas na auditoria.
 
-Rotas protegidas (exigem sessão): `/generate-certificates`, `/templates/*`,
-`/certificate-file/{code}`, `/download-certificates`,
-`/admin/certificates/{code}/metadata` e todo o grupo `/certificates*`. Toda
-ação relevante (login, geração, revogação, reemissão, upload de template,
-download em lote) é registrada na tabela `audit_log`.
+### Saga e idempotência
 
-Papéis são aplicados em runtime a partir do banco, não do JWT: `admin` gerencia
-templates e sessões de qualquer usuário; `admin` e `secretaria` emitem/revogam;
-`auditor` possui acesso somente às consultas administrativas. Usuários inativos
-ou com papel desconhecido são recusados.
+Não existe uma transação única que englobe PostgreSQL e Google Drive. Por isso:
 
-### Frontend administrativo, editor e histórico
+- a reserva é confirmada no banco antes do upload;
+- a finalização só ocorre após upload bem-sucedido;
+- se a finalização falhar, o arquivo recém-enviado é excluído;
+- estados interrompidos podem ser reparados por `reconcile.py`;
+- a `business_key` possui restrição única e impede duplicação ao reenviar a
+  mesma emissão.
 
-O editor visual é carregado com `React.lazy` somente quando a aba correspondente
-é aberta. O build mantém o Fabric.js em um chunk próprio e apresenta fallback e
-limite de erro acessíveis durante o carregamento. Após essa separação, o JavaScript
-inicial caiu de **588,11 kB (176,05 kB gzip)** para **267,30 kB (84,78 kB gzip)**;
-o editor possui 31,03 kB e o Fabric.js 280,21 kB, ambos carregados sob demanda.
-
-O histórico permite selecionar certificados individualmente ou por página,
-limpar a seleção e baixar até 200 PDFs em ZIP. Revogados e registros sem arquivo
-ficam desabilitados. O download exibe progresso quando o tamanho é conhecido e,
-se parte dos arquivos ficar indisponível durante a operação, entrega os demais,
-informa os códigos ignorados e inclui `_erros-download.txt` no ZIP.
-
-Revogações usam modal com foco contido, fechamento por `Escape`, atributos ARIA
-e restauração de foco. O motivo é obrigatório (5–500 caracteres) no frontend e
-no backend. Respostas específicas do backend são preservadas, e qualquer `401`
-durante a sessão encerra globalmente a interface autenticada e volta ao login.
-
-Dependências verificadas em 19/06/2026: React 19.2.4, Vite 8.0.16,
-Fabric.js 7.4.0, TypeScript 6.0.2 e Axios 1.18.0. A migração para Fabric 7 usa
-seus tipos nativos; `@types/fabric` foi removido. `npm audit` terminou com
-**0 vulnerabilidades**, portanto não há vulnerabilidade residual registrada e
-nenhum `npm audit fix --force` foi executado.
-
-## Template global (modelo único versionado)
-
-Existe **um único template global** usado por **todos** os certificados — não há
-templates por curso nem escolha de template por lote. O template é editado no
-**editor visual** (aba “Template global”), e cada alteração cria uma **versão
-imutável**; a secretaria **ativa explicitamente** a versão que deve valer.
-
-- **Apenas uma versão ativa** por vez (ativação explícita).
-- Cada versão guarda um **snapshot imutável** do layout (dimensões + elementos) e
-  a **imagem de fundo em armazenamento durável** (BYTEA no PostgreSQL/SQLite —
-  **nunca** em APPDATA nem em JSON local).
-- Cada certificado registra `template_version_id` + `template_snapshot`, então a
-  **reemissão reproduz fielmente** o certificado original (mesmo código, mesma
-  versão), mesmo que a versão ativa já tenha mudado.
-- **`event` e `course` são campos distintos** no layout (correção: antes o campo
-  `event` recebia o curso). `ParticipantRegistryRecord` carrega ambos.
-
-Rotas (admin, exceto o background da imagem que é público e não-sensível):
-
-| Rota | Método | Função |
-|---|---|---|
-| `/templates/active` | GET | versão ativa (com layout) |
-| `/templates/versions` | GET | histórico de versões |
-| `/templates/versions/{id}` | GET | uma versão (com layout) |
-| `/templates/versions/{id}/background` | GET | imagem de fundo (stream) |
-| `/templates/versions` | POST | cria uma nova versão imutável |
-| `/templates/versions/{id}/activate` | POST | ativa a versão (apenas uma ativa) |
-
-No primeiro start (ou via `python seed_template.py`) uma **versão padrão** é
-criada e ativada a partir de `templates/certificado_base.png`. A migração de
-schema (`template_versions`, `template_version_id`, `template_snapshot`) é a
-Alembic `0002`; os stores antigos (template por curso em APPDATA e
-`visual_templates.json`) foram **removidos**.
-
-**Reemissão segura no Drive.** Ao reemitir, o **novo** arquivo é enviado e
-**finalizado no banco antes** de o arquivo antigo ser excluído; se a atualização
-do banco falhar, o novo arquivo é removido e o **arquivo anterior é preservado**
-(sem órfãos e sem perda).
-
-## Emissão por planilha (modelo estruturado)
-
-A secretaria emite certificados a partir de uma planilha `.xlsx`. As colunas são
-reconhecidas por sinônimos e normalizadas internamente:
+### Contrato da planilha
 
 | Coluna | Obrigatória | Observação |
 |---|---|---|
-| `nome` | ✅ | nome completo |
-| `curso` | ✅ | validado contra a lista oficial (`/courses`) |
-| `evento` | ✅ | **distinto do curso** |
-| `carga_horaria` | ✅ | numérica (ex.: `40`, `40h`) |
-| `data_emissao` | ✅* | por linha; `*` pode usar um padrão do formulário |
-| `email`, `documento`, `data_inicio`, `data_fim` | — | opcionais |
+| `nome` | Sim | Nome completo do participante. |
+| `curso` | Sim | Validado contra a lista oficial. |
+| `evento` | Sim | Campo distinto do curso. |
+| `carga_horaria` | Sim | Número ou texto como `40h`. |
+| `data_emissao` | Sim* | Pode vir da linha ou do valor padrão do formulário. |
+| `email` | Não | Dado privado administrativo. |
+| `documento` | Não | CPF, matrícula ou identificador para confirmação. |
+| `data_inicio` | Não | Data inicial da atividade. |
+| `data_fim` | Não | Data final da atividade. |
 
-Os cabeçalhos aceitam variações (ex.: "Carga Horária", "CH" → `carga_horaria`;
-"Data de Emissão" → `data_emissao`). Datas aceitam `dd/mm/aaaa`, `aaaa-mm-dd` ou
-intervalo `20 a 25/10/2025`.
+Cabeçalhos equivalentes, como `Carga Horária`, `CH` e `Data de Emissão`, são
+reconhecidos. Datas podem chegar em `DD/MM/AAAA`, `AAAA-MM-DD` ou intervalos
+suportados pelo normalizador. Internamente, datas persistidas usam ISO
+`YYYY-MM-DD`.
 
-**Exemplo de planilha** (`.xlsx`, primeira linha = cabeçalho):
+### Template global
 
-| nome | email | documento | curso | evento | carga_horaria | data_inicio | data_fim | data_emissao |
-|---|---|---|---|---|---|---|---|---|
-| Ana Carolina Souza | ana@ex.com | 12345 | Direito | Semana Jurídica | 40 | 20/10/2025 | 25/10/2025 | 10/06/2026 |
-| Bruno Lima | | | Pedagogia | Congresso de Educação | 8 | | | 10/06/2026 |
+- Existe um único template global ativo por vez.
+- Cada alteração cria uma nova versão, sem sobrescrever versões anteriores.
+- A ativação de uma versão é explícita.
+- O layout e a imagem de fundo são persistidos no PostgreSQL.
+- Cada certificado guarda a versão e um snapshot do layout usado.
+- Uma reemissão reproduz o certificado original mesmo que o template ativo
+  tenha mudado.
+- O editor permite texto, imagens, QR Code, fontes, dimensões e posicionamento.
 
-> Linhas inválidas (curso fora da lista, carga não numérica, data inválida) **não**
-> geram certificado — aparecem no preview com o motivo do erro.
+### Consulta e download público
 
-Fluxo (todas as rotas exigem sessão admin):
+1. O aluno acessa a URL pública ou lê o QR Code.
+2. A consulta busca o código no PostgreSQL.
+3. Somente dados acadêmicos mínimos são apresentados.
+4. Em um download, o backend recupera o arquivo pelo `drive_file_id`.
+5. O conteúdo é validado como PDF e comparado com tamanho e SHA-256 registrados.
+6. O backend transmite os bytes; o link e o ID do Drive não são expostos.
 
-1. `POST /certificates/validate-spreadsheet` → **preview** com linhas válidas,
-   inválidas (com motivos) e contagens. **Nada é gerado ou gravado.**
-2. `POST /certificates/generate` → gera **apenas** as linhas válidas, cria
-   código único + **QR Code**, salva no storage e no banco. Retorna um resumo
-   (`generated`, `duplicates`, `failed`, `invalid`).
+Na busca por nome, o código completo não é retornado. O backend fornece um
+desafio opaco e exige confirmação posterior por documento/matrícula. Comparações
+sensíveis usam HMAC e tempo constante.
 
-**Geração transacional (saga + compensação).** Como uma transação ACID não
-abrange PostgreSQL + Google Drive, cada certificado segue uma *saga* por etapas,
-e o resumo da API reflete **exatamente** o que foi persistido:
+## Segurança e privacidade
 
-1. **Reserva** (transação no banco): calcula a `business_key`, gera o código e
-   **insere** uma linha `pending` — a unicidade de código e `business_key` é
-   garantida pelas **constraints UNIQUE** (sem `INSERT OR IGNORE` nem checagem
-   fora da transação). Colisão de código → novo código; colisão de
-   `business_key` → o certificado existente volta em `duplicates`.
-2. **Upload**: renderiza o PDF em memória e envia ao storage (Drive em produção;
-   nunca grava cópia local definitiva).
-3. **Finalização** (transação no banco): grava `drive_file_id`, `checksum`,
-   `file_size` e marca `ativo`.
-4. **Falha**: nunca retorna sucesso — marca `failed`, **exclui o arquivo do
-   Drive** se o upload ocorreu mas a finalização falhou, e registra na auditoria.
+### Autenticação e autorização
 
-**Reconciliação.** Para reparar estados deixados por uma queda no meio da saga
-(`pending` antigos, `ativo` sem arquivo, `failed` com arquivo órfão):
+- Senhas armazenadas com bcrypt.
+- JWT assinado e entregue ao navegador somente em cookie `HttpOnly`.
+- Cookie `Secure` obrigatório em produção e política `SameSite` configurável.
+- Cada JWT possui uma sessão correspondente em `auth_sessions`.
+- Logout, expiração e revogação global são validados no servidor.
+- Papéis são consultados no banco em cada sessão relevante.
+- Mutações autenticadas por cookie validam `Origin` ou `Referer` contra a
+  allowlist administrativa.
+- CORS de produção nunca aceita `*`.
+
+### Proteções contra abuso
+
+- Limite de tentativas de login por hash de usuário e IP.
+- Atraso exponencial e bloqueio temporário.
+- Rate limit público persistido, compartilhado entre instâncias.
+- Confiança em `X-Forwarded-For` somente para proxies em
+  `TRUSTED_PROXY_CIDRS`.
+- Limites de página e tamanho mínimo da busca nominal.
+- Limites de tamanho, linhas, colunas, células e tempo para planilhas.
+- Validação de imagens e limites de pixels/elementos do template.
+
+### Integridade
+
+- Todo PDF possui checksum SHA-256 e tamanho registrados.
+- Downloads verificam assinatura `%PDF-`, tamanho e checksum.
+- Divergência marca o registro como `integrity_blocked`, gera auditoria e
+  bloqueia a entrega.
+- O storage local rejeita caminhos absolutos, `..` e acesso fora da pasta.
+- Reemissão envia e confirma o novo arquivo antes de remover o anterior.
+
+### LGPD e minimização
+
+- Com `MINIMIZE_DOCUMENT_PLAINTEXT=true`, documento/matrícula não é persistido
+  em claro; fica somente um HMAC normalizado.
+- Logs e métricas não devem conter nome, e-mail ou documento.
+- A API pública não retorna e-mail, documento, IDs internos ou caminhos.
+- Certificados revogados permanecem consultáveis para rastreabilidade, mas não
+  podem ser baixados.
+- `PRIVATE_DATA_RETENTION_DAYS` permite expurgar e-mail e documento legado em
+  claro após o prazo institucional definido.
+- A instituição continua responsável por base legal, retenção, atendimento ao
+  titular, backups e política de rotação dos segredos.
+
+### Credenciais
+
+Nunca versione:
+
+- `.env` ou `.env.production`;
+- JSON de cliente OAuth (`client_secret*.json`);
+- token OAuth (`*oauth*token*.json` ou `token.json`);
+- JSON/chaves de Service Account;
+- conteúdo da pasta `secrets/`;
+- planilhas ou PDFs reais.
+
+O arquivo de cliente OAuth serve somente para a autorização inicial. Ele não é
+o local onde certificados são armazenados. Em produção, o token resultante fica
+no Google Secret Manager.
+
+## Executar localmente
+
+### Pré-requisitos
+
+- Python 3.11 ou superior;
+- Node.js 20 ou superior;
+- npm;
+- Git;
+- PostgreSQL é opcional: sem ele, o desenvolvimento usa SQLite.
+
+### 1. Configuração compartilhada
+
+Na raiz do projeto:
 
 ```powershell
-cd certificados-admin\backEnd
-python reconcile.py --dry-run     # apenas relatório
-python reconcile.py               # executa (idempotente; pode ir no cron)
+Copy-Item .env.example .env
 ```
 
-**Idempotência:** a `business_key`
-(`sha256(nome+documento+evento+curso+carga+data)`) tem índice **UNIQUE**.
-Reenviar a mesma planilha **não** duplica — as linhas repetidas voltam em
-`duplicates` com o código já existente.
-
-**Histórico admin:** `GET /certificates` (filtros: `name`, `code`, `course`,
-`event`, `status`; `limit`/`offset`), `GET /certificates/{code}`,
-`POST /certificates/{code}/revoke`, `POST /certificates/{code}/reissue`,
-`POST /certificates/download-zip`.
-
-**QR Code:** aponta sempre para
-`PUBLIC_VALIDATION_BASE_URL/validar/{code}`. A URL é construída por uma única
-função compartilhada, que normaliza barras e rejeita URLs relativas, credenciais,
-query strings e fragmentos. Em produção, `PUBLIC_VALIDATION_BASE_URL` é
-obrigatória e deve usar HTTPS. O código textual continua impresso no certificado.
-
-## Área pública (consulta)
-
-HTML e JSON usam **rate limit persistente no banco compartilhado** e projeções
-sanitizadas. O IP de `X-Forwarded-For` só é aceito quando o peer pertence a
-`TRUSTED_PROXY_CIDRS`:
-
-| Rota | Método | Função |
-|---|---|---|
-| `/validar/{code}` | GET | página HTML canônica; mostra válido, revogado ou inexistente |
-| `/public/verify/{code}` | GET | valida por código; sinaliza **revogado** |
-| `/public/search?nome=&page=` | GET | busca nominal paginada; sem código completo ou link direto |
-| `/public/certificates/{code}/download` | GET | download pelo código (sem expor o Drive) |
-| `/public/certificates/download-by-name` | POST | confirma documento/matrícula e baixa após busca nominal |
-
-A página HTML canônica `/validar/{code}` expõe apenas nome, curso/evento, carga
-horária, data, código e status. E-mail, documento, IDs internos, caminhos e
-metadados do Drive nunca entram no contexto do template. O download é oferecido
-somente para certificados ativos; revogados não exibem o botão e retornam `410`
-na rota de download. Respostas recebem CSP, proteção contra framing/MIME sniffing,
-política de referência/permissões e tratamento de erro acessível.
-
-A pesquisa por código é exata e libera download apenas quando o certificado está
-ativo. A busca por nome remove acentos e usa lowercase, exige termo mínimo,
-escapa `%`, `_` e `\\`, limita páginas e retorna somente dados acadêmicos mínimos
-mais um desafio HMAC opaco. Ela nunca revela `unique_code` completo nem URL de
-download. O POST de download compara o HMAC do documento em tempo constante; código,
-documento ou desafio incorretos recebem a mesma resposta. A rota legada apenas
-redireciona para a rota canônica e passa pelo mesmo rate limit.
-
-No PostgreSQL, `participant_name_normalized` possui índice trigram GIN para a
-busca parcial e índice composto por status. O rate limit fica em
-`public_rate_limits`, não na memória do processo, portanto funciona com múltiplos
-workers/deploys que compartilham o banco.
-
-## Armazenamento de certificados (Local / Google Drive)
-
-Os PDFs passam por uma **camada de armazenamento plugável** (`storage_service/`),
-selecionada por `STORAGE_PROVIDER`. Nenhuma rota, o `main.py` ou o `generator.py`
-falam com o Google Drive diretamente — tudo passa pela interface
-`CertificateStorage`.
-
-```
-storage_service/
-├── base.py          # interface CertificateStorage + StoredFile/RetrievedFile
-├── local.py         # LocalStorage  (desenvolvimento)
-├── google_drive.py  # GoogleDriveStorage (produção, Service Account)
-├── config.py        # leitura de variáveis de ambiente (sem segredos no código)
-└── __init__.py      # get_storage() + download_certificate() (com fallback local)
-```
-
-Ao gerar um certificado, o PDF é renderizado em memória, enviado para o storage
-configurado e os **metadados** são gravados no banco: `storage_provider`,
-`drive_file_id`, `drive_folder_id`, `original_filename`, `mime_type`,
-`file_size`, `checksum_sha256`, `created_at`. O **código verificador**
-(`CERT-ANO-XXXXXX`) continua sendo o identificador público.
-
-### Desenvolvimento (LocalStorage)
-
-Padrão. Não precisa de nada:
+Para o modo mais simples, mantenha:
 
 ```env
+APP_ENV=development
+DATABASE_URL=
 STORAGE_PROVIDER=local
+ADMIN_FRONTEND_URL=http://localhost:5173
+PUBLIC_VALIDATION_BASE_URL=http://localhost:8001
 ```
 
-Os PDFs ficam em `storage/pdfs/` e o download é servido pelo backend.
+O `.env` da raiz é lido pelos dois backends.
 
-### Produção (GoogleDriveStorage)
-
-O backend aceita dois modos de autenticação:
-
-- `service_account`: indicado para um Drive compartilhado do Google Workspace;
-- `oauth_user`: indicado para uma conta pessoal, usando a cota do próprio usuário.
-
-#### Conta pessoal via OAuth
-
-1. No Google Cloud, configure a tela de consentimento OAuth e crie um cliente do
-   tipo **Aplicativo para computador**. Baixe o JSON do cliente fora do repo.
-2. Instale as dependências e execute a autorização única:
-
-```powershell
-python -m pip install -r certificados-admin/backEnd/requirements.txt
-python certificados-admin/backEnd/authorize_google_drive.py `
-  --client-file "C:\segredos\client_secret.json" `
-  --token-file "C:\segredos\certificados-oauth-token.json"
-```
-
-O navegador abrirá para o login. O utilitário usa o escopo limitado
-`drive.file`, cria uma pasta privada no Meu Drive e imprime seu ID. Configure:
-
-```env
-STORAGE_PROVIDER=google_drive
-GOOGLE_DRIVE_AUTH_MODE=oauth_user
-GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID=<id-impresso>
-GOOGLE_OAUTH_TOKEN_FILE=C:\segredos\certificados-oauth-token.json
-```
-
-Ao renovar ou rotacionar o token, reutilize a pasta existente com
-`--folder-id <id-da-pasta>` para não criar uma pasta duplicada.
-
-Para container/produção, use `GOOGLE_OAUTH_TOKEN_JSON_BASE64` no lugar do
-caminho. Nunca comite o cliente OAuth nem o token. O app deve ser publicado na
-tela de consentimento; tokens de aplicativos externos mantidos em modo de teste
-podem expirar rapidamente.
-
-#### Service Account / Drive compartilhado
-
-**1) Criar a Service Account**
-
-1. Acesse o [Google Cloud Console](https://console.cloud.google.com/) e crie (ou
-   selecione) um projeto.
-2. Ative a **Google Drive API** (APIs & Services → Library → *Google Drive API*).
-3. Em **IAM & Admin → Service Accounts**, crie uma Service Account.
-4. Na aba **Keys** da Service Account, **Add Key → Create new key → JSON** e baixe
-   o arquivo. **Não comite esse JSON** (já está no `.gitignore`).
-
-**2) Compartilhar a pasta do Drive com a Service Account**
-
-1. No Google Drive, crie a pasta que vai guardar os certificados.
-2. Copie o **e-mail** da Service Account (algo como
-   `nome@projeto.iam.gserviceaccount.com`).
-3. Clique com o botão direito na pasta → **Compartilhar** → adicione esse e-mail
-   como **Editor**.
-4. Pegue o **ID da pasta** na URL: `https://drive.google.com/drive/folders/<ESTE_ID>`.
-
-**3) Configurar as variáveis de ambiente**
-
-```env
-STORAGE_PROVIDER=google_drive
-GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID=<id-da-pasta>
-
-# Opção recomendada em produção: JSON inteiro em base64
-GOOGLE_SERVICE_ACCOUNT_JSON_BASE64=<base64-do-json>
-# Alternativa para dev local: caminho do arquivo JSON
-# GOOGLE_SERVICE_ACCOUNT_FILE=C:\caminho\para\service-account.json
-```
-
-Gerar o base64 do JSON:
-
-```powershell
-# PowerShell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("service-account.json"))
-```
-```bash
-# Linux/macOS
-base64 -w0 service-account.json
-```
-
-Instale as dependências do Google (já listadas no `requirements.txt`):
-
-```powershell
-pip install -r requirements.txt
-```
-
-### Segurança do armazenamento
-
-- Os PDFs **não** são tornados públicos no Drive — só a Service Account (e quem
-  você compartilhar a pasta) tem acesso.
-- A área pública **nunca** recebe link do Drive nem IDs internos: o download
-  passa pelo backend usando o **código verificador**.
-- Antes de servir, o backend valida que o certificado **existe** e está
-  **ativo** (certificados com `status = 'revogado'` retornam `410`).
-- Credenciais vêm **apenas** de variáveis de ambiente — nunca do banco nem do
-  código.
-
-### Compatibilidade com certificados antigos
-
-A migração do schema é automática (`init_db()` adiciona as novas colunas sem
-perder dados). Certificados antigos, salvos em `storage/pdfs/`, continuam
-funcionando: se um registro **não** tiver `drive_file_id`, o backend faz
-**fallback** e serve o arquivo local.
-
-### Rotas relevantes
-
-| Rota | Acesso | Função |
-|---|---|---|
-| `GET /certificate-file/{code}` | Admin (sessão) | Visualiza/baixa o PDF via storage |
-| `GET /admin/certificates/{code}/metadata` | Admin (sessão) | Metadados de armazenamento |
-| `GET /certificado/{code}/download` (consulta) | Público | Download pelo código, sem expor o Drive |
-
-## Robustez e integridade (datas, arquivos, banco, uploads)
-
-- **Datas (ISO, ordenação cronológica).** `issue_date`, `start_date` e
-  `end_date` são armazenadas em **ISO `YYYY-MM-DD`** (com índice em
-  `issue_date`), então a ordenação é **cronológica** — o formato "por extenso"
-  é aplicado **apenas na apresentação** (API/HTML/PDF). Para converter bases
-  antigas: `python migrate_dates.py --dry-run` (relatório das não conversíveis)
-  e depois `python migrate_dates.py`.
-- **Integridade dos arquivos.** Todo download verifica que o conteúdo é um
-  **PDF** e que **tamanho + SHA‑256** batem com o registrado. Em divergência o
-  certificado é **bloqueado** (`integrity_blocked`), registra-se um
-  **incidente** na auditoria e o conteúdo **não é entregue**. Verificação
-  periódica: `python verify_integrity.py` (agende no cron).
-- **Constraints de banco.** `CHECK` em `status`, `role` e `storage_provider`;
-  **FKs** de `issued_by`, `revoked_by` e `audit_log.actor_id` para
-  `admin_users` com **`ON DELETE SET NULL`** — remover/desativar um usuário
-  **não destrói** certificados nem auditoria (o vínculo é apenas anulado).
-- **Uploads.** A planilha é validada como **OOXML real** com limites de linhas,
-  colunas, tamanho de célula e tempo aplicados **antes** de carregar tudo
-  (guarda contra **bombas de descompressão**). Imagens de template usam
-  `Image.verify()` + limites de **pixels/dimensões**; o layout limita
-  **quantidade de elementos** e o **tamanho total de data URLs**.
-- **Caminhos locais.** O storage de desenvolvimento **rejeita** caminhos
-  **absolutos** e **`..`**, confinando a leitura/escrita ao diretório de storage.
-
-## Operação, observabilidade e documentação
-
-- **Logs estruturados (JSON)** com `correlation_id` (cabeçalho `X-Request-ID`) e
-  **métricas** em `GET /metrics` (admin): geração, duplicados, falhas,
-  compensações, downloads e incidentes de integridade. **Sem dados pessoais** em
-  logs/métricas (`observability/`).
-- **Ferramentas de operação** (CLIs em `certificados-admin/backEnd/`):
-  | Comando | Função |
-  |---|---|
-  | `python migrate_to_drive.py --dry-run` | Migra PDFs locais → Drive (idempotente, checksum, relatório) |
-  | `python verify_integrity.py` | Verificação periódica de integridade dos arquivos |
-  | `python reconcile.py` | Reconcilia estado interno (pending/órfãos) |
-  | `python reconcile_drive.py` | Reconcilia Drive × banco (apenas ids/códigos, sem PII) |
-  | `python migrate_dates.py` | Converte datas legadas → ISO (relatório) |
-  | `python seed_template.py` | Cria/ativa o template global padrão |
-- **CI** em `.github/workflows/ci.yml`: lint (ruff), typecheck/build do frontend,
-  testes, migrations + `alembic check`, auditoria de dependências (pip-audit/npm
-  audit) e detecção de segredos (gitleaks).
-- **Documentação detalhada**: [docs/ARQUITETURA.md](docs/ARQUITETURA.md) e
-  [docs/DEPLOY_E_RECUPERACAO.md](docs/DEPLOY_E_RECUPERACAO.md) (deploy, backup/
-  restore do PostgreSQL, Shared Drive e permissões mínimas, rollback).
-
-> O fluxo legado `POST /generate-certificates` foi **removido**; toda emissão usa
-> o fluxo estruturado `POST /certificates/generate` (saga + template global).
-
-## Como rodar
-
-> Comandos de ativação do venv para **Windows PowerShell**. No `cmd` use
-> `.venv\Scripts\activate.bat`; no Linux/macOS, `source .venv/bin/activate`.
-
-### 1) certificados-admin (secretaria)
-
-**Backend** (porta 8000):
+### 2. Backend administrativo
 
 ```powershell
 cd certificados-admin\backEnd
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 python main.py
 ```
 
-**Frontend** (porta 5173):
+API: `http://localhost:8000`
+
+### 3. Usuário inicial
+
+Defina no `.env` antes do primeiro start:
+
+```env
+ADMIN_INITIAL_USERNAME=secretaria
+ADMIN_INITIAL_PASSWORD=troque-por-uma-senha-forte
+ADMIN_INITIAL_ROLE=admin
+```
+
+Ou crie por linha de comando:
+
+```powershell
+cd certificados-admin\backEnd
+python create_admin.py secretaria "uma-senha-forte"
+```
+
+Depois da criação, remova a senha em claro do `.env`.
+
+### 4. Frontend administrativo
+
+Em outro terminal:
 
 ```powershell
 cd certificados-admin\frontend
-npm install
+npm ci
 npm run dev
 ```
 
-A interface abre em `http://localhost:5173` e fala com o backend em
-`http://localhost:8000`. Ao gerar certificados, cada item mostra o **código**
-(com botão *Copiar*) para a secretaria enviar ao aluno.
+Painel: `http://localhost:5173`
 
-### 2) certificados-consulta (site público)
+Quando necessário, crie `certificados-admin/frontend/.env.local`:
 
-Porta 8001 (para rodar junto com o admin):
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+### 5. Consulta pública
+
+Em outro terminal:
 
 ```powershell
 cd certificados-consulta
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 python app.py
 ```
 
-Acesse `http://localhost:8001`, busque por nome ou código e clique em
-**Baixar PDF**.
+Consulta: `http://localhost:8001`
 
-## Fluxo completo
-
-1. A secretaria envia a planilha + dados no **admin** → o sistema gera o PDF,
-   grava no banco (`CERT-ANO-XXXXXX`) e mostra o código.
-2. O aluno acessa a **consulta**, busca pelo nome ou pelo código e baixa o PDF.
-
-## Portas usadas
+### Portas locais
 
 | Serviço | Porta |
+|---|---:|
+| API administrativa | 8000 |
+| Frontend Vite | 5173 |
+| Consulta pública | 8001 |
+
+## Executar com Docker
+
+O `docker-compose.yml` cria PostgreSQL local, aplica migrations, inicializa o
+template e sobe as aplicações.
+
+```powershell
+Copy-Item .env.docker.example .env
+docker compose build
+docker compose up -d
+docker compose logs -f admin
+```
+
+| Endpoint | Endereço |
 |---|---|
-| Admin — backend (FastAPI) | 8000 |
-| Admin — frontend (Vite) | 5173 |
-| Consulta — site público | 8001 |
+| Consulta pública | `http://localhost` |
+| Painel administrativo | `http://localhost:8080` |
 
-Para mudar a porta de um backend Python, defina `PORT` no ambiente antes de
-iniciar (ex.: `$env:PORT=9000; python app.py`).
+Esse Compose usa HTTP e é destinado a desenvolvimento/integração. Não deve ser
+exposto diretamente à internet.
 
-## Como rodar os testes
+Comandos úteis:
+
+```powershell
+docker compose ps
+docker compose logs -f consulta
+docker compose restart admin
+docker compose down
+```
+
+## Configuração
+
+A referência completa, com comentários e valores padrão, está em
+`.env.example`. Variáveis de ambiente reais têm prioridade sobre o `.env`.
+
+### Ambiente e URLs
+
+| Variável | Finalidade |
+|---|---|
+| `APP_ENV` | `development` ou `production`. |
+| `ADMIN_FRONTEND_URL` | Origem permitida do painel administrativo. |
+| `CORS_ALLOWED_ORIGINS` | Allowlist administrativa alternativa. |
+| `PUBLIC_VALIDATION_BASE_URL` | URL usada nos QR Codes. |
+| `TRUSTED_PROXY_CIDRS` | Proxies autorizados a enviar IP encaminhado. |
+
+### Banco
+
+| Variável | Finalidade |
+|---|---|
+| `DATABASE_URL` | URL SQLAlchemy do PostgreSQL. |
+| `DATABASE_URL_FILE` | Arquivo secreto contendo a URL. |
+| `DB_PATH` | Caminho SQLite quando não há PostgreSQL. |
+| `DB_POOL_SIZE` | Conexões permanentes do pool. |
+| `DB_MAX_OVERFLOW` | Conexões extras permitidas. |
+| `DB_POOL_TIMEOUT` | Tempo de espera por uma conexão. |
+| `DB_POOL_RECYCLE` | Reciclagem de conexões em segundos. |
+
+### Storage
+
+| Variável | Finalidade |
+|---|---|
+| `STORAGE_PROVIDER` | `local` ou `google_drive`. |
+| `LOCAL_STORAGE_PATH` | Raiz do storage local. |
+| `GOOGLE_DRIVE_AUTH_MODE` | `oauth_user` ou `service_account`. |
+| `GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID` | Pasta privada dos PDFs. |
+| `GOOGLE_OAUTH_TOKEN_FILE` | Token OAuth em arquivo. |
+| `GOOGLE_OAUTH_TOKEN_JSON_BASE64` | Token OAuth em base64. |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | JSON de Service Account em arquivo. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` | JSON da Service Account em base64. |
+
+### Autenticação, privacidade e limites
+
+| Variável | Finalidade |
+|---|---|
+| `JWT_SECRET` / `JWT_SECRET_FILE` | Assinatura dos tokens administrativos. |
+| `DOCUMENT_HASH_SECRET` / `_FILE` | HMAC de documentos e desafios públicos. |
+| `JWT_EXPIRES_IN_MINUTES` | Duração da sessão. |
+| `AUTH_COOKIE_SECURE` | Exige HTTPS para o cookie. |
+| `AUTH_COOKIE_SAMESITE` | Política `lax`, `strict` ou `none`. |
+| `LOGIN_MAX_FAILURES_PER_USER` | Limite de falhas por usuário. |
+| `LOGIN_MAX_FAILURES_PER_IP` | Limite de falhas por IP. |
+| `PUBLIC_RATE_LIMIT_REQUESTS` | Requisições públicas por janela. |
+| `MINIMIZE_DOCUMENT_PLAINTEXT` | Evita persistir documento em claro. |
+| `PRIVATE_DATA_RETENTION_DAYS` | Retenção de dados privados legados. |
+| `MAX_SPREADSHEET_SIZE_MB` | Tamanho máximo da planilha. |
+| `MAX_SPREADSHEET_ROWS` | Quantidade máxima de linhas. |
+
+### Dados institucionais
+
+| Variável | Finalidade |
+|---|---|
+| `ISSUE_LOCATION` | Local de emissão impresso. |
+| `SIGNATORY_NAME` | Nome do signatário. |
+| `SIGNATORY_TITLE` | Cargo/função do signatário. |
+
+Em `APP_ENV=production`, PostgreSQL, Google Drive, URLs HTTPS, CORS e segredos
+fortes são obrigatórios. O processo encerra no startup se a validação falhar.
+
+## Google Drive
+
+O sistema suporta dois modos.
+
+### OAuth de usuário
+
+É o modo usado no ambiente de produção atual.
+
+1. No Google Cloud, ative a Google Drive API.
+2. Configure a tela de consentimento OAuth.
+3. Crie um cliente do tipo **Aplicativo para computador**.
+4. Guarde o JSON fora do repositório.
+5. Execute a autorização uma única vez:
+
+```powershell
+python -m pip install -r certificados-admin\backEnd\requirements.txt
+python certificados-admin\backEnd\authorize_google_drive.py `
+  --client-file "C:\segredos\client_secret.json" `
+  --token-file "C:\segredos\certificados-oauth-token.json"
+```
+
+O utilitário usa o escopo limitado `drive.file`, cria ou reutiliza uma pasta
+privada e informa o ID necessário. Configure:
+
+```env
+STORAGE_PROVIDER=google_drive
+GOOGLE_DRIVE_AUTH_MODE=oauth_user
+GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID=<id-da-pasta>
+GOOGLE_OAUTH_TOKEN_FILE=C:\segredos\certificados-oauth-token.json
+```
+
+Ao repetir a autorização, use `--folder-id` para reutilizar a pasta. Em produção,
+publique o aplicativo OAuth; tokens de aplicativos externos deixados em modo de
+teste podem expirar rapidamente.
+
+### Service Account
+
+É indicada quando existe um Drive compartilhado do Google Workspace.
+
+1. Crie uma Service Account e habilite a Google Drive API.
+2. Compartilhe a pasta com o e-mail da conta de serviço.
+3. Conceda somente a permissão necessária.
+4. Configure o ID da pasta e o JSON por arquivo secreto ou base64.
+
+```env
+STORAGE_PROVIDER=google_drive
+GOOGLE_DRIVE_AUTH_MODE=service_account
+GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID=<id-da-pasta>
+GOOGLE_SERVICE_ACCOUNT_FILE=C:\segredos\service-account.json
+```
+
+Os PDFs não são publicados. A leitura e o download sempre passam pelo backend.
+
+## Banco e migrations
+
+Os modelos em `database/models.py` são a fonte de verdade do schema. Produção
+usa Alembic; SQLite de desenvolvimento também recebe inicialização compatível.
+
+```powershell
+# Aplicar todas as migrations
+python -m alembic upgrade head
+
+# Verificar a revisão atual
+python -m alembic current
+
+# Ver histórico
+python -m alembic history
+
+# Criar migration a partir dos modelos
+python -m alembic revision --autogenerate -m "descricao"
+
+# Verificar drift entre modelos e migrations
+python -m alembic check
+```
+
+Migrations devem rodar uma vez por release antes da nova versão das APIs.
+
+## API
+
+FastAPI publica documentação OpenAPI em `/docs` e `/redoc` quando habilitada
+pelo ambiente/aplicação.
+
+### API administrativa
+
+| Método e rota | Finalidade |
+|---|---|
+| `GET /health` | Estado do processo. |
+| `GET /health/ready` | Prontidão do banco e dependências. |
+| `GET /metrics` | Métricas administrativas. |
+| `POST /auth/login` | Cria sessão e cookie. |
+| `POST /auth/logout` | Revoga a sessão atual. |
+| `GET /auth/me` | Usuário autenticado. |
+| `POST /auth/sessions/revoke-all` | Revoga todas as sessões próprias. |
+| `POST /auth/users/{id}/sessions/revoke-all` | Revogação por administrador. |
+| `GET /courses` | Lista oficial de cursos. |
+| `POST /certificates/validate-spreadsheet` | Preview da planilha. |
+| `POST /certificates/generate` | Emissão das linhas válidas. |
+| `GET /certificates` | Histórico paginado e filtrável. |
+| `GET /certificates/{code}` | Detalhes administrativos. |
+| `POST /certificates/{code}/revoke` | Revoga com motivo. |
+| `POST /certificates/{code}/reissue` | Reemite com segurança. |
+| `POST /certificates/download-zip` | Download em lote. |
+| `GET /certificate-file/{code}` | PDF individual autenticado. |
+| `GET /admin/certificates/{code}/metadata` | Metadados do arquivo. |
+| `GET /templates/active` | Template global ativo. |
+| `GET /templates/versions` | Histórico de templates. |
+| `POST /templates/versions` | Cria uma versão imutável. |
+| `POST /templates/versions/{id}/activate` | Ativa uma versão. |
+
+### Consulta pública
+
+| Método e rota | Finalidade |
+|---|---|
+| `GET /health` | Estado do processo. |
+| `GET /health/ready` | Prontidão da aplicação. |
+| `GET /` | Página inicial de consulta. |
+| `GET /validar/{code}` | Página canônica do certificado. |
+| `GET /public/verify/{code}` | Validação JSON por código. |
+| `GET /public/search?nome=&page=` | Busca nominal paginada. |
+| `GET /public/certificates/{code}/download` | Download por código. |
+| `POST /public/certificates/download-by-name` | Download com confirmação. |
+| `GET /certificado/{code}/download` | Compatibilidade com URL legada. |
+
+## Testes e qualidade
+
+### Backend
 
 ```powershell
 cd certificados-admin\backEnd
 python -m pytest tests -q
 ```
 
-A suíte cobre: normalização de datas, camada de storage (Local + Drive fake),
-planilha/validação, geração + idempotência + QR, autenticação e rotas
-protegidas, histórico/revogação, a área pública, a **camada de persistência
-SQLAlchemy** (repositórios, transações, normalização de `DATABASE_URL`) e os
-**checks de fail-closed** de produção.
+A suíte cobre autenticação, autorização, persistência, templates, geração,
+planilhas, idempotência, saga, storage local/Drive fake, integridade, privacidade,
+consulta pública e hardening.
 
-Os testes de **integração com PostgreSQL** (`tests/test_integration_postgres.py`)
-rodam apenas quando há um banco de teste descartável disponível:
+Integração real com PostgreSQL exige um banco descartável:
 
 ```powershell
-$env:TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/certificados_test"
-python -m pytest tests/test_integration_postgres.py -q
+$env:TEST_DATABASE_URL="postgresql://usuario:senha@localhost:5432/certificados_test"
+python -m pytest tests\test_integration_postgres.py -q
 ```
 
-Sem `TEST_DATABASE_URL` eles são **ignorados** (skip), e o restante da suíte roda
-sobre SQLite.
+Sem `TEST_DATABASE_URL`, esses testes são ignorados e o restante usa SQLite.
 
-## Migração de PDFs antigos para o Google Drive
-
-Para mover certificados que ainda estão em `storage/pdfs/` (sem `drive_file_id`)
-para o Drive, use o script (já configurando o Drive no `.env`):
+### Frontend
 
 ```powershell
-cd certificados-admin\backEnd
-python migrate_to_drive.py --dry-run     # simula e mostra o relatório, sem enviar
-python migrate_to_drive.py               # executa de fato
-python migrate_to_drive.py --limit 100   # processa no máximo 100
+cd certificados-admin\frontend
+npm run typecheck
+npm test
+npm run build
 ```
 
-O script verifica a existência do arquivo, faz upload pela camada de storage,
-grava `drive_file_id` + metadados + `checksum_sha256` (mantendo o `pdf_path`
-local como backup), **não** reenvia certificados que já têm `drive_file_id`, e
-imprime um relatório final (migrados / ignorados / não encontrados / falhas).
+### Lint e migrations
 
-> Os PDFs antigos em `certificados-admin/backEnd/output/certificados/` são
-> artefatos de versões anteriores (antes do storage compartilhado), **não**
-> referenciados pelo banco — podem ser removidos manualmente após conferência.
+```powershell
+ruff check .
+python -m compileall -q certificados-admin\backEnd certificados-consulta database storage_service observability
+python -m alembic check
+```
 
-## Deploy seguro (resumo)
+### Integração contínua
 
-Para o deploy atual em **Google Compute Engine + servidor da faculdade**, ambos
-com Neon e Google Drive OAuth, siga
-[docs/DEPLOY_PRODUCAO_DUAL.md](docs/DEPLOY_PRODUCAO_DUAL.md) e use
-`compose.production.yaml`. O `docker-compose.yml` antigo é somente para
-desenvolvimento/integração HTTP local.
+O workflow `.github/workflows/ci.yml` executa em pushes para `main` e pull
+requests:
 
-Admin e consulta podem rodar em **deploys separados**, compartilhando o **mesmo
-PostgreSQL** (`DATABASE_URL`) e os **mesmos arquivos privados no Drive**:
+- Ruff e compilação do Python;
+- aplicação das migrations e `alembic check`;
+- testes Pytest;
+- typecheck e build do frontend;
+- auditorias `pip-audit` e `npm audit`;
+- detecção de segredos com Gitleaks.
 
-- **PostgreSQL gerenciado** comum aos dois deploys; rode `alembic upgrade head`
-  no deploy (uma vez) antes de subir. **Backup diário** do PostgreSQL (é o mapa
-  código ↔ `drive_file_id`).
-- **Drive privado**: os PDFs **nunca** são públicos. A **consulta** não recebe
-  credenciais administrativas nem URLs públicas — o download é **sempre
-  proxiado pelo backend** pelo `drive_file_id`. Recomenda-se provisionar uma
-  **Service Account somente-leitura** para a consulta (a mesma pasta
-  compartilhada como *Leitor*), enquanto o admin usa uma SA com escrita.
-- Exponha à internet **apenas a consulta**; mantenha o **admin** na rede
-  interna/VPN. **HTTPS** obrigatório; `APP_ENV=production`.
-- Em `APP_ENV=production` a aplicação **falha ao iniciar** se faltar
-  `DATABASE_URL`, `JWT_SECRET` forte, `DOCUMENT_HASH_SECRET` forte, allowlist CORS administrativa,
-  `PUBLIC_VALIDATION_BASE_URL` HTTPS, a pasta do Drive ou as credenciais — e
-  `STORAGE_PROVIDER` precisa ser `google_drive` (sem fallback local).
-- **CORS** restrito a `ADMIN_FRONTEND_URL`/`CORS_ALLOWED_ORIGINS` (nunca `*`);
-  mutações por cookie também validam `Origin`/`Referer`.
-- **Segredos só no `.env`/secret manager**: `JWT_SECRET` forte; **nunca** comite
-  o JSON da Service Account (já bloqueado no `.gitignore`).
-- Use uvicorn atrás de nginx; com PostgreSQL o pool suporta múltiplos workers.
+## Operação e observabilidade
 
-## Retenção e privacidade (LGPD)
+### Logs
 
-- O documento/matrícula é normalizado e transformado em HMAC-SHA-256 com
-  `DOCUMENT_HASH_SECRET`; com `MINIMIZE_DOCUMENT_PLAINTEXT=true`, o valor em
-  claro nunca é persistido. Logs e respostas nunca recebem o documento.
-- O HMAC pseudonimizado é mantido enquanto a instituição oferecer download por
-  busca nominal. Ele não é reversível sem o segredo, mas continua sendo dado
-  pessoal pseudonimizado e deve permanecer sob os mesmos controles de acesso.
-- `PRIVATE_DATA_RETENTION_DAYS>0` apaga e-mail e eventual documento legado em
-  claro no startup após o prazo. `0` exige política/rotina institucional externa;
-  essa escolha evita apagar automaticamente registros sem base normativa local.
-- A busca nominal revela somente nome e dados acadêmicos mínimos; o código
-  completo e o link direto não são retornados. A confirmação posterior usa o
-  documento/matrícula sem revelar se ele existe.
-- Certificados revogados permanecem consultáveis como revogados para
-  rastreabilidade, mas não podem ser baixados.
-- A área administrativa (com todos os dados) exige **login** e registra ações
-  na tabela `audit_log` (quem emitiu/revogou e quando).
-- A instituição deve definir base legal, prazo para metadados acadêmicos/PDF,
-  retenção do `audit_log`, atendimento ao titular e rotação/backup do segredo.
-  Rotacionar `DOCUMENT_HASH_SECRET` exige recalcular hashes a partir de uma fonte
-  autorizada; sem o documento original, confirmações antigas deixam de funcionar.
-- Solicitações de titulares (LGPD) devem ser tratadas pela secretaria; a
-  exclusão de um certificado deve ser feita de forma controlada (preferir
-  revogação à exclusão física, para manter a trilha de auditoria).
+- Saída JSON estruturada.
+- `correlation_id` por requisição.
+- Propagação de `X-Request-ID`.
+- Método, caminho, status e duração.
+- Sem query string e sem dados pessoais.
+
+### Métricas
+
+`GET /metrics` na API administrativa apresenta contadores como:
+
+- certificados gerados;
+- duplicados;
+- falhas;
+- compensações executadas;
+- downloads;
+- incidentes de integridade.
+
+As métricas atuais ficam em memória por instância; para visão consolidada em
+múltiplas instâncias, devem ser exportadas/coletadas pela plataforma.
+
+### Utilitários
+
+Execute a partir de `certificados-admin/backEnd` com o ambiente configurado:
+
+| Comando | Uso |
+|---|---|
+| `python create_admin.py <usuario> <senha>` | Cria usuário administrativo. |
+| `python seed_template.py` | Cria/ativa o template inicial. |
+| `python reconcile.py --dry-run` | Analisa estados internos interrompidos. |
+| `python reconcile.py` | Repara estados conhecidos. |
+| `python reconcile_drive.py` | Compara Drive e banco sem alterar arquivos. |
+| `python reconcile_drive.py --apply` | Exclui do Drive os órfãos confirmados. |
+| `python verify_integrity.py` | Valida PDFs, tamanhos e checksums. |
+| `python migrate_to_drive.py --dry-run` | Simula migração local para Drive. |
+| `python migrate_to_drive.py` | Migra PDFs locais. |
+| `python migrate_dates.py --dry-run` | Analisa datas legadas. |
+| `python migrate_dates.py` | Converte datas para ISO. |
+
+Use sempre `--dry-run` quando disponível antes de uma operação corretiva.
+
+### Backup e recuperação
+
+O PostgreSQL é o mapa entre código público e arquivo no Drive. Perder o banco
+torna os PDFs difíceis de localizar, mesmo que continuem no Drive. Portanto:
+
+- mantenha backup periódico do PostgreSQL;
+- preserve e teste a restauração dos segredos;
+- não reutilize uma restauração antiga sem reconciliar banco e Drive;
+- execute `reconcile_drive.py` após incidentes ou restaurações;
+- valide checksums com `verify_integrity.py`;
+- documente RPO, RTO e responsáveis institucionais.
+
+Exemplo de backup lógico:
+
+```bash
+pg_dump "$DATABASE_URL" | gzip > certificados_$(date +%Y%m%d_%H%M%S).sql.gz
+```
+
+Consulte `docs/DEPLOY_E_RECUPERACAO.md` antes de restaurar produção.
+
+## Deploy em produção
+
+### Ambiente atual
+
+Implantação registrada em **22/06/2026**:
+
+| Recurso | Valor |
+|---|---|
+| Google Cloud Project | `certificados-prod-2ea4fc` |
+| Região | `us-east1` |
+| Banco | PostgreSQL no Neon |
+| PDFs | Google Drive privado via OAuth |
+| Consulta | [certificados-consulta](https://certificados-consulta-hj3rwyicha-ue.a.run.app) |
+| API administrativa | [certificados-admin-api](https://certificados-admin-api-hj3rwyicha-ue.a.run.app) |
+| Painel | [certificados-painel](https://certificados-painel-hj3rwyicha-ue.a.run.app) |
+| Job de migrations | `certificados-migrate` |
+
+Há duas imagens: uma para os backends e outra para o painel Nginx. O mesmo
+container de backend seleciona `admin`, `consulta` ou `migrate` por
+`APP_TARGET`.
+
+### Release no Cloud Run
+
+Pré-requisitos:
+
+- Google Cloud CLI autenticado;
+- projeto e APIs provisionados;
+- Artifact Registry configurado;
+- segredos criados no Secret Manager;
+- service account de runtime com permissões mínimas;
+- Git Bash no fluxo documentado para Windows.
+
+Na raiz do repositório:
+
+```bash
+# Build das imagens, migrations e deploy dos três serviços
+./deploy/cloudrun/deploy.sh release
+
+# Consultar revisões e tráfego sem alterar recursos
+./deploy/cloudrun/deploy.sh status
+```
+
+Etapas individuais:
+
+```bash
+./deploy/cloudrun/deploy.sh build
+./deploy/cloudrun/deploy.sh build-web
+./deploy/cloudrun/deploy.sh migrate
+./deploy/cloudrun/deploy.sh consulta
+./deploy/cloudrun/deploy.sh admin
+./deploy/cloudrun/deploy.sh web
+```
+
+O script usa tags únicas, executa a migration como Cloud Run Job e só depois
+implanta os serviços. Segredos são montados como arquivos em `/secrets`; eles não
+entram na imagem nem são enviados como variáveis de texto no comando.
+
+> Não altere `PUBLIC_VALIDATION_BASE_URL` sem manter compatibilidade com QR Codes
+> já emitidos.
+
+### Alternativa com Docker Compose
+
+`compose.production.yaml` fornece uma opção para servidor próprio com Caddy,
+HTTPS, containers somente leitura, secrets por arquivo, migrations explícitas e
+backup por `pg_dump`. Consulte `docs/DEPLOY_PRODUCAO_DUAL.md` antes de usar essa
+topologia.
+
+## Documentação complementar
+
+| Documento | Conteúdo |
+|---|---|
+| [docs/ARQUITETURA.md](docs/ARQUITETURA.md) | Componentes, persistência, saga e observabilidade. |
+| [docs/CLOUD_RUN_ATUAL.md](docs/CLOUD_RUN_ATUAL.md) | Recursos e URLs da implantação atual. |
+| [docs/DEPLOY_PRODUCAO.md](docs/DEPLOY_PRODUCAO.md) | Requisitos gerais de produção. |
+| [docs/DEPLOY_PRODUCAO_DUAL.md](docs/DEPLOY_PRODUCAO_DUAL.md) | Topologia alternativa com Compose. |
+| [docs/DEPLOY_E_RECUPERACAO.md](docs/DEPLOY_E_RECUPERACAO.md) | Backup, restore, rollback e recuperação. |
+| [docs/DEPLOY_DOCKER.md](docs/DEPLOY_DOCKER.md) | Execução em containers. |
+| [RELATORIO_AUDITORIA.md](RELATORIO_AUDITORIA.md) | Auditoria técnica e riscos analisados. |
+| [RELATORIO_FINAL_IMPLEMENTACAO.md](RELATORIO_FINAL_IMPLEMENTACAO.md) | Histórico das melhorias implementadas. |
+
+## Licença e responsabilidade
+
+Não há arquivo de licença definido neste repositório. Antes de distribuir ou
+publicar o código, a instituição deve escolher uma licença e revisar políticas
+de privacidade, retenção, acesso ao Google Drive e tratamento de dados pessoais.
