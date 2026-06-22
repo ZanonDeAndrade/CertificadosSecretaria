@@ -14,10 +14,10 @@ RUN npm run build
 FROM nginx:1.27-alpine
 
 ENV PORT=8080 \
-    ADMIN_API_HOST=certificados-admin-api-hj3rwyicha-ue.a.run.app
+    ADMIN_API_HOST=certificados-admin-api-hj3rwyicha-ue.a.run.app \
+    CONSULTA_API_HOST=certificados-consulta-hj3rwyicha-ue.a.run.app
 
 COPY --from=build /frontend/dist /usr/share/nginx/html
 COPY deploy/nginx.cloudrun.conf /etc/nginx/templates/default.conf.template
 
 EXPOSE 8080
-

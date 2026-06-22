@@ -2,6 +2,8 @@ import axios from "axios";
 
 export interface ValidationResult {
   valid: boolean;
+  revoked?: boolean;
+  status?: string;
   name?: string;
   event?: string;
   issued_at?: string;
@@ -17,6 +19,10 @@ export interface ValidationResult {
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.trim() ||
   (import.meta.env.PROD ? "/api" : "http://localhost:8000");
+
+export const PUBLIC_API_BASE_URL =
+  import.meta.env.VITE_PUBLIC_API_BASE_URL?.trim() ||
+  (import.meta.env.PROD ? "/consulta-api" : "http://localhost:8001");
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -258,10 +264,29 @@ export function certificateFileUrl(code: string): string {
 }
 
 export async function validateCertificate(code: string): Promise<ValidationResult> {
-  const response = await api.get<ValidationResult>(
-    `/validate/${encodeURIComponent(code.trim())}`,
+  const response = await axios.get<{
+    valid: boolean;
+    status?: string;
+    revoked?: boolean;
+    certificate?: {
+      participant_name?: string;
+      event_name?: string | null;
+      course_name?: string | null;
+      issue_date?: string | null;
+    };
+  }>(
+    `${PUBLIC_API_BASE_URL.replace(/\/$/, "")}/public/verify/${encodeURIComponent(code.trim())}`,
+    { timeout: 60000 },
   );
-  return response.data;
+  const payload = response.data;
+  return {
+    valid: payload.valid,
+    revoked: payload.revoked,
+    status: payload.status,
+    name: payload.certificate?.participant_name,
+    event: payload.certificate?.event_name ?? payload.certificate?.course_name ?? undefined,
+    issued_at: payload.certificate?.issue_date ?? undefined,
+  };
 }
 
 export function getApiErrorMessage(error: unknown, fallback: string): string {

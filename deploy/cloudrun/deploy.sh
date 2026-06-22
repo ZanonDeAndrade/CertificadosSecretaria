@@ -28,6 +28,7 @@ PUBLIC_VALIDATION_BASE_URL="${PUBLIC_VALIDATION_BASE_URL:-https://certificados-c
 
 ADMIN_FRONTEND_URL="${ADMIN_FRONTEND_URL:-https://certificados-painel-hj3rwyicha-ue.a.run.app}"
 ADMIN_API_HOST="${ADMIN_API_HOST:-certificados-admin-api-hj3rwyicha-ue.a.run.app}"
+CONSULTA_API_HOST="${CONSULTA_API_HOST:-certificados-consulta-hj3rwyicha-ue.a.run.app}"
 
 DATABASE_SECRET="${DATABASE_SECRET:-certificados-database-url}"
 GOOGLE_TOKEN_SECRET="${GOOGLE_TOKEN_SECRET:-certificados-google-oauth-token}"
@@ -101,7 +102,7 @@ deploy_web() {
     --min-instances 0 \
     --max-instances 4 \
     --timeout 900 \
-    --set-env-vars="ADMIN_API_HOST=${ADMIN_API_HOST}" \
+    --set-env-vars="ADMIN_API_HOST=${ADMIN_API_HOST},CONSULTA_API_HOST=${CONSULTA_API_HOST}" \
     --quiet
 }
 

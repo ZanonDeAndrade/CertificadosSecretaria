@@ -65,7 +65,7 @@ function ValidateCertificate() {
       )}
 
       {result && (
-        result.valid ? (
+        result.valid && !result.revoked ? (
           <div className="rounded-[1.75rem] border border-emerald-200 bg-emerald-50/90 p-5 space-y-2">
             <p className="text-sm font-semibold uppercase tracking-[0.2em] text-emerald-700">
               Certificado válido
@@ -78,6 +78,15 @@ function ValidateCertificate() {
                 {result.certificate_text}
               </div>
             )}
+          </div>
+        ) : result.revoked ? (
+          <div className="rounded-[1.75rem] border border-rose-200 bg-rose-50/90 p-5 space-y-2">
+            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-rose-700">
+              Certificado revogado
+            </p>
+            <p className="text-lg font-semibold text-slate-950">{result.name}</p>
+            <p className="text-sm text-slate-600">{result.event}</p>
+            <p className="text-sm text-slate-500">{result.issued_at ?? result.date}</p>
           </div>
         ) : (
           <div className="rounded-[1.75rem] border border-rose-200 bg-rose-50/90 p-4 text-sm font-medium text-rose-800">

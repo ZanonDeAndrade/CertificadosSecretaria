@@ -7,6 +7,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://certificados-admin-api-hj3rwyicha-ue.a.run.app/:path*"
+    },
+    {
+      "source": "/consulta-api/:path*",
+      "destination": "https://certificados-consulta-hj3rwyicha-ue.a.run.app/:path*"
     }
   ],
   "headers": [
