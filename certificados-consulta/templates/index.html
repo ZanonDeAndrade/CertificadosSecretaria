@@ -81,9 +81,7 @@
                   <form action="/public/certificates/download-by-name" method="post">
                     <input type="hidden" name="nome" value="{{ cert.participant_name }}" />
                     <input type="hidden" name="challenge" value="{{ cert.download_challenge }}" />
-                    <label class="field-label" for="documento-{{ loop.index }}">Documento ou matrícula</label>
-                    <input id="documento-{{ loop.index }}" name="documento" type="password" required autocomplete="off" />
-                    <button type="submit" class="btn btn-download">Confirmar e baixar</button>
+                    <button type="submit" class="btn btn-download">Baixar PDF</button>
                   </form>
                 {% endif %}
               {% endif %}

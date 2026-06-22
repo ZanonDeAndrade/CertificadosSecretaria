@@ -16,6 +16,15 @@ ADMIN_USER = "secretaria"
 ADMIN_PASS = "senha-super-secreta"
 
 
+@pytest.fixture(autouse=True)
+def isolate_database_credentials(monkeypatch):
+    """Never let a developer's real DATABASE_URL leak into unit tests."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL_FILE", raising=False)
+    monkeypatch.delenv("JWT_SECRET_FILE", raising=False)
+    monkeypatch.delenv("DOCUMENT_HASH_SECRET_FILE", raising=False)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient

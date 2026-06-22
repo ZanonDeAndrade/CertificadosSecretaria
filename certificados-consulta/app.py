@@ -40,7 +40,6 @@ from fastapi.templating import Jinja2Templates  # noqa: E402
 from database import db  # noqa: E402
 from database.privacy import (  # noqa: E402
     certificate_challenge,
-    hash_matches_document,
     normalize_name,
     validate_production_privacy_config,
 )
@@ -67,7 +66,6 @@ PUBLIC_NAME_MIN_LENGTH = _int_setting("PUBLIC_NAME_SEARCH_MIN_LENGTH", 3, 2, 20)
 PUBLIC_MAX_PAGE = _int_setting("PUBLIC_MAX_PAGE", 100, 1, 10_000)
 PUBLIC_RATE_LIMIT_REQUESTS = _int_setting("PUBLIC_RATE_LIMIT_REQUESTS", 60)
 PUBLIC_RATE_LIMIT_WINDOW_SECONDS = _int_setting("PUBLIC_RATE_LIMIT_WINDOW_SECONDS", 60)
-PUBLIC_DOCUMENT_ATTEMPTS = _int_setting("PUBLIC_DOCUMENT_ATTEMPTS_PER_WINDOW", 5)
 
 
 def _valid_name_term(value: str) -> bool:
@@ -192,17 +190,6 @@ def rate_limit(request: Request) -> None:
         )
 
 
-def _limit_document_attempt(request: Request, challenge: str) -> None:
-    identity = f"{resolve_client_ip(request)}:{challenge}"
-    allowed, retry_after = db.consume_public_rate_limit(
-        _bucket_key("document", identity),
-        now=datetime.now(timezone.utc),
-        window_seconds=PUBLIC_RATE_LIMIT_WINDOW_SECONDS,
-        limit=PUBLIC_DOCUMENT_ATTEMPTS,
-    )
-    if not allowed:
-        raise HTTPException(429, "Muitas tentativas. Tente novamente em instantes.", headers={"Retry-After": str(retry_after)})
-
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
@@ -277,6 +264,16 @@ db.cleanup_public_rate_limits(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def readiness() -> dict[str, str]:
+    try:
+        db.check_connection()
+    except Exception as exc:  # noqa: BLE001 - never expose database details
+        LOGGER.error("Readiness do banco falhou: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Banco indisponível.") from exc
+    return {"status": "ready"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -460,20 +457,18 @@ async def public_download(code: str, _: None = Depends(rate_limit)) -> Streaming
 async def public_download_by_name(request: Request, _: None = Depends(rate_limit)) -> StreamingResponse:
     form = await request.form()
     name = str(form.get("nome") or "")
-    document = str(form.get("documento") or "")
     challenge = str(form.get("challenge") or "")
-    _limit_document_attempt(request, challenge)
     selected = None
-    if _valid_name_term(name) and document and challenge:
+    if _valid_name_term(name) and challenge:
         for cert in db.certificates_by_normalized_name(name):
             expected = certificate_challenge(cert["unique_code"])
-            if hmac.compare_digest(expected, challenge) and hash_matches_document(
-                cert.get("participant_document_hash"), document
-            ) and (cert.get("status") or "ativo") == "ativo":
+            if hmac.compare_digest(expected, challenge) and (
+                cert.get("status") or "ativo"
+            ) == "ativo":
                 selected = cert
                 break
     if selected is None:
-        raise HTTPException(404, "Não foi possível validar os dados informados.")
+        raise HTTPException(404, "Certificado não encontrado.")
     return _stream_public_certificate(selected["unique_code"])
 
 

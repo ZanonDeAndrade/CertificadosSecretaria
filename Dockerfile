@@ -22,10 +22,16 @@ RUN pip install --upgrade pip && \
 
 COPY . /app
 
+# Entrypoint script must be executable (the exec bit may be lost on Windows).
+RUN chmod +x /app/deploy/entrypoint.sh
+
 # Usuário não-root.
 RUN useradd -m appuser && chown -R appuser /app
 USER appuser
 
 EXPOSE 8000 8001
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# O comando (uvicorn admin / uvicorn consulta / alembic) é definido no compose.
+# Cloud Run / single-process platforms: use the image as-is (CMD picks the app
+# via APP_TARGET and binds $PORT). Docker Compose overrides `command:` per
+# service (admin :8000 / consulta :8001), so this default is ignored there.
+CMD ["/app/deploy/entrypoint.sh"]

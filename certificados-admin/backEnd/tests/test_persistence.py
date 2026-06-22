@@ -59,6 +59,26 @@ def test_normalize_postgres_url_uses_psycopg_driver():
     assert db_config.normalize_database_url("sqlite:///x.db") == "sqlite:///x.db"
 
 
+def test_database_url_can_be_loaded_from_secret_file(monkeypatch, tmp_path):
+    secret = tmp_path / "database-url.txt"
+    secret.write_text("postgresql://u:p@h/db?sslmode=require\n", encoding="utf-8")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL_FILE", str(secret))
+
+    assert db_config.get_database_url() == (
+        "postgresql+psycopg://u:p@h/db?sslmode=require"
+    )
+
+
+def test_direct_database_url_wins_over_secret_file(monkeypatch, tmp_path):
+    secret = tmp_path / "database-url.txt"
+    secret.write_text("postgresql://file:file@file/db", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://env:env@env/db")
+    monkeypatch.setenv("DATABASE_URL_FILE", str(secret))
+
+    assert db_config.get_database_url() == "postgresql+psycopg://env:env@env/db"
+
+
 # ── Repository CRUD ─────────────────────────────────────────────────────────────
 
 
@@ -179,6 +199,7 @@ def test_session_scope_rolls_back_on_error(tmp_path):
 def test_require_production_database_raises_without_url(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL_FILE", raising=False)
     with pytest.raises(db_config.ConfigError):
         db_config.require_production_database()
 

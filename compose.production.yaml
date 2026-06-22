@@ -1,0 +1,152 @@
+name: certificados
+
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ${APP_IMAGE:-certificados-app:latest}
+  env_file:
+    - ${PRODUCTION_ENV_FILE:-.env.production}
+  environment:
+    APP_ENV: production
+    DATABASE_URL_FILE: /run/secrets/database_url
+    GOOGLE_OAUTH_TOKEN_FILE: /run/secrets/google_oauth_token
+    DOCUMENT_HASH_SECRET_FILE: /run/secrets/document_hash_secret
+  secrets:
+    - database_url
+    - google_oauth_token
+    - document_hash_secret
+  networks:
+    - backend
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # Executar explicitamente uma vez por release:
+  # docker compose --env-file .env.production -f compose.production.yaml \
+  #   --profile tools run --rm migrate
+  migrate:
+    <<: *app-base
+    profiles: ["tools"]
+    restart: "no"
+    command: >
+      sh -ec "alembic upgrade head &&
+              python certificados-admin/backEnd/seed_template.py"
+
+  admin:
+    <<: *app-base
+    environment:
+      APP_ENV: production
+      DATABASE_URL_FILE: /run/secrets/database_url
+      GOOGLE_OAUTH_TOKEN_FILE: /run/secrets/google_oauth_token
+      DOCUMENT_HASH_SECRET_FILE: /run/secrets/document_hash_secret
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+    secrets:
+      - database_url
+      - google_oauth_token
+      - document_hash_secret
+      - jwt_secret
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000
+      --app-dir certificados-admin/backEnd --workers ${ADMIN_WORKERS:-1}
+      --proxy-headers --forwarded-allow-ips="*"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  consulta:
+    <<: *app-base
+    command: >
+      uvicorn app:app --host 0.0.0.0 --port 8001
+      --app-dir certificados-consulta --workers ${CONSULTA_WORKERS:-1}
+      --proxy-headers --forwarded-allow-ips="*"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_API_BASE_URL: /api
+    image: ${WEB_IMAGE:-certificados-web:latest}
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      admin:
+        condition: service_healthy
+      consulta:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    image: caddy:2.10-alpine
+    env_file:
+      - ${PRODUCTION_ENV_FILE:-.env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${CADDY_CONFIG_FILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - frontend
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  backup:
+    image: postgres:16-alpine
+    profiles: ["tools"]
+    secrets:
+      - database_url
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        pg_dump "$$(cat /run/secrets/database_url)" |
+        gzip > "/backups/certificados_$$(date +%Y%m%d_%H%M%S).sql.gz"
+    restart: "no"
+
+secrets:
+  database_url:
+    file: ${DATABASE_URL_SECRET_FILE:?Defina DATABASE_URL_SECRET_FILE}
+  google_oauth_token:
+    file: ${GOOGLE_OAUTH_TOKEN_SECRET_FILE:?Defina GOOGLE_OAUTH_TOKEN_SECRET_FILE}
+  jwt_secret:
+    file: ${JWT_SECRET_FILE_HOST:?Defina JWT_SECRET_FILE_HOST}
+  document_hash_secret:
+    file: ${DOCUMENT_HASH_SECRET_FILE_HOST:?Defina DOCUMENT_HASH_SECRET_FILE_HOST}
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  frontend:
+  backend:

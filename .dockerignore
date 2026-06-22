@@ -23,7 +23,13 @@ storage/pdfs/
 certificados-admin/backEnd/output/
 certificados-admin/backEnd/visual_template_backgrounds/
 
-# Segredos
+# Segredos — NUNCA vão para a imagem
 .env
+.env.production
+secrets/
 *service-account*.json
+*service_account*.json
 credentials*.json
+client_secret*.json
+*oauth*token*.json
+token.json

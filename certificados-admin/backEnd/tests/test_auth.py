@@ -69,6 +69,7 @@ def _new_client(client: TestClient) -> TestClient:
 
 def test_health_is_public(client):
     assert client.get("/health").status_code == 200
+    assert client.get("/health/ready").status_code == 200
 
 
 def test_admin_has_no_public_validation_route(client):
@@ -324,6 +325,19 @@ def test_production_rejects_missing_or_weak_auth_configuration(monkeypatch):
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
     with pytest.raises(RuntimeError):
         auth.require_production_auth_config()
+
+
+def test_production_accepts_jwt_secret_file(monkeypatch, tmp_path):
+    import auth
+
+    secret_file = tmp_path / "jwt_secret"
+    secret_file.write_text(TEST_SECRET, encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.setenv("JWT_SECRET_FILE", str(secret_file))
+
+    auth.require_production_auth_config()
 
 
 def test_application_startup_calls_fail_closed_auth_validation(monkeypatch):

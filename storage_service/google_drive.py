@@ -1,7 +1,7 @@
 """Google Drive storage backend (production).
 
-Uses a **Service Account** and the Google Drive API. Credentials come strictly
-from environment variables (see ``config.load_service_account_info``); nothing
+Uses either a **Service Account** or an offline **user OAuth token** with the
+Google Drive API. Credentials come strictly from environment variables; nothing
 is read from or written to the database, and no secret is ever logged.
 
 Files are uploaded into ``GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID`` and are **not**
@@ -58,7 +58,6 @@ class GoogleDriveStorage(CertificateStorage):
 
     def _build_service(self) -> Any:
         try:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
         except ImportError as exc:  # pragma: no cover - depends on env
             raise StorageConfigError(
@@ -66,11 +65,44 @@ class GoogleDriveStorage(CertificateStorage):
                 "'google-api-python-client' e 'google-auth'."
             ) from exc
 
-        info = config.load_service_account_info()
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=SCOPES
-        )
+        if config.get_drive_auth_mode() == "oauth_user":
+            creds = self._build_oauth_credentials()
+        else:
+            try:
+                from google.oauth2 import service_account
+            except ImportError as exc:  # pragma: no cover - depends on env
+                raise StorageConfigError("Biblioteca 'google-auth' ausente.") from exc
+            info = config.load_service_account_info()
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=SCOPES
+            )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    @staticmethod
+    def _build_oauth_credentials() -> Any:
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise StorageConfigError("Biblioteca 'google-auth' ausente.") from exc
+
+        try:
+            creds = Credentials.from_authorized_user_info(
+                config.load_oauth_token_info(), scopes=SCOPES
+            )
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+        except StorageConfigError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize credential failures
+            raise StorageConfigError(
+                "Token OAuth do Google Drive inválido, expirado ou revogado."
+            ) from exc
+        if not creds.valid:
+            raise StorageConfigError(
+                "Token OAuth do Google Drive inválido, expirado ou revogado."
+            )
+        return creds
 
     # ── Operations ──────────────────────────────────────────────────────────────
 

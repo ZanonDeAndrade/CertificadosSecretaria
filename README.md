@@ -88,13 +88,17 @@ Veja todos os nomes e descrições em [.env.example](.env.example). Principais:
 |---|---|---|
 | `APP_ENV` | `development` | `development`/`production` (cookie Secure + fail-closed) |
 | `DATABASE_URL` | — | **PostgreSQL em produção (obrigatório)**; vazio em dev → SQLite |
+| `DATABASE_URL_FILE` | — | arquivo secreto contendo a connection string; alternativa a `DATABASE_URL` |
 | `DB_PATH` | `database/certificates.db` | arquivo SQLite **só** quando `DATABASE_URL` vazio (dev) |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | pool de conexões (PostgreSQL) |
 | `STORAGE_PROVIDER` | `local` (dev) / `google_drive` (prod) | em produção deve ser `google_drive` (sem fallback) |
 | `LOCAL_STORAGE_PATH` | `storage/` | raiz dos PDFs locais (`<path>/pdfs`) |
+| `GOOGLE_DRIVE_AUTH_MODE` | `service_account` | `service_account` (Drive compartilhado) ou `oauth_user` (Meu Drive pessoal) |
 | `GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID` | — | pasta do Drive onde os PDFs são salvos |
 | `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` | — | credenciais da Service Account em base64 (produção) |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | — | caminho do JSON da Service Account (dev local) |
+| `GOOGLE_OAUTH_TOKEN_JSON_BASE64` | — | token offline OAuth em base64 (produção/container) |
+| `GOOGLE_OAUTH_TOKEN_FILE` | — | caminho do token OAuth criado pelo utilitário (dev local) |
 | `PUBLIC_VALIDATION_BASE_URL` | `http://localhost:8001` (dev) | URL base da validação pública; explícita e HTTPS em produção |
 | `ADMIN_FRONTEND_URL` | `http://localhost:5173` | origem administrativa permitida no CORS/CSRF; HTTPS obrigatório em produção |
 | `CORS_ALLOWED_ORIGINS` | — | allowlist administrativa que substitui `ADMIN_FRONTEND_URL`; nunca aceita `*` |
@@ -390,6 +394,44 @@ Os PDFs ficam em `storage/pdfs/` e o download é servido pelo backend.
 
 ### Produção (GoogleDriveStorage)
 
+O backend aceita dois modos de autenticação:
+
+- `service_account`: indicado para um Drive compartilhado do Google Workspace;
+- `oauth_user`: indicado para uma conta pessoal, usando a cota do próprio usuário.
+
+#### Conta pessoal via OAuth
+
+1. No Google Cloud, configure a tela de consentimento OAuth e crie um cliente do
+   tipo **Aplicativo para computador**. Baixe o JSON do cliente fora do repo.
+2. Instale as dependências e execute a autorização única:
+
+```powershell
+python -m pip install -r certificados-admin/backEnd/requirements.txt
+python certificados-admin/backEnd/authorize_google_drive.py `
+  --client-file "C:\segredos\client_secret.json" `
+  --token-file "C:\segredos\certificados-oauth-token.json"
+```
+
+O navegador abrirá para o login. O utilitário usa o escopo limitado
+`drive.file`, cria uma pasta privada no Meu Drive e imprime seu ID. Configure:
+
+```env
+STORAGE_PROVIDER=google_drive
+GOOGLE_DRIVE_AUTH_MODE=oauth_user
+GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID=<id-impresso>
+GOOGLE_OAUTH_TOKEN_FILE=C:\segredos\certificados-oauth-token.json
+```
+
+Ao renovar ou rotacionar o token, reutilize a pasta existente com
+`--folder-id <id-da-pasta>` para não criar uma pasta duplicada.
+
+Para container/produção, use `GOOGLE_OAUTH_TOKEN_JSON_BASE64` no lugar do
+caminho. Nunca comite o cliente OAuth nem o token. O app deve ser publicado na
+tela de consentimento; tokens de aplicativos externos mantidos em modo de teste
+podem expirar rapidamente.
+
+#### Service Account / Drive compartilhado
+
 **1) Criar a Service Account**
 
 1. Acesse o [Google Cloud Console](https://console.cloud.google.com/) e crie (ou
@@ -620,6 +662,12 @@ imprime um relatório final (migrados / ignorados / não encontrados / falhas).
 > referenciados pelo banco — podem ser removidos manualmente após conferência.
 
 ## Deploy seguro (resumo)
+
+Para o deploy atual em **Google Compute Engine + servidor da faculdade**, ambos
+com Neon e Google Drive OAuth, siga
+[docs/DEPLOY_PRODUCAO_DUAL.md](docs/DEPLOY_PRODUCAO_DUAL.md) e use
+`compose.production.yaml`. O `docker-compose.yml` antigo é somente para
+desenvolvimento/integração HTTP local.
 
 Admin e consulta podem rodar em **deploys separados**, compartilhando o **mesmo
 PostgreSQL** (`DATABASE_URL`) e os **mesmos arquivos privados no Drive**:

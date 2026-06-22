@@ -111,14 +111,14 @@ def main(argv: list[str]) -> int:
 
     report = run_migration(dry_run=args.dry_run, limit=args.limit)
 
-    print("\n──────── Relatório da migração ────────")
+    print("\n-------- Relatório da migração --------")
     print(f"  Modo:        {'DRY-RUN (nada enviado)' if args.dry_run else 'EXECUÇÃO'}")
     print(f"  Total alvo:  {report['total']}")
     print(f"  Migrados:    {report['migrated']}")
     print(f"  Ignorados:   {report['skipped']} (já no Drive)")
     print(f"  Não encontrados: {report['not_found']}")
     print(f"  Falhas:      {report['failed']}")
-    print("───────────────────────────────────────")
+    print("---------------------------------------")
     return 1 if report["failed"] else 0
 
 

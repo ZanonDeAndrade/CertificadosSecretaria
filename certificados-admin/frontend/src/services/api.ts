@@ -9,8 +9,14 @@ export interface ValidationResult {
   date?: string;
 }
 
+// In production builds the API is reached at a same-origin "/api" prefix — a
+// reverse proxy (Vercel rewrite in the cloud, nginx on the local server)
+// forwards it to the admin backend. This keeps the auth cookie first-party in
+// every browser. Dev falls back to the local backend. An explicit
+// VITE_API_BASE_URL always wins.
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.trim() || "http://localhost:8000";
+  import.meta.env.VITE_API_BASE_URL?.trim() ||
+  (import.meta.env.PROD ? "/api" : "http://localhost:8000");
 
 const api = axios.create({
   baseURL: API_BASE_URL,

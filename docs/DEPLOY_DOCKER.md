@@ -1,3 +1,10 @@
+# Guia histórico de teste HTTP (não usar em produção)
+
+> **Substituído:** para Google Cloud ou servidor da faculdade em produção, use
+> [DEPLOY_PRODUCAO_DUAL.md](DEPLOY_PRODUCAO_DUAL.md) com
+> `compose.production.yaml`, Neon, Drive OAuth, Docker secrets e HTTPS automático.
+> O conteúdo abaixo permanece apenas como referência da antiga stack local.
+
 # Deploy no servidor da faculdade (Docker) — guia detalhado
 
 Servidor-alvo: **Linux, 2 núcleos, 2–4 GB RAM, 20–25 GB disco**.

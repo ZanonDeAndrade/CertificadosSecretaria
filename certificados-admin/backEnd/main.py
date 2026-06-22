@@ -295,6 +295,15 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/health/ready")
+    def readiness() -> dict[str, str]:
+        try:
+            db.check_connection()
+        except Exception as exc:  # noqa: BLE001 - never expose database details
+            LOGGER.error("Readiness do banco falhou: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Banco indisponível.") from exc
+        return {"status": "ready"}
+
     @app.get("/metrics")
     async def metrics_endpoint(_: dict = Depends(auth.get_current_admin)) -> dict:
         """In-process counters (no PII): generation, failures, compensations,

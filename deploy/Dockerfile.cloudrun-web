@@ -1,0 +1,23 @@
+FROM node:20-alpine AS build
+
+WORKDIR /frontend
+COPY certificados-admin/frontend/package*.json ./
+RUN npm ci
+COPY certificados-admin/frontend/ ./
+
+# The browser always calls the panel origin. Nginx proxies /api to the private
+# application endpoint configured at container runtime.
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+RUN npm run build
+
+FROM nginx:1.27-alpine
+
+ENV PORT=8080 \
+    ADMIN_API_HOST=certificados-admin-api-hj3rwyicha-ue.a.run.app
+
+COPY --from=build /frontend/dist /usr/share/nginx/html
+COPY deploy/nginx.cloudrun.conf /etc/nginx/templates/default.conf.template
+
+EXPOSE 8080
+

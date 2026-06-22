@@ -25,7 +25,7 @@ def normalize_document(value: str | None) -> str:
 
 
 def _secret() -> bytes:
-    raw = (os.getenv("DOCUMENT_HASH_SECRET") or "").strip()
+    raw = config.read_secret("DOCUMENT_HASH_SECRET")
     if not raw:
         if config.is_production():
             raise config.ConfigError("APP_ENV=production exige DOCUMENT_HASH_SECRET forte.")
@@ -36,7 +36,7 @@ def _secret() -> bytes:
 def validate_production_privacy_config() -> None:
     if not config.is_production():
         return
-    raw = (os.getenv("DOCUMENT_HASH_SECRET") or "").strip()
+    raw = config.read_secret("DOCUMENT_HASH_SECRET")
     if len(raw.encode("utf-8")) < 32 or len(set(raw)) < 12 or re.fullmatch(r"(.)\1+", raw):
         raise config.ConfigError(
             "DOCUMENT_HASH_SECRET deve ter ao menos 32 bytes e alta entropia em produção."

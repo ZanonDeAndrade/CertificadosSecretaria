@@ -31,6 +31,7 @@ import bcrypt
 import jwt
 from fastapi import HTTPException, Request
 
+from database import config as db_config  # noqa: E402
 from database import db  # noqa: E402
 
 LOGGER = logging.getLogger("certificados.auth")
@@ -94,7 +95,7 @@ def validate_jwt_secret(secret: str) -> None:
 
 
 def _jwt_secret() -> str:
-    secret = (os.getenv("JWT_SECRET") or "").strip()
+    secret = db_config.read_secret("JWT_SECRET")
     if secret:
         if _is_production():
             validate_jwt_secret(secret)
@@ -130,7 +131,7 @@ def require_production_secret() -> None:
     """Backward-compatible entry point for startup validation."""
     if not _is_production():
         return
-    secret = (os.getenv("JWT_SECRET") or "").strip()
+    secret = db_config.read_secret("JWT_SECRET")
     if not secret:
         raise RuntimeError("APP_ENV=production exige JWT_SECRET definido.")
     validate_jwt_secret(secret)
@@ -513,7 +514,9 @@ def validate_mutating_request_origin(request: Request, allowed_origins: list[str
 
 def seed_admin_from_env() -> None:
     username = _env("ADMIN_INITIAL_USERNAME", "ADMIN_USERNAME")
-    password = os.getenv("ADMIN_INITIAL_PASSWORD") or os.getenv("ADMIN_PASSWORD") or ""
+    password = db_config.read_secret("ADMIN_INITIAL_PASSWORD") or db_config.read_secret(
+        "ADMIN_PASSWORD"
+    )
     role = _env("ADMIN_INITIAL_ROLE", "ADMIN_ROLE") or "admin"
     if not username or not password:
         return

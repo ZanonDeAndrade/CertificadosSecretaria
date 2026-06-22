@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file
+      - deploy/Dockerfile.cloudrun-web
+      - --tag
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}

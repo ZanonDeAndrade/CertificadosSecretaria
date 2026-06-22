@@ -9,6 +9,7 @@ venv/
 
 # Variáveis de ambiente
 .env
+.env.production
 
 # Credenciais do Google (Service Account) — NUNCA comitar
 service-account*.json
@@ -16,6 +17,9 @@ service-account*.json
 *.serviceaccount.json
 credentials*.json
 gcp-*.json
+client_secret*.json
+*oauth*token*.json
+token.json
 
 # Frontend do admin
 certificados-admin/frontend/node_modules/

@@ -85,6 +85,33 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
+def read_secret(name: str) -> str:
+    """Read ``NAME`` or ``NAME_FILE`` without logging the secret value."""
+    direct = (os.getenv(name) or "").strip()
+    if direct:
+        return direct
+    file_path = (os.getenv(f"{name}_FILE") or "").strip()
+    if not file_path:
+        return ""
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        raise ConfigError(f"{name}_FILE não encontrado: {path}")
+    value = path.read_text("utf-8").strip()
+    if not value or "\n" in value or "\r" in value:
+        raise ConfigError(f"{name}_FILE deve conter somente um valor.")
+    return value
+
+
+def get_configured_database_url() -> str:
+    """Return the explicitly configured URL, supporting a secret file.
+
+    ``DATABASE_URL`` wins. ``DATABASE_URL_FILE`` is intended for Docker/Kubernetes
+    secrets and local secure files so the password does not need to live in the
+    repository-level ``.env``.
+    """
+    return read_secret("DATABASE_URL")
+
+
 def get_database_url() -> str | None:
     """Return the effective DATABASE_URL, or ``None`` when unresolved in prod.
 
@@ -92,7 +119,7 @@ def get_database_url() -> str | None:
     - else, in production → ``None`` (caller must fail-closed).
     - else (dev/test) → local SQLite URL.
     """
-    raw = (os.getenv("DATABASE_URL") or "").strip()
+    raw = get_configured_database_url()
     if raw:
         return normalize_database_url(raw)
     if is_production():
@@ -134,10 +161,11 @@ def require_production_database() -> None:
     """Abort startup in production when DATABASE_URL is missing or not PostgreSQL."""
     if not is_production():
         return
-    url = (os.getenv("DATABASE_URL") or "").strip()
+    url = get_configured_database_url()
     if not url:
         raise ConfigError(
-            "APP_ENV=production exige DATABASE_URL (PostgreSQL). Defina DATABASE_URL."
+            "APP_ENV=production exige PostgreSQL. Defina DATABASE_URL ou "
+            "DATABASE_URL_FILE."
         )
     normalized = normalize_database_url(url)
     if not normalized.startswith("postgresql"):

@@ -234,7 +234,7 @@ def test_public_download_unknown_returns_404(public):
     assert client.get("/public/certificates/CERT-2026-NOPE/download").status_code == 404
 
 
-def test_name_search_is_accent_insensitive_and_html_hides_code_and_direct_link(public):
+def test_name_search_is_accent_insensitive_and_html_offers_download(public):
     client, db, tmp_path = public
     _seed_certificate(db, tmp_path, name="João D'Ávila")
 
@@ -245,7 +245,8 @@ def test_name_search_is_accent_insensitive_and_html_hides_code_and_direct_link(p
     assert "João D&#39;Ávila" in html
     assert CODE not in html
     assert "/public/certificates/CERT-" not in html
-    assert "Documento ou matrícula" in html
+    assert "Documento ou matrícula" not in html
+    assert "Baixar PDF" in html
 
 
 @pytest.mark.parametrize("term", ["%", "_", "\\", "ab"])
@@ -272,24 +273,13 @@ def test_extreme_page_is_bounded(public):
     assert body["items"] == []
 
 
-def test_name_download_requires_correct_document_and_never_reveals_it(public, caplog):
+def test_name_download_does_not_require_document_and_never_reveals_it(public):
     client, db, tmp_path = public
     _seed_certificate(db, tmp_path)
     item = client.get("/public/search", params={"nome": "João"}).json()["items"][0]
     form = {"nome": "João Público", "challenge": item["download_challenge"]}
 
-    wrong = client.post(
-        "/public/certificates/download-by-name",
-        data={**form, "documento": "11111111111"},
-    )
-    assert wrong.status_code == 404
-    assert wrong.json()["detail"] == "Não foi possível validar os dados informados."
-    assert "11111111111" not in caplog.text
-
-    valid = client.post(
-        "/public/certificates/download-by-name",
-        data={**form, "documento": "999.999.999-99"},
-    )
+    valid = client.post("/public/certificates/download-by-name", data=form)
     assert valid.status_code == 200
     assert valid.content.startswith(b"%PDF")
     stored = db.get_by_code(CODE)
@@ -297,20 +287,18 @@ def test_name_download_requires_correct_document_and_never_reveals_it(public, ca
     assert stored["participant_document_hash"]
 
 
-def test_name_download_unknown_document_and_unknown_challenge_are_indistinguishable(public):
+def test_name_download_rejects_missing_or_unknown_challenge(public):
     client, db, tmp_path = public
     _seed_certificate(db, tmp_path)
-    item = client.get("/public/search", params={"nome": "João"}).json()["items"][0]
-    common = {"nome": "João Público", "documento": "00000000000"}
-    wrong_document = client.post(
+    missing_challenge = client.post(
         "/public/certificates/download-by-name",
-        data={**common, "challenge": item["download_challenge"]},
+        data={"nome": "João Público"},
     )
     wrong_challenge = client.post(
         "/public/certificates/download-by-name",
-        data={**common, "challenge": "x" * 43},
+        data={"nome": "João Público", "challenge": "x" * 43},
     )
-    assert (wrong_document.status_code, wrong_document.json()) == (
+    assert (missing_challenge.status_code, missing_challenge.json()) == (
         wrong_challenge.status_code,
         wrong_challenge.json(),
     )

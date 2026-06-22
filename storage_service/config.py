@@ -71,6 +71,29 @@ def get_drive_folder_id() -> str | None:
     return value or None
 
 
+def get_drive_auth_mode() -> str:
+    """Return the credential strategy used by the Google Drive backend.
+
+    ``service_account`` remains the compatibility default. ``oauth_user`` uses
+    an offline OAuth token belonging to a real Google user, which allows the
+    application to consume that user's personal Drive quota.
+    """
+    raw = (os.getenv("GOOGLE_DRIVE_AUTH_MODE") or "service_account").strip().lower()
+    aliases = {
+        "service_account": "service_account",
+        "service-account": "service_account",
+        "oauth": "oauth_user",
+        "oauth_user": "oauth_user",
+        "oauth-user": "oauth_user",
+    }
+    try:
+        return aliases[raw]
+    except KeyError as exc:
+        raise StorageConfigError(
+            "GOOGLE_DRIVE_AUTH_MODE deve ser 'service_account' ou 'oauth_user'."
+        ) from exc
+
+
 def normalize_public_validation_base_url(value: str) -> str:
     """Validate and normalize the public origin/base path used by QR links.
 
@@ -205,6 +228,46 @@ def load_service_account_info() -> dict[str, Any]:
     )
 
 
+def load_oauth_token_info() -> dict[str, Any]:
+    """Load an authorized-user OAuth token without logging or persisting it.
+
+    The token is generated once by ``authorize_google_drive.py``. Production
+    should inject it as base64; a file path is convenient for local setup.
+    """
+    b64 = (os.getenv("GOOGLE_OAUTH_TOKEN_JSON_BASE64") or "").strip()
+    if b64:
+        try:
+            info = json.loads(base64.b64decode(b64))
+        except (binascii.Error, ValueError, json.JSONDecodeError) as exc:
+            raise StorageConfigError(
+                "GOOGLE_OAUTH_TOKEN_JSON_BASE64 inválido (base64/JSON)."
+            ) from exc
+    else:
+        file_path = (os.getenv("GOOGLE_OAUTH_TOKEN_FILE") or "").strip()
+        if not file_path:
+            raise StorageConfigError(
+                "Token OAuth do Google Drive ausente. Defina "
+                "GOOGLE_OAUTH_TOKEN_JSON_BASE64 ou GOOGLE_OAUTH_TOKEN_FILE."
+            )
+        path = Path(file_path).expanduser()
+        if not path.is_file():
+            raise StorageConfigError(f"GOOGLE_OAUTH_TOKEN_FILE não encontrado: {path}")
+        try:
+            info = json.loads(path.read_text("utf-8"))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise StorageConfigError(
+                "GOOGLE_OAUTH_TOKEN_FILE não contém JSON válido."
+            ) from exc
+
+    required = {"refresh_token", "token_uri", "client_id", "client_secret"}
+    missing = sorted(key for key in required if not info.get(key))
+    if missing:
+        raise StorageConfigError(
+            "Token OAuth incompleto; campos ausentes: " + ", ".join(missing)
+        )
+    return info
+
+
 # ── Fail-closed startup validation (production) ────────────────────────────────
 
 
@@ -212,7 +275,7 @@ def validate_production_storage() -> None:
     """Abort startup in production unless Google Drive is fully configured.
 
     Requires ``STORAGE_PROVIDER=google_drive``, a folder id and loadable
-    service-account credentials. No silent fallback to local storage is allowed.
+    credentials for the selected auth mode. No local fallback is allowed.
     """
     if not is_production():
         return
@@ -226,5 +289,8 @@ def validate_production_storage() -> None:
         raise StorageConfigError(
             "Em produção, GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID é obrigatório."
         )
-    # Raises StorageConfigError if neither credential source is usable.
-    load_service_account_info()
+    auth_mode = get_drive_auth_mode()
+    if auth_mode == "oauth_user":
+        load_oauth_token_info()
+    else:
+        load_service_account_info()

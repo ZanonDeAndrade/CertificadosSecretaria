@@ -76,18 +76,25 @@ def _current_database_url() -> str:
     from the (monkeypatch-friendly) module-level ``DATABASE_PATH``. In production
     a missing ``DATABASE_URL`` is a hard error (fail-closed).
     """
-    raw = (os.getenv("DATABASE_URL") or "").strip()
+    raw = config.get_configured_database_url()
     if raw:
         return config.normalize_database_url(raw)
     if config.is_production():
         raise config.ConfigError(
-            "APP_ENV=production exige DATABASE_URL (PostgreSQL)."
+            "APP_ENV=production exige DATABASE_URL ou DATABASE_URL_FILE (PostgreSQL)."
         )
     return f"sqlite:///{Path(DATABASE_PATH).as_posix()}"
 
 
 def _session():
     return engine.session_scope(_current_database_url())
+
+
+def check_connection() -> None:
+    """Execute a minimal database round-trip for readiness checks."""
+    eng = engine.get_engine(_current_database_url())
+    with eng.connect() as connection:
+        connection.execute(text("SELECT 1")).scalar_one()
 
 
 # ── Legacy SQLite auto-migration (dev only) ────────────────────────────────────

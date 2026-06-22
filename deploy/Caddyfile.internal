@@ -1,0 +1,33 @@
+{
+	admin off
+}
+
+{$PUBLIC_DOMAIN} {
+	tls internal
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy web:80 {
+		health_uri /health/ready
+		health_interval 30s
+	}
+}
+
+{$ADMIN_DOMAIN} {
+	tls internal
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy web:8080 {
+		health_uri /api/health/ready
+		health_interval 30s
+	}
+}

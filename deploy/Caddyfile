@@ -1,0 +1,44 @@
+{
+	email {$TLS_EMAIL}
+	admin off
+}
+
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+	log {
+		output stdout
+		format json
+	}
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy web:80 {
+		health_uri /health/ready
+		health_interval 30s
+		health_timeout 10s
+	}
+}
+
+{$ADMIN_DOMAIN} {
+	encode zstd gzip
+	log {
+		output stdout
+		format json
+	}
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+	reverse_proxy web:8080 {
+		health_uri /api/health/ready
+		health_interval 30s
+		health_timeout 10s
+	}
+}

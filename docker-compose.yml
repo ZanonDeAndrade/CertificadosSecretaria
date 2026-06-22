@@ -1,5 +1,6 @@
-# Stack de produção: PostgreSQL + admin (API) + consulta (público) + web (nginx).
-# PDFs vão para o Google Drive (STORAGE_PROVIDER=google_drive no .env).
+# Stack de desenvolvimento/integração com PostgreSQL local e HTTP.
+# PRODUÇÃO: use compose.production.yaml + .env.production; este arquivo publica
+# HTTP sem gateway TLS e não deve ser exposto à internet.
 #
 #   cp .env.docker.example .env   # e preencha os valores
 #   docker compose build

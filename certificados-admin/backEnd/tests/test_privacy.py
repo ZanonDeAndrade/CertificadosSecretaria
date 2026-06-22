@@ -38,6 +38,17 @@ def test_production_accepts_strong_document_secret(monkeypatch):
     validate_production_privacy_config()
 
 
+def test_production_accepts_document_secret_file(monkeypatch, tmp_path):
+    secret_file = tmp_path / "document_hash_secret"
+    secret_file.write_text("T8v!mZ2#qL9@pR4$xN7&cB1*eK6-wY3+", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("DOCUMENT_HASH_SECRET", raising=False)
+    monkeypatch.setenv("DOCUMENT_HASH_SECRET_FILE", str(secret_file))
+    monkeypatch.setenv("MINIMIZE_DOCUMENT_PLAINTEXT", "true")
+
+    validate_production_privacy_config()
+
+
 def test_production_requires_plaintext_minimization(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv(
