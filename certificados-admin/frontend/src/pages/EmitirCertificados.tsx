@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import axios from "axios";
 import {
   API_BASE_URL,
@@ -7,40 +7,74 @@ import {
   generateCertificatesFromSpreadsheet,
   validateSpreadsheet,
 } from "../services/api";
-import { listVisualTemplates } from "../services/visualTemplateApi";
-import { VisualTemplate } from "../types/template";
 
 type Step = "upload" | "preview" | "done";
+
+// Variables the secretaria may use in the body text (must mirror the backend
+// allowlist in services/certificate_text.py). Each is offered as a button that
+// inserts the token at the cursor position in the textarea.
+const BODY_VARIABLE_OPTIONS: { token: string; label: string }[] = [
+  { token: "{{nome}}", label: "Nome" },
+  { token: "{{carga_horaria}}", label: "Carga horária" },
+];
+
+// Pre-filled example shown in the field — the secretaria edits the palestra/
+// palestrante part and adjusts the wording for the batch.
+const DEFAULT_BODY_TEXT =
+  "participou da Semana de Inovação, promovida pelo Curso de Direito da " +
+  "Faculdade Antonio Meneghetti, realizada de 10 a 12 de junho de 2026, com " +
+  "carga horária total de {{carga_horaria}} horas. A atividade contou com " +
+  "palestra ministrada por NOME DO(A) PALESTRANTE.";
 
 function EmitirCertificados() {
   const [step, setStep] = useState<Step>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [dataEmissao, setDataEmissao] = useState("");
-  const [templateId, setTemplateId] = useState("");
-  const [visualTemplates, setVisualTemplates] = useState<VisualTemplate[]>([]);
+  const [textoPadrao, setTextoPadrao] = useState(DEFAULT_BODY_TEXT);
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
   const [summary, setSummary] = useState<GenerationSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    listVisualTemplates().then(setVisualTemplates).catch(() => {});
-  }, []);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const reset = () => {
     setStep("upload");
     setFile(null);
+    setTextoPadrao(DEFAULT_BODY_TEXT);
     setPreview(null);
     setSummary(null);
     setError("");
   };
 
+  // Insert a {{variable}} at the cursor position (replacing any selection), then
+  // restore focus + caret right after the inserted token.
+  const insertVariable = (token: string) => {
+    const el = textareaRef.current;
+    const start = el ? el.selectionStart : textoPadrao.length;
+    const end = el ? el.selectionEnd : textoPadrao.length;
+    setTextoPadrao(textoPadrao.slice(0, start) + token + textoPadrao.slice(end));
+    const caret = start + token.length;
+    const restore = () => {
+      const node = textareaRef.current;
+      if (node) {
+        node.focus();
+        node.setSelectionRange(caret, caret);
+      }
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+    else setTimeout(restore, 0);
+  };
+
   const handleValidate = async () => {
-    if (!file) return;
+    if (!file || !textoPadrao.trim()) return;
     setLoading(true);
     setError("");
     try {
-      const result = await validateSpreadsheet(file, dataEmissao || undefined);
+      const result = await validateSpreadsheet(
+        file,
+        dataEmissao || undefined,
+        textoPadrao,
+      );
       setPreview(result);
       setStep("preview");
     } catch (err) {
@@ -55,10 +89,11 @@ function EmitirCertificados() {
     setLoading(true);
     setError("");
     try {
+      // Send EXACTLY the same text reviewed in the preview.
       const result = await generateCertificatesFromSpreadsheet(
         file,
         dataEmissao || undefined,
-        templateId || undefined,
+        textoPadrao,
       );
       setSummary(result);
       setStep("done");
@@ -79,8 +114,9 @@ function EmitirCertificados() {
           Emitir certificados por planilha
         </h2>
         <p className="text-sm text-slate-500">
-          Colunas aceitas: <strong>nome, curso, evento, carga_horaria, data_emissao</strong>{" "}
-          (e opcionais: email, documento, data_inicio, data_fim).
+          Colunas obrigatórias: <strong>nome, carga_horaria</strong>. As demais
+          (curso, evento, datas, email…) são opcionais — escreva o restante no
+          texto padrão. Colunas extras são ignoradas.
         </p>
       </div>
 
@@ -92,15 +128,27 @@ function EmitirCertificados() {
 
       {step === "upload" && (
         <div className="space-y-4 rounded-[1.75rem] border border-slate-200/80 bg-white/88 p-6">
-          <label className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <span className="text-sm font-medium text-slate-700">Planilha (.xlsx)</span>
+            <div className="flex flex-wrap items-center gap-3">
+              <label
+                htmlFor="spreadsheet-upload"
+                className="inline-flex cursor-pointer items-center justify-center rounded-lg bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-700 transition hover:bg-sky-100"
+              >
+                Escolher arquivo
+              </label>
+              <span className="min-w-0 max-w-full truncate text-sm text-slate-600">
+                {file?.name ?? "Nenhum arquivo selecionado"}
+              </span>
+            </div>
             <input
+              id="spreadsheet-upload"
               type="file"
               accept=".xlsx"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              className="text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-sky-50 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-sky-700 hover:file:bg-sky-100"
+              className="sr-only"
             />
-          </label>
+          </div>
 
           <label className="flex flex-col gap-1.5 md:max-w-sm">
             <span className="text-sm font-medium text-slate-700">
@@ -115,30 +163,66 @@ function EmitirCertificados() {
             />
           </label>
 
-          {visualTemplates.length > 0 && (
-            <label className="flex flex-col gap-1.5 md:max-w-sm">
-              <span className="text-sm font-medium text-slate-700">
-                Template visual (opcional)
-              </span>
-              <select
-                value={templateId}
-                onChange={(e) => setTemplateId(e.target.value)}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-400"
-              >
-                <option value="">— Layout padrão —</option>
-                {visualTemplates.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-slate-700">
+              Texto padrão do certificado <span className="text-rose-600">*</span>
+            </span>
+            <textarea
+              ref={textareaRef}
+              value={textoPadrao}
+              onChange={(e) => setTextoPadrao(e.target.value)}
+              rows={5}
+              required
+              aria-label="Texto padrão do certificado"
+              placeholder="Escreva o corpo do certificado para todo o lote…"
+              className="resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-400"
+            />
+            <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-500">
+              <p>
+                Apenas o <strong>corpo</strong> do certificado. Título, nome em
+                destaque, data, assinatura, QR Code e código de validação vêm do{" "}
+                <strong>template global ativo</strong> (aba “Template global”).
+              </p>
+              <div className="mt-2">
+                <p className="mb-1.5">
+                  Clique para inserir uma variável onde o cursor estiver
+                  (substituída por linha):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {BODY_VARIABLE_OPTIONS.map(({ token, label }) => (
+                    <button
+                      key={token}
+                      type="button"
+                      onClick={() => insertVariable(token)}
+                      aria-label={`Inserir ${token}`}
+                      title={`Inserir ${token}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-white px-2.5 py-1 font-medium text-slate-600 transition hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
+                    >
+                      <span aria-hidden>+</span>
+                      {label}
+                      <code className="font-mono text-[10px] text-slate-400">
+                        {token}
+                      </code>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="mt-2">
+                Exemplo: <em>participou da Semana de Inovação, com carga horária
+                de {"{{carga_horaria}}"} horas.</em>
+              </p>
+              <p className="mt-2">
+                <strong>Palestra e palestrante</strong> podem ser escritos
+                diretamente no texto. <code className="font-mono">{"{{carga_horaria}}"}</code>{" "}
+                resulta apenas no número — escreva “horas” você mesma.
+              </p>
+            </div>
+          </label>
 
           <button
             type="button"
             onClick={handleValidate}
-            disabled={!file || loading}
+            disabled={!file || !textoPadrao.trim() || loading}
             className="inline-flex items-center justify-center rounded-full bg-slate-950 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
           >
             {loading ? "Validando..." : "Validar planilha"}
@@ -153,6 +237,21 @@ function EmitirCertificados() {
             <StatCard label="Aptas para gerar" value={preview.valid_count} tone="emerald" />
             <StatCard label="Com erro" value={preview.invalid_count} tone="rose" />
           </div>
+
+          {preview.resolved_text_preview && (
+            <div className="rounded-[1.5rem] border border-sky-200 bg-sky-50/70 p-4">
+              <p className="mb-2 text-sm font-semibold text-sky-900">
+                Prévia do texto (1ª linha válida)
+              </p>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+                {preview.resolved_text_preview}
+              </p>
+              <p className="mt-2 text-xs text-slate-500">
+                Confira o resultado das variáveis antes de emitir. Este é
+                exatamente o corpo que será gerado para cada participante.
+              </p>
+            </div>
+          )}
 
           {preview.valid_count > 0 && (
             <div className="overflow-x-auto rounded-[1.5rem] border border-slate-200/80 bg-white/90">

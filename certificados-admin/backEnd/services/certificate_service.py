@@ -10,28 +10,37 @@ _BACKEND_DIR = str(_Path(__file__).resolve().parent.parent)
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
+import json
+import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import IO
+from typing import Callable
 
-from models import CertificateFormData, Participant, ParticipantRegistryRecord
-from services.certificate_store import allocate_codes, save_certificates
+from models import ParticipantRegistryRecord
+from services import certificate_store  # generate_code (monkeypatchable in tests)
+from services import template_service
 from services.generator import (
     CertificateGenerator,
     CertificateGeneratorConfig,
     build_pdf_filename,
 )
-from services.reader import read_participants
-from services.registry import enrich_with_registry
 from services.spreadsheet import SpreadsheetRow, compute_business_key
-from utils.dates import normalize_date_text
-from utils.template_store import get_template_for_course
+from services.certificate_text import render_certificate_body
+from utils.dates import extenso_from_iso, normalize_date_text, to_iso
 
 # certificate_store (imported above) puts the repo root on sys.path, so the
 # shared storage layer / database resolve here regardless of the working dir.
-from storage_service import CertificateStorage, get_storage
+from storage_service import CertificateStorage, StorageError, get_storage
 from storage_service import config as storage_config
 from database import db
+import observability
+
+LOGGER = logging.getLogger("certificados.saga")
+
+
+def _metric(name: str) -> None:
+    observability.metrics.increment(name)
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,24 +57,39 @@ class CertificateBatchConfig:
 
 
 @dataclass(slots=True, frozen=True)
-class GeneratedCertificateResult:
-    name: str
-    file_url: str
-    livro: int
-    folha: int
-    linha: int
-    validation_code: str = ""
-    # Path of the saved PDF, relative to STORAGE_DIR (e.g. "pdfs/Joao_CERT-2026-AB1234.pdf").
+class GenerationSummary:
+    """Outcome of a confirmed batch generation (saga model).
+
+    The lists reflect EXACTLY what was persisted:
+      - ``generated``  → reserved, uploaded and finalized (status ``ativo``).
+      - ``duplicates`` → an existing certificate matched the business_key.
+      - ``failed``     → reserved but compensated (status ``failed``, no file).
+    """
+
+    generated: list[dict]    # [{"name", "code"}]
+    duplicates: list[dict]   # [{"name", "existing_code", "status"}]
+    failed: list[dict]       # [{"name", "error"}]
+    total_valid: int
+
+
+@dataclass(slots=True, frozen=True)
+class _EmitOutcome:
+    status: str  # "generated" | "duplicate" | "failed"
+    code: str | None = None
+    existing: dict | None = None
+    error: str | None = None
     pdf_path: str = ""
 
 
 @dataclass(slots=True, frozen=True)
-class GenerationSummary:
-    """Outcome of a confirmed batch generation (new model)."""
+class _ActiveTemplate:
+    """Resolved active global template, ready to render a batch."""
 
-    generated: list[dict]    # [{"name", "code"}]
-    duplicates: list[dict]   # [{"name", "existing_code"}]
-    total_valid: int
+    version_id: int
+    label: str
+    layout: dict
+    snapshot_json: str
+    background: bytes
 
 
 class CertificateBatchService:
@@ -91,256 +115,318 @@ class CertificateBatchService:
         # (so STORAGE_PROVIDER is honoured and tests can inject a fake).
         self._storage = storage
 
-    def generate_from_excel(
-        self,
-        excel_source: Path | str | IO[bytes],
-        form_data: CertificateFormData,
-        visual_template_layout: dict | None = None,
-    ) -> list[GeneratedCertificateResult]:
-        participants = read_participants(excel_source)
-        participants = self._merge_form_data(participants, form_data)
-        records = enrich_with_registry(participants)
-
-        codes = allocate_codes(len(records))
-        records = [
-            ParticipantRegistryRecord(
-                nome=r.nome,
-                email=r.email,
-                curso=r.curso,
-                livro=r.livro,
-                folha=r.folha,
-                linha=r.linha,
-                validation_code=code,
-                referencia_registro=r.referencia_registro,
-                texto_certificado=r.texto_certificado,
-                certificate_text=r.certificate_text or r.texto_certificado,
-                data_emissao=r.data_emissao,
+    def _active_template(self, created_by: int | None) -> _ActiveTemplate:
+        """Resolve the single global active template version (seed default once)."""
+        template_service.ensure_default_version(self.config.template_path, created_by=created_by)
+        version = template_service.get_active_version()
+        if not version:
+            raise ValueError(
+                "Nenhum template global ativo. Configure e ative um template antes de emitir."
             )
-            for r, code in zip(records, codes)
-        ]
+        background, _mime = template_service.get_background_bytes(version["id"])
+        layout = version["layout"]
+        return _ActiveTemplate(
+            version_id=version["id"],
+            label=f"v{version['version_number']}",
+            layout=layout,
+            snapshot_json=json.dumps(layout, ensure_ascii=False),
+            background=background,
+        )
 
-        storage = self._storage or get_storage()
-        max_bytes = storage_config.get_max_file_size_bytes()
-
-        results: list[GeneratedCertificateResult] = []
-        db_entries: list[dict] = []
-
-        for record in records:
-            # 1) render the PDF in memory (no PDF is ever left on disk for the
-            #    Drive backend; the local backend writes it under storage/pdfs).
-            content = self._render_pdf_bytes(record, visual_template_layout)
-            if max_bytes is not None and len(content) > max_bytes:
-                raise ValueError(
-                    f"Certificado de '{record.nome}' excede o tamanho máximo permitido."
-                )
-
-            # 2) persist the bytes through the configured storage backend.
-            stored = storage.save(
-                content,
-                filename=build_pdf_filename(record),
-                mime_type="application/pdf",
-            )
-
-            # 3) public file URL is code-based and proxied by the backend —
-            #    it never exposes a provider path/link.
-            results.append(
-                GeneratedCertificateResult(
-                    name=record.nome,
-                    file_url=f"/certificate-file/{record.validation_code}",
-                    livro=record.livro,
-                    folha=record.folha,
-                    linha=record.linha,
-                    validation_code=record.validation_code,
-                    pdf_path=stored.pdf_path,
-                )
-            )
-            db_entries.append(
-                {
-                    "validationCode": record.validation_code,
-                    "name": record.nome,
-                    "event": record.curso,
-                    "issued_at": record.data_emissao,
-                    "date": record.data_emissao,
-                    "certificate_text": _build_full_certificate_text(record),
-                    **stored.as_db_fields(),
-                }
-            )
-
-        # 4) persist metadata only after every upload succeeded.
-        save_certificates(db_entries)
-        return results
-
-    def _render_pdf_bytes(
-        self,
-        record: ParticipantRegistryRecord,
-        visual_template_layout: dict | None,
-    ) -> bytes:
-        if visual_template_layout:
-            return self.generator.render_pdf_bytes_visual(record, visual_template_layout)
-        template_path = get_template_for_course(record.curso, self.config.template_path)
-        return self.generator.render_pdf_bytes_default(record, template_path=template_path)
-
-    # ── Structured generation (new model: idempotent + QR) ──────────────────────
+    # ── Structured generation (saga: idempotent + QR + global template) ─────────
 
     def generate_certificates(
         self,
         rows: list[SpreadsheetRow],
         *,
         issued_by: int | None = None,
-        visual_template_layout: dict | None = None,
+        body_template: str | None = None,
     ) -> GenerationSummary:
-        """Generate certificates for already-validated rows.
+        """Generate certificates for already-validated rows using the single
+        active global template version.
 
-        Idempotent: rows whose business_key already exists are skipped and
-        reported as duplicates (no new PDF/code). Each new certificate gets a
-        unique code, a QR code pointing at the public validation URL, is stored
-        through the configured backend and persisted with full metadata.
+        ``body_template`` is the secretaria-authored body text (already validated
+        by :func:`services.certificate_text.validate_body_template`). It is
+        interpolated PER ROW and becomes the certificate ``certificate_text`` and
+        the rendered body. When provided, the active template MUST expose a
+        ``texto_certificado``/``certificate_text`` element to render it (otherwise
+        generation is blocked) and the resolved body is folded into the
+        idempotency key. When omitted (direct/legacy callers), the body falls
+        back to the auto-composed text and the historical key is kept.
+
+        Idempotent: rows whose business_key already exists are reported as
+        duplicates. Each new certificate records ``template_version_id`` and an
+        immutable ``template_snapshot`` so a reissue reproduces it faithfully.
         """
         storage = self._storage or get_storage()
         max_bytes = storage_config.get_max_file_size_bytes()
-        base_url = storage_config.get_public_validation_base_url()
+        year = datetime.now().year
+        tmpl = self._active_template(created_by=issued_by)
 
-        new_items: list[tuple[SpreadsheetRow, str]] = []
-        duplicates: list[dict] = []
-        for row in rows:
-            key = compute_business_key(row)
-            existing = db.get_by_business_key(key)
-            if existing:
-                duplicates.append(
-                    {"name": row.nome, "existing_code": existing["unique_code"]}
-                )
-            else:
-                new_items.append((row, key))
-
-        codes = allocate_codes(len(new_items)) if new_items else []
+        if body_template is not None and not _layout_has_body_element(tmpl.layout):
+            raise ValueError(
+                "O template ativo não possui um elemento de texto do corpo "
+                "(texto_certificado ou certificate_text). Adicione esse elemento "
+                "ao template no editor antes de emitir."
+            )
 
         generated: list[dict] = []
-        db_entries: list[dict] = []
-        for (row, business_key), code in zip(new_items, codes):
-            record = _row_to_record(row, code)
-            qr_url = f"{base_url}/validar/{code}" if base_url else code
+        duplicates: list[dict] = []
+        failed: list[dict] = []
 
-            if visual_template_layout:
-                content = self.generator.render_pdf_bytes_visual(
-                    record, visual_template_layout, qr_url=qr_url
-                )
+        for row in rows:
+            if body_template is not None:
+                resolved_body = render_certificate_body(body_template, build_row_variables(row))
+                key_body: str | None = resolved_body
             else:
-                template_path = get_template_for_course(row.curso, self.config.template_path)
-                content = self.generator.render_pdf_bytes_default(
-                    record, template_path=template_path, qr_url=qr_url
+                resolved_body = _build_body(row)
+                key_body = None
+            business_key = compute_business_key(row, key_body)
+            fields = {
+                "participant_name": row.nome,
+                "participant_email": row.email or None,
+                "participant_document": row.documento or None,
+                "course_name": row.curso,
+                "event_name": row.evento,  # event_name = evento (NUNCA o curso)
+                "workload_hours": row.carga_horaria,
+                # Stored as ISO (YYYY-MM-DD) for real-date ordering/indexing.
+                "issue_date": to_iso(row.data_emissao) or row.data_emissao,
+                "start_date": to_iso(row.data_inicio),
+                "end_date": to_iso(row.data_fim),
+                # Persist EXACTLY the rendered body (never the {{...}} template),
+                # so the reissue reproduces it faithfully.
+                "certificate_text": resolved_body,
+                "issued_by": issued_by,
+                "template_used": tmpl.label,
+                "template_version_id": tmpl.version_id,
+                "template_snapshot": tmpl.snapshot_json,
+            }
+
+            def _build(code: str, _row: SpreadsheetRow = row, _body: str = resolved_body):
+                return _row_to_record(_row, code, body=_body)
+
+            def _render(record: ParticipantRegistryRecord, code: str):
+                qr_url = storage_config.build_public_validation_url(code)
+                return self.generator.render_pdf_bytes_visual(
+                    record, tmpl.layout, qr_url=qr_url, background_bytes=tmpl.background
                 )
 
+            outcome = self._emit_one(
+                storage=storage,
+                business_key=business_key,
+                fields=fields,
+                build_record=_build,
+                render=_render,
+                max_bytes=max_bytes,
+                year=year,
+                issued_by=issued_by,
+            )
+            if outcome.status == "generated":
+                generated.append({"name": row.nome, "code": outcome.code})
+                _metric(observability.CERTS_GENERATED)
+            elif outcome.status == "duplicate":
+                duplicates.append(
+                    {
+                        "name": row.nome,
+                        "existing_code": outcome.existing["unique_code"],
+                        "status": outcome.existing.get("status") or "ativo",
+                    }
+                )
+                _metric(observability.CERTS_DUPLICATE)
+            else:  # failed
+                failed.append({"name": row.nome, "error": outcome.error})
+                _metric(observability.CERTS_FAILED)
+
+        return GenerationSummary(
+            generated=generated,
+            duplicates=duplicates,
+            failed=failed,
+            total_valid=len(rows),
+        )
+
+    # ── Saga core ────────────────────────────────────────────────────────────
+
+    def _emit_one(
+        self,
+        *,
+        storage: CertificateStorage,
+        business_key: str | None,
+        fields: dict,
+        build_record: Callable[[str], ParticipantRegistryRecord],
+        render: Callable[[ParticipantRegistryRecord, str], bytes],
+        max_bytes: int | None,
+        year: int,
+        issued_by: int | None,
+    ) -> _EmitOutcome:
+        """Run one certificate through the saga.
+
+        1. reserve (DB transaction, status ``pending``) — UNIQUE constraints only;
+        2. render in memory + upload to storage (no definitive local copy);
+        3. finalize (DB transaction, status ``ativo`` + drive metadata);
+        4. on any failure: compensate (delete the uploaded file), mark ``failed``,
+           audit — and never report success.
+        """
+        code, existing = db.reserve_certificate(
+            business_key=business_key,
+            fields=fields,
+            code_factory=lambda: certificate_store.generate_code(year),
+        )
+        if existing is not None:
+            return _EmitOutcome("duplicate", existing=existing)
+
+        stored = None
+        try:
+            record = build_record(code)
+            content = render(record, code)
             if max_bytes is not None and len(content) > max_bytes:
                 raise ValueError(
-                    f"Certificado de '{row.nome}' excede o tamanho máximo permitido."
+                    f"Certificado de '{fields.get('participant_name')}' "
+                    "excede o tamanho máximo permitido."
                 )
-
             stored = storage.save(
                 content, filename=build_pdf_filename(record), mime_type="application/pdf"
             )
-            generated.append({"name": row.nome, "code": code})
-            db_entries.append(
-                {
-                    "validationCode": code,
-                    "name": row.nome,
-                    "participant_email": row.email or None,
-                    "participant_document": row.documento or None,
-                    "course_name": row.curso,
-                    "event": row.evento,  # event_name = evento (NUNCA o curso)
-                    "workload_hours": row.carga_horaria,
-                    "issued_at": row.data_emissao,
-                    "date": row.data_emissao,
-                    "start_date": row.data_inicio or None,
-                    "end_date": row.data_fim or None,
-                    "certificate_text": _build_full_certificate_text(record),
-                    "business_key": business_key,
-                    "issued_by": issued_by,
-                    **stored.as_db_fields(),
-                }
-            )
+            if not db.finalize_certificate(code, stored.as_db_fields()):
+                raise RuntimeError(
+                    f"Finalização não afetou nenhuma linha para {code} "
+                    "(reserva ausente ou já finalizada)."
+                )
+            return _EmitOutcome("generated", code=code, pdf_path=stored.pdf_path)
+        except Exception as exc:  # noqa: BLE001 — saga must compensate any failure
+            self._compensate(storage, code, stored, reason=str(exc), actor=issued_by)
+            return _EmitOutcome("failed", code=code, error=_failure_message(exc))
 
-        save_certificates(db_entries)
-        return GenerationSummary(
-            generated=generated, duplicates=duplicates, total_valid=len(rows)
+    def _compensate(
+        self,
+        storage: CertificateStorage,
+        code: str,
+        stored,
+        *,
+        reason: str,
+        actor: int | None,
+    ) -> None:
+        """Compensate a failed emission: delete any uploaded file, mark failed, audit."""
+        _metric(observability.CERTS_COMPENSATED)
+        drive_file_id = stored.drive_file_id if stored else None
+        drive_folder_id = stored.drive_folder_id if stored else None
+        pdf_path = stored.pdf_path if stored else None
+
+        # 1) Durably record the failure + any orphan pointer FIRST, so even if the
+        #    delete below fails (or we crash), reconciliation can clean it up.
+        db.mark_certificate_failed(
+            code,
+            drive_file_id=drive_file_id,
+            drive_folder_id=drive_folder_id,
+            pdf_path=pdf_path,
+        )
+
+        # 2) If an upload happened, delete the file and clear the pointer.
+        if stored is not None and ((drive_file_id or "") or (pdf_path or "")):
+            locator = {
+                "drive_file_id": drive_file_id,
+                "drive_folder_id": drive_folder_id,
+                "pdf_path": pdf_path,
+                "storage_provider": stored.storage_provider,
+            }
+            try:
+                storage.delete(locator)
+                db.clear_certificate_storage(code)
+            except (StorageError, FileNotFoundError, OSError) as del_exc:
+                LOGGER.error(
+                    "Compensação: falha ao excluir arquivo de %s (%s); "
+                    "será tratado pela reconciliação.",
+                    code,
+                    del_exc,
+                )
+
+        # 3) Audit the failure.
+        db.insert_audit_log(
+            action="generation_failed",
+            actor_id=actor,
+            target_type="certificate",
+            target_id=code,
+            details=(reason or "")[:480],
         )
 
     def reissue_certificate(self, cert: dict) -> None:
-        """Re-render and re-upload the PDF for an existing certificate (same code).
+        """Re-render a certificate FAITHFULLY using its original template version.
 
-        Controlled operation: only available for certificates that carry the
-        structured fields (course/event/workload). Keeps the verification code.
+        Uses the certificate's stored ``template_version_id`` + immutable
+        ``template_snapshot`` (same code, same version). The Drive swap is
+        crash-safe: the NEW file is finalized in the DB BEFORE the old one is
+        deleted, and if the DB update fails the new file is removed and the
+        previous file is preserved (no orphans, no data loss).
         """
-        if not (cert.get("event_name") and cert.get("workload_hours") and cert.get("course_name")):
+        if not cert.get("template_version_id") or not cert.get("template_snapshot"):
             raise ValueError(
-                "Reemissão indisponível para certificados antigos sem dados estruturados."
+                "Reemissão indisponível: certificado sem versão/snapshot de template."
             )
         storage = self._storage or get_storage()
-        base_url = storage_config.get_public_validation_base_url()
         code = cert["unique_code"]
+        version_id = int(cert["template_version_id"])
+        try:
+            snapshot = json.loads(cert["template_snapshot"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Snapshot de template inválido.") from exc
+        background, _mime = template_service.get_background_bytes(version_id)
 
-        row = SpreadsheetRow(
-            row_number=0,
-            nome=cert["participant_name"],
-            curso=cert["course_name"],
-            evento=cert["event_name"],
-            carga_horaria=int(cert["workload_hours"]),
-            data_emissao=cert.get("issue_date") or "",
-            email=cert.get("participant_email") or "",
-            documento=cert.get("participant_document") or "",
-            data_inicio=cert.get("start_date") or "",
-            data_fim=cert.get("end_date") or "",
+        record = _cert_to_record(cert, code)
+        qr_url = storage_config.build_public_validation_url(code)
+        content = self.generator.render_pdf_bytes_visual(
+            record, snapshot, qr_url=qr_url, background_bytes=background
         )
-        record = _row_to_record(row, code)
-        qr_url = f"{base_url}/validar/{code}" if base_url else code
-        template_path = get_template_for_course(row.curso, self.config.template_path)
-        content = self.generator.render_pdf_bytes_default(
-            record, template_path=template_path, qr_url=qr_url
-        )
+
+        old_locator = {
+            "storage_provider": cert.get("storage_provider"),
+            "drive_file_id": cert.get("drive_file_id"),
+            "drive_folder_id": cert.get("drive_folder_id"),
+            "pdf_path": cert.get("pdf_path"),
+        }
+        old_has_file = bool((cert.get("drive_file_id") or "") or (cert.get("pdf_path") or ""))
+
+        # 1) Upload the NEW file.
         stored = storage.save(
             content, filename=build_pdf_filename(record), mime_type="application/pdf"
         )
-        db.update_certificate_file(code, stored.as_db_fields())
 
-    def _merge_form_data(
-        self,
-        participants: list[Participant],
-        form_data: CertificateFormData,
-    ) -> list[Participant]:
-        normalized_form_data = _normalize_form_data(form_data)
-        return [
-            Participant(
-                nome=participant.nome,
-                email=participant.email,
-                curso=participant.curso,
-                texto_certificado=normalized_form_data.texto_certificado,
-                certificate_text=normalized_form_data.texto_certificado,
-                data_emissao=normalized_form_data.data_emissao,
+        # 2) Finalize the NEW file in the DB BEFORE deleting the old one.
+        try:
+            if not db.update_certificate_file(code, stored.as_db_fields()):
+                raise RuntimeError("Atualização do certificado não afetou nenhuma linha.")
+        except Exception:
+            # Rollback: delete the just-uploaded NEW file and PRESERVE the old one
+            # (the DB still points at it).
+            self._safe_delete(storage, {
+                "storage_provider": stored.storage_provider,
+                "drive_file_id": stored.drive_file_id,
+                "drive_folder_id": stored.drive_folder_id,
+                "pdf_path": stored.pdf_path,
+            })
+            db.insert_audit_log(
+                action="reissue_failed",
+                target_type="certificate",
+                target_id=code,
+                details="rollback: arquivo anterior preservado",
             )
-            for participant in participants
-        ]
+            raise
 
+        # 3) Delete the OLD file — only now that the new one is finalized. Skip if
+        #    it is the same underlying file (local overwrite of a fixed path).
+        if old_has_file and not _same_storage_target(old_locator, stored):
+            if not self._safe_delete(storage, old_locator):
+                LOGGER.error(
+                    "Reemissão %s: arquivo anterior não pôde ser removido "
+                    "(será tratado pela reconciliação).",
+                    code,
+                )
 
-def _normalize_form_data(form_data: CertificateFormData) -> CertificateFormData:
-    # Normalise line endings from textarea (\r\n -> \n) and strip surrounding whitespace
-    texto_certificado = form_data.texto_certificado.replace("\r\n", "\n").replace("\r", "\n").strip()
-    data_emissao = _normalize_date_text(form_data.data_emissao.strip())
-
-    missing_fields: list[str] = []
-    if not texto_certificado:
-        missing_fields.append("texto_certificado")
-    if not data_emissao:
-        missing_fields.append("data_emissao")
-
-    if missing_fields:
-        raise ValueError(
-            "Campos obrigatorios ausentes no formulario: " + ", ".join(missing_fields)
-        )
-
-    return CertificateFormData(
-        texto_certificado=texto_certificado,
-        data_emissao=data_emissao,
-    )
-
+    def _safe_delete(self, storage: CertificateStorage, locator: dict) -> bool:
+        try:
+            storage.delete(locator)
+            return True
+        except (StorageError, FileNotFoundError, OSError) as exc:
+            LOGGER.error("Falha ao excluir arquivo no storage: %s", exc)
+            return False
 
 def _build_body(row: SpreadsheetRow) -> str:
     """Compose the certificate body text from the structured row."""
@@ -357,30 +443,100 @@ def _build_body(row: SpreadsheetRow) -> str:
     return body + "."
 
 
-def _row_to_record(row: SpreadsheetRow, code: str) -> ParticipantRegistryRecord:
-    body = _build_body(row)
+# Template element keys that render the secretaria-authored certificate body.
+_BODY_ELEMENT_KEYS = {"texto_certificado", "certificate_text"}
+
+
+def _layout_has_body_element(layout: dict) -> bool:
+    """True if the layout has a text element that renders the certificate body."""
+    for element in layout.get("elements", []) or []:
+        if (
+            isinstance(element, dict)
+            and element.get("type", "text") == "text"
+            and element.get("key") in _BODY_ELEMENT_KEYS
+        ):
+            return True
+    return False
+
+
+def build_row_variables(row: SpreadsheetRow) -> dict[str, str]:
+    """Map a validated row to the variables allowed in the body template.
+
+    ``carga_horaria`` is the number ONLY ("horas" is written by the secretaria);
+    dates pass through as already normalised (por extenso) strings.
+    """
+    return {
+        "nome": row.nome,
+        "curso": row.curso,
+        "evento": row.evento,
+        "carga_horaria": str(row.carga_horaria),
+        "data_inicio": row.data_inicio or "",
+        "data_fim": row.data_fim or "",
+        "data_emissao": row.data_emissao or "",
+    }
+
+
+def _row_to_record(
+    row: SpreadsheetRow, code: str, body: str | None = None
+) -> ParticipantRegistryRecord:
+    resolved = body if body is not None else _build_body(row)
     return ParticipantRegistryRecord(
         nome=row.nome,
         email=row.email,
         curso=row.curso,
+        evento=row.evento,  # event and course are distinct (bug fix)
+        livro=0,
+        folha=0,
+        linha=0,
+        validation_code=code,
+        texto_certificado=resolved,
+        certificate_text=resolved,
+        data_emissao=row.data_emissao,
+    )
+
+
+def _cert_to_record(cert: dict, code: str) -> ParticipantRegistryRecord:
+    """Build a render record from a persisted certificate row (for reissue)."""
+    body = (cert.get("certificate_text") or "").strip()
+    return ParticipantRegistryRecord(
+        nome=cert.get("participant_name") or "",
+        email=cert.get("participant_email") or "",
+        curso=cert.get("course_name") or "",
+        evento=cert.get("event_name") or "",
         livro=0,
         folha=0,
         linha=0,
         validation_code=code,
         texto_certificado=body,
         certificate_text=body,
-        data_emissao=row.data_emissao,
+        # Stored ISO → render 'por extenso' on the reissued PDF.
+        data_emissao=extenso_from_iso(cert.get("issue_date")),
     )
 
 
-def _build_full_certificate_text(record: ParticipantRegistryRecord) -> str:
-    body = (record.certificate_text or record.texto_certificado).strip()
-    if body and body[-1] not in ".!?":
-        body = f"{body}."
+def _same_storage_target(old_locator: dict, stored) -> bool:
+    """True if the old and new uploads point at the SAME underlying file.
 
-    prefix = f"Certificamos que {record.nome}"
-    date_text = f"Emitido em {record.data_emissao}." if record.data_emissao else ""
-    return " ".join(part for part in (prefix, body, date_text) if part).strip()
+    On local storage the filename is deterministic, so a reissue overwrites the
+    same path — deleting "the old one" would delete the new file. On Drive each
+    upload is a new file id, so they always differ.
+    """
+    old_drive = (old_locator.get("drive_file_id") or "").strip()
+    new_drive = (getattr(stored, "drive_file_id", None) or "").strip()
+    if old_drive or new_drive:
+        return bool(old_drive) and old_drive == new_drive
+    old_path = (old_locator.get("pdf_path") or "").strip()
+    new_path = (getattr(stored, "pdf_path", None) or "").strip()
+    return bool(old_path) and old_path == new_path
+
+
+def _failure_message(exc: Exception) -> str:
+    """User-facing message for a failed emission (never leaks internals)."""
+    if isinstance(exc, ValueError):
+        return str(exc)
+    if isinstance(exc, StorageError):
+        return "Falha ao enviar o certificado para o armazenamento."
+    return "Falha inesperada ao gerar o certificado."
 
 
 # Backwards-compatible alias: date normalisation now lives in utils.dates

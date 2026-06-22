@@ -1,21 +1,33 @@
-import { useEffect, useState } from "react";
-import TemplateUpload from "./components/TemplateUpload";
+import { lazy, Suspense, useEffect, useState } from "react";
 import ValidateCertificate from "./components/ValidateCertificate";
 import Login from "./components/Login";
 import EmitirCertificados from "./pages/EmitirCertificados";
 import Historico from "./pages/Historico";
-import TemplateEditor from "./pages/TemplateEditor";
-import { AdminUser, getMe, logout } from "./services/api";
+import LazyLoadBoundary from "./components/LazyLoadBoundary";
+import { AdminUser, getMe, logout, SESSION_EXPIRED_EVENT } from "./services/api";
 
-type Tab = "emitir" | "historico" | "validate" | "editor" | "templates";
+const TemplateEditor = lazy(() => import("./pages/TemplateEditor"));
+
+type Tab = "emitir" | "historico" | "validate" | "editor";
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("emitir");
   const [user, setUser] = useState<AdminUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [sessionNotice, setSessionNotice] = useState("");
 
   useEffect(() => {
     document.title = "Certificados";
+  }, []);
+
+  useEffect(() => {
+    const handleExpired = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      setSessionNotice(detail || "Sua sessão expirou. Entre novamente.");
+      setUser(null);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
   }, []);
 
   useEffect(() => {
@@ -42,7 +54,15 @@ function App() {
   }
 
   if (!user) {
-    return <Login onLoggedIn={setUser} />;
+    return (
+      <Login
+        notice={sessionNotice}
+        onLoggedIn={(loggedUser) => {
+          setSessionNotice("");
+          setUser(loggedUser);
+        }}
+      />
+    );
   }
 
   return (
@@ -69,7 +89,7 @@ function App() {
           </h1>
 
           {/* Tab bar */}
-          <div className="mt-2 flex gap-1 rounded-2xl border border-slate-200/80 bg-slate-100/60 p-1 w-fit">
+          <div role="tablist" aria-label="Áreas administrativas" className="mt-2 flex gap-1 rounded-2xl border border-slate-200/80 bg-slate-100/60 p-1 w-fit">
             <TabButton
               label="Emitir certificados"
               active={activeTab === "emitir"}
@@ -86,14 +106,9 @@ function App() {
               onClick={() => setActiveTab("validate")}
             />
             <TabButton
-              label="Editor visual"
+              label="Template global"
               active={activeTab === "editor"}
               onClick={() => setActiveTab("editor")}
-            />
-            <TabButton
-              label="Gerenciar templates"
-              active={activeTab === "templates"}
-              onClick={() => setActiveTab("templates")}
             />
           </div>
         </header>
@@ -101,8 +116,19 @@ function App() {
         {activeTab === "emitir" && <EmitirCertificados />}
         {activeTab === "historico" && <Historico />}
         {activeTab === "validate" && <ValidateCertificate />}
-        {activeTab === "editor" && <TemplateEditor />}
-        {activeTab === "templates" && <TemplateUpload />}
+        {activeTab === "editor" && (
+          <LazyLoadBoundary>
+            <Suspense
+              fallback={
+                <section role="status" aria-live="polite" className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+                  Carregando editor visual…
+                </section>
+              }
+            >
+              <TemplateEditor />
+            </Suspense>
+          </LazyLoadBoundary>
+        )}
       </div>
     </main>
   );
@@ -118,6 +144,8 @@ function TabButton({ label, active, onClick }: TabButtonProps) {
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
       className={[
         "rounded-xl px-4 py-2 text-sm font-medium transition",

@@ -1,0 +1,83 @@
+# Stack de produção: PostgreSQL + admin (API) + consulta (público) + web (nginx).
+# PDFs vão para o Google Drive (STORAGE_PROVIDER=google_drive no .env).
+#
+#   cp .env.docker.example .env   # e preencha os valores
+#   docker compose build
+#   docker compose up -d
+#
+# Logs:        docker compose logs -f admin
+# Migrations:  rodam no serviço 'migrate' (alembic upgrade head + seed do template)
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: certificados-app:latest
+  env_file: .env
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Aplica migrations e cria/ativa o template padrão. Roda uma vez e termina.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: >
+      sh -c "alembic upgrade head &&
+             python certificados-admin/backEnd/seed_template.py"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  admin:
+    <<: *app
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000
+      --app-dir certificados-admin/backEnd --workers ${ADMIN_WORKERS:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  consulta:
+    <<: *app
+    command: >
+      uvicorn app:app --host 0.0.0.0 --port 8001
+      --app-dir certificados-consulta --workers ${CONSULTA_WORKERS:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    depends_on:
+      - admin
+      - consulta
+    ports:
+      - "80:80"        # consulta (público)
+      - "8080:8080"    # admin (SPA + /api)
+    restart: unless-stopped
+
+volumes:
+  pgdata:

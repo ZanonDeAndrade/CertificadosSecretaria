@@ -27,6 +27,10 @@ class StorageConfigError(StorageError):
     """Raised when the storage backend is misconfigured (missing env, etc.)."""
 
 
+class StorageIntegrityError(StorageError):
+    """Raised when a downloaded file fails size / checksum / MIME verification."""
+
+
 # ── Value objects ─────────────────────────────────────────────────────────────
 
 
@@ -89,6 +93,37 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+PDF_MAGIC = b"%PDF-"
+
+
+def looks_like_pdf(content: bytes) -> bool:
+    """True if ``content`` begins with the PDF magic bytes."""
+    return content[:5] == PDF_MAGIC
+
+
+def verify_pdf_integrity(
+    content: bytes,
+    *,
+    expected_size: int | None = None,
+    expected_checksum: str | None = None,
+) -> None:
+    """Confirm the bytes are a PDF and match the recorded size/checksum.
+
+    Raises :class:`StorageIntegrityError` on any mismatch so the caller can
+    block the file and refuse to serve tampered/corrupt content.
+    """
+    if not looks_like_pdf(content):
+        raise StorageIntegrityError("MIME inválido: o conteúdo não é um PDF.")
+    if expected_size is not None and len(content) != int(expected_size):
+        raise StorageIntegrityError(
+            f"Tamanho divergente: {len(content)} bytes != {int(expected_size)} esperados."
+        )
+    if expected_checksum:
+        actual = sha256_hex(content)
+        if actual != str(expected_checksum):
+            raise StorageIntegrityError("Checksum SHA-256 divergente.")
+
+
 # ── Interface ─────────────────────────────────────────────────────────────────
 
 
@@ -111,3 +146,11 @@ class CertificateStorage(ABC):
     @abstractmethod
     def download(self, cert_row: Mapping[str, Any]) -> bytes:
         """Return the raw bytes for a certificate given its DB row."""
+
+    @abstractmethod
+    def delete(self, cert_row: Mapping[str, Any]) -> None:
+        """Delete the stored file referenced by ``cert_row`` (saga compensation).
+
+        Must be **idempotent**: deleting an already-absent file is a no-op, not
+        an error. Raises :class:`StorageError` only on an unexpected failure.
+        """

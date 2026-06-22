@@ -155,3 +155,64 @@ class GoogleDriveStorage(CertificateStorage):
             raise StorageError("Falha ao obter o certificado do Google Drive.") from exc
 
         return buffer.getvalue()
+
+    def list_folder(self) -> list[dict]:
+        """List files in the certificates folder for Drive×DB reconciliation.
+
+        Requests ONLY opaque fields (id, size, md5Checksum) — never the file
+        name — so no personal data is fetched/exposed.
+        """
+        try:
+            from googleapiclient.errors import HttpError
+        except ImportError as exc:  # pragma: no cover
+            raise StorageConfigError("Bibliotecas do Google ausentes.") from exc
+
+        files: list[dict] = []
+        page_token = None
+        try:
+            while True:
+                response = (
+                    self.service.files()
+                    .list(
+                        q=f"'{self._folder_id}' in parents and trashed = false",
+                        fields="nextPageToken, files(id, size, md5Checksum)",
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                        pageToken=page_token,
+                    )
+                    .execute()
+                )
+                files.extend(response.get("files", []))
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
+        except HttpError as exc:
+            raise StorageError("Falha ao listar a pasta do Google Drive.") from exc
+        return files
+
+    def delete(self, cert_row: Mapping[str, Any]) -> None:
+        """Delete a Drive file (saga compensation). Idempotent: a 404 is a no-op."""
+        file_id = (cert_row.get("drive_file_id") or "").strip()
+        if not file_id:
+            return
+        try:
+            from googleapiclient.errors import HttpError
+        except ImportError as exc:  # pragma: no cover
+            raise StorageConfigError(
+                "Bibliotecas do Google ausentes para exclusão."
+            ) from exc
+        try:
+            self.service.files().delete(
+                fileId=file_id, supportsAllDrives=True
+            ).execute()
+            LOGGER.info("Arquivo do Drive removido (compensação): file_id=%s", file_id)
+        except HttpError as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            if status == 404:
+                LOGGER.warning(
+                    "Arquivo do Drive já ausente na exclusão: file_id=%s", file_id
+                )
+                return  # already gone — compensation is idempotent
+            LOGGER.error("Falha ao excluir do Drive (file_id=%s): %s", file_id, exc)
+            raise StorageError("Falha ao excluir o certificado do Google Drive.") from exc

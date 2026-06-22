@@ -1,0 +1,13 @@
+# Ruff configuration — focused, high-signal correctness rules.
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "**/__pycache__",
+    "database/migrations",
+    "certificados-admin/frontend",
+]
+
+[lint]
+# Pyflakes (real bugs: undefined names, unused imports, redefinitions) +
+# syntax errors. Intentionally NOT enforcing full style to keep CI signal high.
+select = ["E9", "F"]

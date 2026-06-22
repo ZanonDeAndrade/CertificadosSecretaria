@@ -58,32 +58,66 @@ def test_event_is_not_course(tmp_path):
     assert row.evento == "Congresso"
 
 
-def test_invalid_course_is_rejected(tmp_path):
+def test_unknown_course_is_kept_not_rejected(tmp_path):
+    # curso is optional now: an unknown course is kept (raw), not rejected.
     path = _xlsx(
         tmp_path,
-        [{"nome": "X", "curso": "Curso Inexistente", "evento": "E", "carga_horaria": 8,
-          "data_emissao": "01/02/2026"}],
+        [{"nome": "X", "curso": "Curso Inexistente", "carga_horaria": 8}],
     )
     report = spreadsheet.read_and_validate(path)
-    assert report.valid_count == 0
-    assert report.invalid_count == 1
-    assert any("curso inválido" in e for e in report.invalid[0].errors)
+    assert report.valid_count == 1
+    assert report.invalid_count == 0
+    assert report.valid[0].curso == "Curso Inexistente"
 
 
-def test_invalid_workload_and_date(tmp_path):
+def test_invalid_workload_is_rejected_but_bad_date_is_lenient(tmp_path):
     path = _xlsx(
         tmp_path,
-        [{"nome": "X", "curso": "Direito", "evento": "E", "carga_horaria": "abc",
-          "data_emissao": "32/13/2026"}],
+        [{"nome": "X", "carga_horaria": "abc", "data_emissao": "32/13/2026"}],
     )
     report = spreadsheet.read_and_validate(path)
     assert report.valid_count == 0
     errors = report.invalid[0].errors
     assert any("carga_horaria" in e for e in errors)
-    assert any("data_emissao" in e for e in errors)
+    # The unparseable date is optional now → it never blocks the row.
+    assert not any("data_emissao" in e for e in errors)
+
+
+def test_only_name_and_workload_are_required(tmp_path):
+    # A minimal sheet (just name + workload) is valid; the rest is empty.
+    path = _xlsx(tmp_path, [{"nome": "Ana", "carga_horaria": "20h"}])
+    report = spreadsheet.read_and_validate(path)
+    assert report.valid_count == 1
+    row = report.valid[0]
+    assert row.nome == "Ana" and row.carga_horaria == 20
+    assert row.curso == "" and row.evento == "" and row.data_emissao == ""
+
+
+def test_missing_name_or_workload_is_invalid(tmp_path):
+    path = _xlsx(
+        tmp_path,
+        [
+            {"nome": "", "carga_horaria": 10},     # missing name
+            {"nome": "Bia", "carga_horaria": ""},  # missing workload
+        ],
+    )
+    report = spreadsheet.read_and_validate(path)
+    assert report.valid_count == 0
+    assert report.invalid_count == 2
+
+
+def test_extra_unknown_columns_are_ignored(tmp_path):
+    path = _xlsx(
+        tmp_path,
+        [{"nome": "Ana", "carga_horaria": 8, "departamento": "RH", "obs": "vip"}],
+    )
+    report = spreadsheet.read_and_validate(path)
+    assert report.valid_count == 1
+    assert report.valid[0].nome == "Ana"
 
 
 def test_missing_required_column_raises(tmp_path):
+    # No carga_horaria column at all → whole-file error.
     path = _xlsx(tmp_path, [{"nome": "X", "curso": "Direito"}])
     with pytest.raises(SpreadsheetError):
         spreadsheet.read_and_validate(path)

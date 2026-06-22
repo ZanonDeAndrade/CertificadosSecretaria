@@ -4,9 +4,10 @@ import { AdminUser, API_BASE_URL, login } from "../services/api";
 
 type LoginProps = {
   onLoggedIn: (user: AdminUser) => void;
+  notice?: string;
 };
 
-function Login({ onLoggedIn }: LoginProps) {
+function Login({ onLoggedIn, notice = "" }: LoginProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -43,6 +44,11 @@ function Login({ onLoggedIn }: LoginProps) {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {notice && (
+            <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900">
+              {notice}
+            </div>
+          )}
           <label className="flex flex-col gap-1.5">
             <span className="text-sm font-medium text-slate-700">Usuário</span>
             <input
@@ -68,7 +74,7 @@ function Login({ onLoggedIn }: LoginProps) {
           </label>
 
           {error && (
-            <div className="rounded-xl border border-rose-200 bg-rose-50/90 p-3 text-sm font-medium text-rose-800">
+            <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50/90 p-3 text-sm font-medium text-rose-800">
               {error}
             </div>
           )}

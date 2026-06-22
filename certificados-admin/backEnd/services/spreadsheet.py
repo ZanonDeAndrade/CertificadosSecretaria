@@ -4,34 +4,45 @@ Supported (canonical) columns — header names are normalised (lowercase, no
 accents, no spaces/punctuation) and matched against a set of synonyms, so
 "Carga Horária", "carga_horaria" and "CH" all resolve to ``carga_horaria``:
 
-    nome*          email          documento/matricula
-    curso*         evento*        carga_horaria*
-    data_inicio    data_fim       data_emissao*   (* obrigatório)
+    nome*          carga_horaria*  (* obrigatório)
+    curso          evento          data_emissao
+    data_inicio    data_fim        email   documento/matricula
 
 Rules enforced here:
-- ``evento`` is a distinct column (never the course).
+- Only ``nome`` and ``carga_horaria`` are REQUIRED. Everything else is optional
+  and is meant to be written by the secretary in the certificate body text.
 - ``carga_horaria`` is parsed to a positive integer (structured).
-- ``curso`` must match the canonical course list.
-- ``data_emissao`` (per-row, or a form default) is validated.
-- invalid rows never produce a certificate.
+- Optional fields never block a row: ``curso`` is canonicalised when it matches
+  the official list (kept as-is otherwise), dates are normalised when parseable,
+  and unknown/extra columns are ignored.
+- ``evento`` is a distinct column (never the course).
+- invalid rows (missing name or workload) never produce a certificate.
 """
 from __future__ import annotations
 
 import hashlib
 import re
+import time
 import unicodedata
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import IO
 
 import pandas as pd
 
-from utils.courses import COURSES
+from utils.courses import COURSES, normalize_course_name
 from utils.dates import normalize_date
-from utils.template_store import normalize_course_name
 
 DEFAULT_MAX_ROWS = 2000
+DEFAULT_MAX_COLS = 50
+DEFAULT_MAX_CELL_LEN = 2000
+DEFAULT_MAX_SECONDS = 20.0
+# Decompression-bomb guards (a ~10 MB xlsx must not expand to hundreds of MB).
+_MAX_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 200
 
 _CANONICAL_COURSES = {normalize_course_name(c): c for c in COURSES}
 
@@ -50,7 +61,7 @@ _COLUMN_SYNONYMS: dict[str, set[str]] = {
     "data_emissao": {"dataemissao", "emissao", "datadeemissao", "issuedate", "dataemissaocertificado"},
 }
 
-REQUIRED_COLUMNS = ("nome", "curso", "evento", "carga_horaria")
+REQUIRED_COLUMNS = ("nome", "carga_horaria")
 
 
 def _norm_header(value: object) -> str:
@@ -77,10 +88,11 @@ class SpreadsheetError(Exception):
 class SpreadsheetRow:
     row_number: int
     nome: str
-    curso: str            # canonical course name
-    evento: str
     carga_horaria: int
-    data_emissao: str     # normalised (por extenso)
+    # Optional fields — written by the secretary in the body text when absent.
+    curso: str = ""            # canonical course name when matched, else raw
+    evento: str = ""
+    data_emissao: str = ""     # normalised (por extenso) when parseable
     email: str = ""
     documento: str = ""
     data_inicio: str = ""
@@ -155,11 +167,17 @@ def _norm_text(value: str) -> str:
     return " ".join(s.lower().split())
 
 
-def compute_business_key(row: SpreadsheetRow) -> str:
+def compute_business_key(row: SpreadsheetRow, body: str | None = None) -> str:
     """Stable hash identifying a unique certificate (idempotency).
 
     Based on name + document + event + course + workload + issue date, all
     normalised, so re-uploading the same spreadsheet does not duplicate.
+
+    When a ``body`` (the resolved, secretaria-authored certificate text) is
+    provided, its normalised form is folded into the key so that the SAME row
+    with a DIFFERENT text is treated as a new emission, while the SAME row with
+    the SAME text remains a duplicate. Callers that pass no body keep the
+    historical key (backwards compatible).
     """
     parts = [
         _norm_text(row.nome),
@@ -169,10 +187,77 @@ def compute_business_key(row: SpreadsheetRow) -> str:
         str(row.carga_horaria),
         _norm_text(row.data_emissao),
     ]
+    if body is not None:
+        parts.append(_norm_text(body))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 # ── Reader ──────────────────────────────────────────────────────────────────────
+
+
+def _materialize_bytes(source: Path | str | IO[bytes]) -> bytes:
+    if isinstance(source, (str, Path)):
+        return Path(source).read_bytes()
+    pos = source.tell() if hasattr(source, "tell") else None
+    data = source.read()
+    if pos is not None and hasattr(source, "seek"):
+        source.seek(pos)
+    return data
+
+
+def enforce_xlsx_limits(
+    data: bytes,
+    *,
+    max_rows: int = DEFAULT_MAX_ROWS,
+    max_cols: int = DEFAULT_MAX_COLS,
+    max_cell_len: int = DEFAULT_MAX_CELL_LEN,
+    max_seconds: float = DEFAULT_MAX_SECONDS,
+) -> None:
+    """Validate the REAL .xlsx structure and enforce hard limits BEFORE the
+    spreadsheet is fully loaded into pandas — guarding against malformed files,
+    decompression bombs, and oversized rows/columns/cells/processing time.
+    """
+    # 1) Real OOXML/ZIP structure + decompression-bomb guard (no XML parsed yet).
+    try:
+        archive = zipfile.ZipFile(BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise SpreadsheetError("Arquivo .xlsx inválido (não é um pacote Office/ZIP).") from exc
+    names = set(archive.namelist())
+    if "[Content_Types].xml" not in names or not any(n.startswith("xl/") for n in names):
+        raise SpreadsheetError("Arquivo .xlsx inválido (estrutura OOXML ausente).")
+    total_uncompressed = 0
+    for info in archive.infolist():
+        total_uncompressed += info.file_size
+        if info.compress_size > 0 and (info.file_size / info.compress_size) > _MAX_COMPRESSION_RATIO:
+            raise SpreadsheetError("Planilha rejeitada (possível bomba de descompressão).")
+    if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
+        raise SpreadsheetError("Planilha rejeitada: conteúdo descomprimido excede o limite.")
+
+    # 2) Streaming row/col/cell/time limits via openpyxl read_only (low memory).
+    import openpyxl
+
+    started = time.monotonic()
+    workbook = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+    try:
+        worksheet = workbook.active
+        if worksheet is None:
+            raise SpreadsheetError("Planilha sem aba ativa.")
+        row_count = 0
+        for row in worksheet.iter_rows(values_only=True):
+            row_count += 1
+            if row_count > max_rows + 1:  # +1 for the header row
+                raise SpreadsheetError(f"A planilha excede o limite de {max_rows} linhas.")
+            if len(row) > max_cols:
+                raise SpreadsheetError(f"A planilha excede o limite de {max_cols} colunas.")
+            for cell in row:
+                if isinstance(cell, str) and len(cell) > max_cell_len:
+                    raise SpreadsheetError(
+                        f"Uma célula excede o limite de {max_cell_len} caracteres."
+                    )
+            if time.monotonic() - started > max_seconds:
+                raise SpreadsheetError("Tempo de processamento da planilha excedido.")
+    finally:
+        workbook.close()
 
 
 def read_and_validate(
@@ -180,9 +265,20 @@ def read_and_validate(
     *,
     default_data_emissao: str | None = None,
     max_rows: int = DEFAULT_MAX_ROWS,
+    max_cols: int = DEFAULT_MAX_COLS,
+    max_cell_len: int = DEFAULT_MAX_CELL_LEN,
+    max_seconds: float = DEFAULT_MAX_SECONDS,
 ) -> ValidationReport:
     """Read an xlsx and return a per-row validation report (nothing persisted)."""
-    dataframe = pd.read_excel(source, engine="openpyxl", dtype=object)
+    data = _materialize_bytes(source)
+    enforce_xlsx_limits(
+        data,
+        max_rows=max_rows,
+        max_cols=max_cols,
+        max_cell_len=max_cell_len,
+        max_seconds=max_seconds,
+    )
+    dataframe = pd.read_excel(BytesIO(data), engine="openpyxl", dtype=object)
 
     colmap: dict[str, object] = {}
     for column in dataframe.columns:
@@ -191,13 +287,11 @@ def read_and_validate(
             colmap[canonical] = column
 
     missing = [c for c in REQUIRED_COLUMNS if c not in colmap]
-    has_emissao_default = bool((default_data_emissao or "").strip())
-    if "data_emissao" not in colmap and not has_emissao_default:
-        missing.append("data_emissao")
     if missing:
         raise SpreadsheetError(
             "Colunas obrigatórias ausentes na planilha: " + ", ".join(sorted(set(missing)))
         )
+    has_emissao_default = bool((default_data_emissao or "").strip())
 
     if len(dataframe) > max_rows:
         raise SpreadsheetError(
@@ -211,25 +305,15 @@ def read_and_validate(
         row_number = offset + 2  # +1 header, +1 to 1-based
         values = {canonical: _cell(raw[col]) for canonical, col in colmap.items()}
 
-        if not any(values.get(c) for c in ("nome", "curso", "evento")):
+        if not values.get("nome") and not values.get("carga_horaria"):
             continue  # skip fully empty rows
 
         errors: list[str] = []
 
+        # ── Required: name + workload ─────────────────────────────────────────
         nome = values.get("nome", "")
         if not nome:
             errors.append("nome é obrigatório")
-
-        curso_raw = values.get("curso", "")
-        curso = match_course(curso_raw) if curso_raw else None
-        if not curso_raw:
-            errors.append("curso é obrigatório")
-        elif curso is None:
-            errors.append(f"curso inválido: '{curso_raw}' não está na lista oficial")
-
-        evento = values.get("evento", "")
-        if not evento:
-            errors.append("evento é obrigatório")
 
         carga_raw = values.get("carga_horaria", "")
         carga = parse_workload(carga_raw) if carga_raw else None
@@ -238,28 +322,24 @@ def read_and_validate(
         elif carga is None:
             errors.append(f"carga_horaria inválida: '{carga_raw}'")
 
+        # ── Optional: never block a row; normalise when possible ──────────────
+        # ``curso`` is canonicalised when it matches the official list, else the
+        # raw value is kept. Dates are normalised when parseable, else kept raw.
+        curso_raw = values.get("curso", "")
+        curso = (match_course(curso_raw) or curso_raw).strip() if curso_raw else ""
+        evento = values.get("evento", "")
+
         emissao_raw = values.get("data_emissao", "")
-        emissao = normalize_date(emissao_raw) if emissao_raw else default_emissao_norm
-        if not emissao_raw and not default_emissao_norm:
-            errors.append("data_emissao é obrigatória")
-        elif emissao is None:
-            errors.append(f"data_emissao inválida: '{emissao_raw}'")
+        if emissao_raw:
+            emissao = normalize_date(emissao_raw) or emissao_raw
+        else:
+            emissao = default_emissao_norm or ""
 
-        inicio = ""
-        if values.get("data_inicio"):
-            inicio_norm = normalize_date(values["data_inicio"])
-            if inicio_norm is None:
-                errors.append(f"data_inicio inválida: '{values['data_inicio']}'")
-            else:
-                inicio = inicio_norm
+        inicio_raw = values.get("data_inicio", "")
+        inicio = (normalize_date(inicio_raw) or inicio_raw) if inicio_raw else ""
 
-        fim = ""
-        if values.get("data_fim"):
-            fim_norm = normalize_date(values["data_fim"])
-            if fim_norm is None:
-                errors.append(f"data_fim inválida: '{values['data_fim']}'")
-            else:
-                fim = fim_norm
+        fim_raw = values.get("data_fim", "")
+        fim = (normalize_date(fim_raw) or fim_raw) if fim_raw else ""
 
         if errors:
             report.invalid.append(InvalidRow(row_number=row_number, data=values, errors=errors))
@@ -269,9 +349,9 @@ def read_and_validate(
             SpreadsheetRow(
                 row_number=row_number,
                 nome=nome,
-                curso=curso,  # canonical
-                evento=evento,
                 carga_horaria=carga,
+                curso=curso,
+                evento=evento,
                 data_emissao=emissao,
                 email=values.get("email", ""),
                 documento=values.get("documento", ""),

@@ -4,6 +4,11 @@ openpyxl>=3.1.0,<4.0.0
 fastapi>=0.115.0,<1.0.0
 uvicorn>=0.30.0,<1.0.0
 python-multipart>=0.0.9,<1.0.0
+# Persistência: SQLAlchemy + Alembic. PostgreSQL em produção (psycopg 3);
+# SQLite (dev/test) já vem com a stdlib.
+SQLAlchemy>=2.0.0,<3.0.0
+alembic>=1.13.0,<2.0.0
+psycopg[binary]>=3.1.0,<4.0.0
 # Google Drive storage backend (only needed when STORAGE_PROVIDER=google_drive)
 google-api-python-client>=2.100.0,<3.0.0
 google-auth>=2.23.0,<3.0.0

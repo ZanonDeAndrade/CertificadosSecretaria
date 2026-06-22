@@ -27,16 +27,24 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "STORAGE_DIR", tmp_path)
     monkeypatch.setattr(db, "PDFS_DIR", tmp_path / "pdfs")
     monkeypatch.setenv("STORAGE_PROVIDER", "local")
-    monkeypatch.setenv("JWT_SECRET", "test-secret-32-bytes-long-aaaaaaaaaa")
+    monkeypatch.setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef0123456789abcdef")
     monkeypatch.setenv("ADMIN_USERNAME", ADMIN_USER)
     monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_PASS)
+    monkeypatch.setenv("ADMIN_INITIAL_ROLE", "admin")
     monkeypatch.setenv("FRONTEND_ADMIN_URL", "http://localhost:5173")
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
+    monkeypatch.setenv("LOGIN_BACKOFF_BASE_MS", "0")
+    monkeypatch.setenv("LOGIN_BACKOFF_MAX_MS", "0")
 
     storage_service.reset_storage_cache()  # rebuild with the patched paths
 
     import main
 
-    client = TestClient(main.create_app())
+    client = TestClient(
+        main.create_app(),
+        base_url="https://admin-api.test",
+        headers={"Origin": "http://localhost:5173"},
+    )
     yield client
     storage_service.reset_storage_cache()
 
@@ -47,4 +55,5 @@ def auth_headers(client) -> dict:
         "/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS}
     )
     assert resp.status_code == 200, resp.text
-    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    assert "access_token" not in resp.json()
+    return {}

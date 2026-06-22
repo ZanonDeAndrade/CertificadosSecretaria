@@ -4,7 +4,7 @@
   <section class="search-grid">
     <form class="search-card" action="/" method="get" role="search">
       <label class="field-label" for="nome">Buscar por nome</label>
-      <p class="field-hint">Digite o nome do aluno — a busca é parcial e ignora maiúsculas/minúsculas.</p>
+      <p class="field-hint">Digite ao menos 3 caracteres. A busca ignora acentos e maiúsculas.</p>
       <div class="field-row">
         <input
           id="nome"
@@ -37,7 +37,7 @@
   </section>
 
   {% if error %}
-    <div class="alert alert-warn">{{ error }}</div>
+    <div class="alert alert-warn" role="alert">{{ error }}</div>
   {% endif %}
 
   {% if results is not none and not error %}
@@ -68,14 +68,24 @@
                 <p class="result-event">{{ cert.event_name }}</p>
                 {% if cert.course_name %}<p class="result-course">{{ cert.course_name }}{% if cert.workload_hours %} · {{ cert.workload_hours }}h{% endif %}</p>{% endif %}
                 {% if cert.issue_date %}<p class="result-date">{{ cert.issue_date }}</p>{% endif %}
-                <p class="result-code mono">{{ cert.unique_code }}</p>
+                {% if search_type == 'codigo' %}
+                  <p class="result-code mono">{{ cert.unique_code }}</p>
+                {% endif %}
               </div>
               {% if cert.status == 'revogado' %}
                 <span class="badge badge-revoked">Revogado</span>
               {% else %}
-                <a class="btn btn-download" href="/certificado/{{ cert.unique_code }}/download">
-                  Baixar PDF
-                </a>
+                {% if search_type == 'codigo' %}
+                  <a class="btn btn-download" href="/public/certificates/{{ cert.unique_code }}/download">Baixar PDF</a>
+                {% else %}
+                  <form action="/public/certificates/download-by-name" method="post">
+                    <input type="hidden" name="nome" value="{{ cert.participant_name }}" />
+                    <input type="hidden" name="challenge" value="{{ cert.download_challenge }}" />
+                    <label class="field-label" for="documento-{{ loop.index }}">Documento ou matrícula</label>
+                    <input id="documento-{{ loop.index }}" name="documento" type="password" required autocomplete="off" />
+                    <button type="submit" class="btn btn-download">Confirmar e baixar</button>
+                  </form>
+                {% endif %}
               {% endif %}
             </article>
           {% endfor %}

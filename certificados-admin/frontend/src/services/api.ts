@@ -18,6 +18,25 @@ const api = axios.create({
   withCredentials: true, // send/receive the HttpOnly auth cookie
 });
 
+export const SESSION_EXPIRED_EVENT = "certificados:session-expired";
+
+api.interceptors.response.use(
+  (response) => response,
+  (error: unknown) => {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      const path = error.config?.url ?? "";
+      if (!path.includes("/auth/login") && !path.includes("/auth/me")) {
+        window.dispatchEvent(
+          new CustomEvent(SESSION_EXPIRED_EVENT, {
+            detail: getApiErrorMessage(error, "Sua sessão expirou. Entre novamente."),
+          }),
+        );
+      }
+    }
+    return Promise.reject(error);
+  },
+);
+
 export interface AdminUser {
   id: number;
   username: string;
@@ -71,6 +90,8 @@ export interface SpreadsheetPreview {
   invalid_count: number;
   valid: PreviewRow[];
   invalid: InvalidRow[];
+  /** Body text interpolated for the first valid row (preview before emission). */
+  resolved_text_preview?: string | null;
 }
 
 export interface GenerationSummary {
@@ -91,6 +112,7 @@ export interface AdminCertificate {
   workload_hours?: number | null;
   issue_date?: string | null;
   status: string;
+  download_available: boolean;
   storage_provider?: string | null;
   created_at?: string | null;
 }
@@ -105,10 +127,12 @@ export interface CertificatesPage {
 export async function validateSpreadsheet(
   file: File,
   dataEmissao?: string,
+  textoPadrao?: string,
 ): Promise<SpreadsheetPreview> {
   const formData = new FormData();
   formData.append("file", file);
   if (dataEmissao) formData.append("data_emissao", dataEmissao);
+  if (textoPadrao !== undefined) formData.append("texto_padrao", textoPadrao);
   const response = await api.post<SpreadsheetPreview>(
     "/certificates/validate-spreadsheet",
     formData,
@@ -120,12 +144,12 @@ export async function validateSpreadsheet(
 export async function generateCertificatesFromSpreadsheet(
   file: File,
   dataEmissao?: string,
-  templateId?: string,
+  textoPadrao?: string,
 ): Promise<GenerationSummary> {
   const formData = new FormData();
   formData.append("file", file);
   if (dataEmissao) formData.append("data_emissao", dataEmissao);
-  if (templateId) formData.append("template_id", templateId);
+  if (textoPadrao !== undefined) formData.append("texto_padrao", textoPadrao);
   const response = await api.post<GenerationSummary>(
     "/certificates/generate",
     formData,
@@ -162,6 +186,60 @@ export async function revokeCertificate(
   return response.data;
 }
 
+export interface BatchDownloadResult {
+  blob: Blob;
+  skippedCodes: string[];
+}
+
+export async function downloadCertificatesZip(
+  codes: string[],
+  onProgress?: (percent: number | null) => void,
+): Promise<BatchDownloadResult> {
+  try {
+    const response = await api.post<Blob>(
+      "/certificates/download-zip",
+      { codes },
+      {
+        responseType: "blob",
+        timeout: 120000,
+        onDownloadProgress: (event) => {
+          onProgress?.(
+            event.total
+              ? Math.min(100, Math.round((event.loaded / event.total) * 100))
+              : null,
+          );
+        },
+      },
+    );
+    const rawSkipped = response.headers["x-skipped-certificates"];
+    const skippedCodes =
+      typeof rawSkipped === "string" && rawSkipped
+        ? decodeURIComponent(rawSkipped).split(",").filter(Boolean)
+        : [];
+    return { blob: response.data, skippedCodes };
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.data instanceof Blob) {
+      try {
+        const body = JSON.parse(await error.response.data.text()) as { detail?: string };
+        if (body.detail) throw new Error(body.detail);
+      } catch (parsedError) {
+        if (parsedError instanceof Error && !(parsedError instanceof SyntaxError)) {
+          throw parsedError;
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+export async function downloadCertificateFile(code: string): Promise<Blob> {
+  const response = await api.get<Blob>(
+    `/certificate-file/${encodeURIComponent(code)}`,
+    { responseType: "blob" },
+  );
+  return response.data;
+}
+
 export async function reissueCertificate(code: string): Promise<AdminCertificate> {
   const response = await api.post<AdminCertificate>(
     `/certificates/${encodeURIComponent(code)}/reissue`,
@@ -173,40 +251,26 @@ export function certificateFileUrl(code: string): string {
   return `${API_BASE_URL.replace(/\/$/, "")}/certificate-file/${encodeURIComponent(code)}`;
 }
 
-// key is the normalised course name (e.g. "engenharia_civil"), value is the
-// relative path stored on the server (e.g. "templates/abc123.png")
-export type TemplateMap = Record<string, string>;
-
-export async function getCourses(): Promise<string[]> {
-  const response = await api.get<string[]>("/courses");
-  return response.data;
-}
-
-export async function getTemplates(): Promise<TemplateMap> {
-  const response = await api.get<TemplateMap>("/templates");
-  return response.data;
-}
-
-export async function uploadTemplate(
-  courseName: string,
-  file: File,
-): Promise<string> {
-  const formData = new FormData();
-  formData.append("course_name", courseName);
-  formData.append("file", file);
-  const response = await api.post<{ message: string; key: string }>(
-    "/upload-template",
-    formData,
-    { headers: { "Content-Type": "multipart/form-data" } },
-  );
-  return response.data.message;
-}
-
 export async function validateCertificate(code: string): Promise<ValidationResult> {
   const response = await api.get<ValidationResult>(
     `/validate/${encodeURIComponent(code.trim())}`,
   );
   return response.data;
+}
+
+export function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => (typeof item?.msg === "string" ? item.msg : ""))
+        .filter(Boolean);
+      if (messages.length) return messages.join(" ");
+    }
+  }
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
 }
 
 export { api };

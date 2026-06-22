@@ -1,54 +1,52 @@
-"""Shared SQLite access layer for CertificadosSecretaria.
+"""Shared persistence facade for CertificadosSecretaria.
 
 Imported by BOTH projects:
 
   - certificados-admin   → grava certificados ao gerá-los
   - certificados-consulta → lê certificados (busca por nome / código)
 
-Paths are resolved once here so the two projects always agree on where the
-database file and the PDF storage live:
+The actual SQL lives in :mod:`database.repositories` (SQLAlchemy), backed by a
+pooled engine resolved from ``DATABASE_URL`` (PostgreSQL in production, SQLite in
+dev/test). This module keeps the historical function names/shapes so the routes,
+services and tests keep working unchanged — it is a thin facade that opens a
+transactional session and delegates to a repository.
 
-  DATABASE_PATH  env var → arquivo .db compartilhado
-                           (default: <repo>/database/certificates.db)
-  STORAGE_DIR    env var → raiz do armazenamento de PDFs
-                           (default: <repo>/storage  →  PDFs em <repo>/storage/pdfs)
+Path resolution (single source of truth for both projects):
 
-The module is import-safe: it never opens a connection at import time.
+  DATABASE_URL  env var → PostgreSQL em produção (obrigatório).
+                          Em dev/test, um SQLite local é usado:
+  DB_PATH       env var → arquivo .db (default: <repo>/database/certificates.db)
+  STORAGE_DIR/LOCAL_STORAGE_PATH → raiz do storage LOCAL (apenas dev/legado).
+
+Import-safe: never opens a connection at import time.
 """
 from __future__ import annotations
 
 import os
-import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
-# db.py lives in <repo_root>/database/db.py
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from sqlalchemy import text, update
+from sqlalchemy.exc import IntegrityError
 
+from . import config, engine
+from .models import Base
+from .repositories import (
+    AdminUserRepository,
+    AuditLogRepository,
+    AuthSessionRepository,
+    CertificateRepository,
+    LoginThrottleRepository,
+    PublicRateLimitRepository,
+    TemplateVersionRepository,
+)
 
-def _load_dotenv(path: Path) -> None:
-    """Minimal, dependency-free .env loader for the shared project config.
-
-    Parses simple KEY=VALUE lines from a single .env at the repo root, so both
-    projects pick up the same DATABASE_PATH / STORAGE_DIR. Real environment
-    variables always win (we never overwrite what's already set)."""
-    if not path.is_file():
-        return
-    for raw in path.read_text("utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-_load_dotenv(REPO_ROOT / ".env")
+# database/db.py lives in <repo_root>/database/db.py
+REPO_ROOT = config.REPO_ROOT
 
 
 def _path_from_env(default: Path, *vars: str) -> Path:
-    """Return the first non-empty env var among ``vars`` as a Path, else default."""
     for var in vars:
         raw = os.getenv(var, "").strip()
         if raw:
@@ -56,46 +54,47 @@ def _path_from_env(default: Path, *vars: str) -> Path:
     return default
 
 
-# ── Canonical, shared paths (single source of truth for both projects) ─────────
-# New names: DB_PATH / LOCAL_STORAGE_PATH. Legacy aliases kept for compatibility.
+# ── Shared paths ───────────────────────────────────────────────────────────────
+# DATABASE_PATH is the *local SQLite* file location (dev/test). In production the
+# engine comes from DATABASE_URL and this value is unused. Kept module-level so
+# tests can monkeypatch it (the engine URL is derived from it when DATABASE_URL
+# is not set).
 DATABASE_PATH: Path = _path_from_env(
     REPO_ROOT / "database" / "certificates.db", "DB_PATH", "DATABASE_PATH"
 )
+# Local PDF storage root (development / legacy fallback only).
 STORAGE_DIR: Path = _path_from_env(
     REPO_ROOT / "storage", "LOCAL_STORAGE_PATH", "STORAGE_DIR"
 )
 PDFS_DIR: Path = STORAGE_DIR / "pdfs"
 
-SCHEMA_PATH: Path = Path(__file__).resolve().parent / "schema.sql"
 
+def _current_database_url() -> str:
+    """Resolve the SQLAlchemy URL for the current process/test.
 
-# ── Connection / bootstrap ─────────────────────────────────────────────────────
-
-def _ensure_parent_dirs() -> None:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PDFS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def get_connection() -> sqlite3.Connection:
-    """Open a connection to the shared database with sensible defaults.
-
-    Callers are responsible for closing the connection (the helpers below do).
-    WAL mode is enabled so the admin (writer) and consulta (reader) can hit the
-    same file concurrently without locking each other out.
+    ``DATABASE_URL`` (env) wins. Otherwise, in dev/test, a SQLite URL is derived
+    from the (monkeypatch-friendly) module-level ``DATABASE_PATH``. In production
+    a missing ``DATABASE_URL`` is a hard error (fail-closed).
     """
-    _ensure_parent_dirs()
-    conn = sqlite3.connect(str(DATABASE_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    return conn
+    raw = (os.getenv("DATABASE_URL") or "").strip()
+    if raw:
+        return config.normalize_database_url(raw)
+    if config.is_production():
+        raise config.ConfigError(
+            "APP_ENV=production exige DATABASE_URL (PostgreSQL)."
+        )
+    return f"sqlite:///{Path(DATABASE_PATH).as_posix()}"
 
 
-# Columns added after the initial release. The migration below adds any that
-# are missing on existing databases (SQLite ALTER TABLE ADD COLUMN preserves
-# all existing rows/data). Keep in sync with schema.sql.
+def _session():
+    return engine.session_scope(_current_database_url())
+
+
+# ── Legacy SQLite auto-migration (dev only) ────────────────────────────────────
+# Columns added after the initial release; applied to OLD SQLite databases that
+# predate them (PostgreSQL schema is owned by Alembic migrations). Keep in sync
+# with database/models.py.
 _EXTRA_COLUMNS: dict[str, str] = {
-    # storage (1ª etapa)
     "storage_provider": "TEXT NOT NULL DEFAULT 'local'",
     "drive_file_id": "TEXT",
     "drive_folder_id": "TEXT",
@@ -103,15 +102,20 @@ _EXTRA_COLUMNS: dict[str, str] = {
     "mime_type": "TEXT NOT NULL DEFAULT 'application/pdf'",
     "file_size": "INTEGER",
     "checksum_sha256": "TEXT",
+    "integrity_blocked": "INTEGER NOT NULL DEFAULT 0",
     "status": "TEXT NOT NULL DEFAULT 'ativo'",
-    # modelo expandido + lifecycle (2ª etapa)
     "participant_email": "TEXT",
     "participant_document": "TEXT",
+    "participant_name_normalized": "TEXT",
+    "participant_document_hash": "TEXT",
     "course_name": "TEXT",
     "workload_hours": "INTEGER",
     "start_date": "TEXT",
     "end_date": "TEXT",
     "business_key": "TEXT",
+    "template_used": "TEXT",
+    "template_version_id": "INTEGER",
+    "template_snapshot": "TEXT",
     "issued_by": "INTEGER",
     "revoked_at": "TEXT",
     "revoked_by": "INTEGER",
@@ -121,196 +125,247 @@ _EXTRA_COLUMNS: dict[str, str] = {
 
 _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_certificates_participant_name ON certificates (participant_name)",
+    "CREATE INDEX IF NOT EXISTS idx_certificates_name_normalized ON certificates (participant_name_normalized)",
+    "CREATE INDEX IF NOT EXISTS idx_certificates_name_normalized_status ON certificates (participant_name_normalized, status)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_event_name ON certificates (event_name)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_course_name ON certificates (course_name)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_status ON certificates (status)",
-    # NULLs são distintos no SQLite, então certificados antigos sem business_key
-    # não conflitam neste índice único.
+    # Chronological ordering/filtering uses the real (ISO) issue date.
+    "CREATE INDEX IF NOT EXISTS idx_certificates_issue_date ON certificates (issue_date)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_certificates_business_key ON certificates (business_key)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at)",
 )
 
 
-def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Add any columns missing on a pre-existing certificates table.
+def _legacy_sqlite_migrate(eng) -> None:
+    """Add any columns/indexes missing on a pre-existing SQLite database.
 
-    Safe and idempotent: only columns absent from PRAGMA table_info are added,
-    so no data is ever lost and re-running is a no-op.
+    Safe and idempotent; PostgreSQL is migrated with Alembic instead.
     """
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(certificates)")}
-    if not existing:
-        return  # table not created yet; schema.sql already has every column
-    for column, ddl in _EXTRA_COLUMNS.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE certificates ADD COLUMN {column} {ddl}")
-
-
-def _ensure_indexes(conn: sqlite3.Connection) -> None:
-    """Create indexes AFTER columns are guaranteed to exist."""
-    for statement in _INDEXES:
-        conn.execute(statement)
+    with eng.begin() as conn:
+        existing = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(certificates)").fetchall()
+        }
+        if existing:  # table already there → add any missing columns
+            for column, ddl in _EXTRA_COLUMNS.items():
+                if column not in existing:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE certificates ADD COLUMN {column} {ddl}"
+                    )
+        for statement in _INDEXES:
+            conn.exec_driver_sql(statement)
 
 
 def init_db() -> None:
-    """Create the tables if they don't exist and run lightweight migrations.
+    """Ensure the schema exists. Idempotent; safe on every startup.
 
-    Idempotent; safe to call on every startup of either project."""
-    _ensure_parent_dirs()
-    schema = SCHEMA_PATH.read_text("utf-8")
-    conn = get_connection()
-    try:
-        conn.executescript(schema)  # tables only (CREATE TABLE IF NOT EXISTS)
-        _ensure_columns(conn)       # add new columns to old tables
-        _ensure_indexes(conn)       # then build indexes on guaranteed columns
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# ── Writes (used by certificados-admin) ────────────────────────────────────────
-
-def existing_codes() -> set[str]:
-    """Return all unique codes already stored, upper-cased (for collision checks)."""
-    conn = get_connection()
-    try:
-        rows = conn.execute("SELECT unique_code FROM certificates").fetchall()
-    finally:
-        conn.close()
-    return {row["unique_code"].upper() for row in rows}
+    - **production**: schema is owned by Alembic; this only checks connectivity.
+    - **dev/test**: creates the tables from the ORM metadata and applies the
+      legacy SQLite auto-migration for old databases.
+    """
+    url = _current_database_url()
+    eng = engine.get_engine(url)
+    if config.is_production():
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return
+    Base.metadata.create_all(eng)
+    if config.is_sqlite_url(url):
+        _legacy_sqlite_migrate(eng)
 
 
-# Full ordered column list used by insert_certificates. Each row is normalised
-# to contain every key (with sensible defaults) so callers may pass only the
-# fields they have.
-_INSERT_COLUMNS = (
-    "unique_code",
-    "participant_name",
-    "participant_email",
-    "participant_document",
-    "course_name",
-    "event_name",
-    "workload_hours",
-    "issue_date",
-    "start_date",
-    "end_date",
-    "pdf_path",
-    "certificate_text",
-    "storage_provider",
-    "drive_file_id",
-    "drive_folder_id",
-    "original_filename",
-    "mime_type",
-    "file_size",
-    "checksum_sha256",
-    "status",
-    "business_key",
-    "issued_by",
-)
+def prepare_private_data() -> int:
+    """Backfill searchable names/hashes and erase legacy plaintext when configured."""
+    from .privacy import document_hash, normalize_name
+    from .models import Certificate
+    from sqlalchemy import select
+
+    changed = 0
+    minimize = os.getenv("MINIMIZE_DOCUMENT_PLAINTEXT", "true").strip().lower() not in {"0", "false", "no"}
+    with _session() as session:
+        rows = session.execute(select(Certificate)).scalars().all()
+        for row in rows:
+            normalized_name = normalize_name(row.participant_name)
+            hashed_document = row.participant_document_hash or document_hash(row.participant_document)
+            if row.participant_name_normalized != normalized_name:
+                row.participant_name_normalized = normalized_name
+                changed += 1
+            if row.participant_document_hash != hashed_document:
+                row.participant_document_hash = hashed_document
+                changed += 1
+            if minimize and row.participant_document is not None:
+                row.participant_document = None
+                changed += 1
+        try:
+            retention_days = max(0, int(os.getenv("PRIVATE_DATA_RETENTION_DAYS", "0")))
+        except ValueError:
+            retention_days = 0
+        if retention_days:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            result = session.execute(
+                update(Certificate)
+                .where(Certificate.created_at < cutoff)
+                .where(
+                    (Certificate.participant_email.is_not(None))
+                    | (Certificate.participant_document.is_not(None))
+                )
+                .values(participant_email=None, participant_document=None)
+            )
+            changed += int(result.rowcount or 0)
+    return changed
 
 
-def _normalize_insert_row(row: dict) -> dict:
-    normalized = {col: row.get(col) for col in _INSERT_COLUMNS}
-    # NOT NULL columns need non-null defaults.
-    normalized["pdf_path"] = normalized["pdf_path"] or ""
-    normalized["storage_provider"] = normalized["storage_provider"] or "local"
-    normalized["mime_type"] = normalized["mime_type"] or "application/pdf"
-    normalized["status"] = normalized["status"] or "ativo"
-    return normalized
-
+# ── Certificates: writes ────────────────────────────────────────────────────────
 
 def insert_certificates(rows: list[dict]) -> None:
-    """Bulk-insert generated certificates. Skips rows whose unique_code already
-    exists (INSERT OR IGNORE) so a retry never raises on duplicates."""
+    """Strict insert (no INSERT OR IGNORE). Raises on a UNIQUE conflict."""
     if not rows:
         return
-    columns = ", ".join(_INSERT_COLUMNS)
-    placeholders = ", ".join(f":{col}" for col in _INSERT_COLUMNS)
-    normalized = [_normalize_insert_row(row) for row in rows]
-    conn = get_connection()
-    try:
-        conn.executemany(
-            f"INSERT OR IGNORE INTO certificates ({columns}) VALUES ({placeholders})",
-            normalized,
+    with _session() as s:
+        CertificateRepository(s).insert_many(rows)
+
+
+# ── Saga: reservation / finalization / failure ──────────────────────────────────
+
+def reserve_certificate(
+    *,
+    business_key: str | None,
+    fields: dict,
+    code_factory: Callable[[], str],
+    max_attempts: int = 25,
+) -> tuple[str | None, dict | None]:
+    """Atomically reserve a ``pending`` certificate. Returns ``(code, existing)``.
+
+    - ``(code, None)``     → a new reservation was committed under ``code``.
+    - ``(None, existing)`` → the ``business_key`` already exists (duplicate).
+
+    Uniqueness is enforced by the database UNIQUE constraints — never by a check
+    outside the transaction. Each attempt is its own committed transaction, and
+    a ``business_key`` conflict is resolved with a FRESH read (so concurrently
+    committed rows are visible, avoiding snapshot pitfalls on SQLite).
+    """
+    if business_key:
+        existing = get_by_business_key(business_key)
+        if existing is not None:
+            return None, existing
+
+    for _ in range(max_attempts):
+        code = code_factory()
+        try:
+            with _session() as s:
+                CertificateRepository(s).insert_pending(
+                    code=code, business_key=business_key, fields=fields
+                )
+            return code, None
+        except IntegrityError:
+            # A business_key collision (concurrent insert) → report duplicate;
+            # otherwise it was a unique_code collision → retry with a new code.
+            if business_key:
+                existing = get_by_business_key(business_key)
+                if existing is not None:
+                    return None, existing
+            continue
+    raise RuntimeError(
+        "Não foi possível reservar um código único após várias tentativas."
+    )
+
+
+def finalize_certificate(unique_code: str, drive_fields: dict) -> bool:
+    """Promote a reserved row to ``ativo`` with storage metadata (saga step 3)."""
+    with _session() as s:
+        return CertificateRepository(s).finalize(unique_code, drive_fields)
+
+
+def mark_certificate_failed(
+    unique_code: str,
+    *,
+    drive_file_id: str | None = None,
+    drive_folder_id: str | None = None,
+    pdf_path: str | None = None,
+) -> bool:
+    """Mark a certificate ``failed`` (saga compensation), recording orphan pointers."""
+    with _session() as s:
+        return CertificateRepository(s).mark_failed(
+            unique_code,
+            drive_file_id=drive_file_id,
+            drive_folder_id=drive_folder_id,
+            pdf_path=pdf_path,
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
-# ── Reads (used by both, mainly certificados-consulta) ──────────────────────────
+def clear_certificate_storage(unique_code: str) -> bool:
+    """Null out storage pointers after a successful compensating delete."""
+    with _session() as s:
+        return CertificateRepository(s).clear_storage(unique_code)
+
+
+def list_pending_certificates(cutoff: datetime) -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).pending_older_than(cutoff)
+
+
+def list_active_without_file() -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).active_without_file()
+
+
+def list_failed_with_orphan() -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).failed_with_orphan_file()
+
+
+def block_certificate_integrity(unique_code: str) -> bool:
+    """Mark a certificate as integrity-blocked (tampered/corrupt file)."""
+    with _session() as s:
+        return CertificateRepository(s).set_integrity_blocked(unique_code, True)
+
+
+def list_active_with_remote_file() -> list[dict]:
+    """Active, non-blocked certificates that have a file to verify periodically."""
+    with _session() as s:
+        return CertificateRepository(s).active_with_remote_file()
+
+
+def drive_file_index() -> dict[str, str]:
+    """``drive_file_id -> unique_code`` for every certificate stored on Drive."""
+    with _session() as s:
+        return CertificateRepository(s).drive_file_index()
+
+
+# ── Certificates: reads ─────────────────────────────────────────────────────────
 
 def get_by_code(unique_code: str) -> dict | None:
-    """Look up a single certificate by its exact code (case-insensitive)."""
-    code = unique_code.strip()
-    if not code:
-        return None
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM certificates WHERE unique_code = ? COLLATE NOCASE LIMIT 1",
-            (code,),
-        ).fetchone()
-    finally:
-        conn.close()
-    return dict(row) if row else None
+    with _session() as s:
+        return CertificateRepository(s).get_by_code(unique_code)
 
 
 def search_by_name(name: str) -> list[dict]:
-    """Partial, case-insensitive search by participant name."""
-    term = name.strip()
-    if not term:
-        return []
-    conn = get_connection()
-    try:
-        rows = conn.execute(
-            """
-            SELECT * FROM certificates
-            WHERE participant_name LIKE ? COLLATE NOCASE
-            ORDER BY participant_name COLLATE NOCASE, issue_date, id
-            """,
-            (f"%{term}%",),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(row) for row in rows]
+    with _session() as s:
+        return CertificateRepository(s).search_by_name(name)
+
+
+def certificates_by_normalized_name(name: str, limit: int = 100) -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).by_normalized_name(name, limit)
 
 
 def resolve_pdf_path(pdf_path: str) -> Path:
     """Resolve a stored (STORAGE_DIR-relative) pdf_path to an absolute path.
 
-    Absolute paths are returned unchanged, so legacy/external rows still work.
+    Absolute paths are returned unchanged (legacy/external rows still work).
     """
     candidate = Path(pdf_path)
     return candidate if candidate.is_absolute() else (STORAGE_DIR / candidate)
 
 
-# ── Admin certificate queries (history) ─────────────────────────────────────────
-
 def business_key_exists(business_key: str) -> bool:
-    """True if a certificate with this idempotency key already exists."""
     return get_by_business_key(business_key) is not None
 
 
 def get_by_business_key(business_key: str) -> dict | None:
-    """Return the existing certificate for an idempotency key, if any."""
-    if not business_key:
-        return None
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM certificates WHERE business_key = ? LIMIT 1",
-            (business_key,),
-        ).fetchone()
-    finally:
-        conn.close()
-    return dict(row) if row else None
-
-
-_SEARCHABLE = {
-    "name": "participant_name",
-    "course": "course_name",
-    "event": "event_name",
-}
+    with _session() as s:
+        return CertificateRepository(s).get_by_business_key(business_key)
 
 
 def list_certificates(
@@ -320,67 +375,22 @@ def list_certificates(
     course: str | None = None,
     event: str | None = None,
     status: str | None = None,
+    statuses: tuple[str, ...] | None = None,
     order_by: str = "created_at",
     descending: bool = True,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
-    """Filtered, paginated certificate listing for the admin area.
-
-    Returns ``(rows, total)`` where ``total`` ignores limit/offset.
-    """
-    clauses: list[str] = []
-    params: list = []
-    if name:
-        clauses.append("participant_name LIKE ? COLLATE NOCASE")
-        params.append(f"%{name.strip()}%")
-    if code:
-        clauses.append("unique_code = ? COLLATE NOCASE")
-        params.append(code.strip())
-    if course:
-        clauses.append("course_name LIKE ? COLLATE NOCASE")
-        params.append(f"%{course.strip()}%")
-    if event:
-        clauses.append("event_name LIKE ? COLLATE NOCASE")
-        params.append(f"%{event.strip()}%")
-    if status:
-        clauses.append("status = ?")
-        params.append(status.strip())
-
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    order_col = "issue_date" if order_by == "issue_date" else "created_at"
-    direction = "DESC" if descending else "ASC"
-    limit = max(1, min(int(limit), 200))
-    offset = max(0, int(offset))
-
-    conn = get_connection()
-    try:
-        total = conn.execute(
-            f"SELECT COUNT(*) AS n FROM certificates{where}", params
-        ).fetchone()["n"]
-        rows = conn.execute(
-            f"SELECT * FROM certificates{where} "
-            f"ORDER BY {order_col} {direction}, id {direction} LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(r) for r in rows], int(total)
+    with _session() as s:
+        return CertificateRepository(s).list(
+            name=name, code=code, course=course, event=event, status=status, statuses=statuses,
+            order_by=order_by, descending=descending, limit=limit, offset=offset,
+        )
 
 
 def certificates_pending_drive_migration() -> list[dict]:
-    """Certificates stored locally (have pdf_path) and not yet on Drive."""
-    conn = get_connection()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM certificates "
-            "WHERE (drive_file_id IS NULL OR drive_file_id = '') "
-            "AND pdf_path IS NOT NULL AND pdf_path != '' "
-            "ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
-    return [dict(r) for r in rows]
+    with _session() as s:
+        return CertificateRepository(s).pending_drive_migration()
 
 
 def set_drive_metadata(
@@ -393,72 +403,21 @@ def set_drive_metadata(
     file_size: int | None,
     checksum_sha256: str | None,
 ) -> bool:
-    """Mark a certificate as stored on Drive, **keeping** the legacy pdf_path."""
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            """
-            UPDATE certificates
-               SET storage_provider = 'google_drive',
-                   drive_file_id    = :drive_file_id,
-                   drive_folder_id  = :drive_folder_id,
-                   original_filename = COALESCE(:original_filename, original_filename),
-                   mime_type        = COALESCE(:mime_type, mime_type),
-                   file_size        = :file_size,
-                   checksum_sha256  = :checksum_sha256,
-                   updated_at       = datetime('now')
-             WHERE unique_code = :unique_code COLLATE NOCASE
-            """,
-            {
-                "drive_file_id": drive_file_id,
-                "drive_folder_id": drive_folder_id,
-                "original_filename": original_filename,
-                "mime_type": mime_type,
-                "file_size": file_size,
-                "checksum_sha256": checksum_sha256,
-                "unique_code": unique_code.strip(),
-            },
+    with _session() as s:
+        return CertificateRepository(s).set_drive_metadata(
+            unique_code,
+            drive_file_id=drive_file_id,
+            drive_folder_id=drive_folder_id,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            file_size=file_size,
+            checksum_sha256=checksum_sha256,
         )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 def update_certificate_file(unique_code: str, fields: dict) -> bool:
-    """Replace storage metadata for a certificate (used on reissue)."""
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            """
-            UPDATE certificates
-               SET storage_provider = :storage_provider,
-                   drive_file_id    = :drive_file_id,
-                   drive_folder_id  = :drive_folder_id,
-                   original_filename = :original_filename,
-                   mime_type        = :mime_type,
-                   file_size        = :file_size,
-                   checksum_sha256  = :checksum_sha256,
-                   pdf_path         = :pdf_path,
-                   updated_at       = datetime('now')
-             WHERE unique_code = :unique_code COLLATE NOCASE
-            """,
-            {
-                "storage_provider": fields.get("storage_provider") or "local",
-                "drive_file_id": fields.get("drive_file_id"),
-                "drive_folder_id": fields.get("drive_folder_id"),
-                "original_filename": fields.get("original_filename"),
-                "mime_type": fields.get("mime_type") or "application/pdf",
-                "file_size": fields.get("file_size"),
-                "checksum_sha256": fields.get("checksum_sha256"),
-                "pdf_path": fields.get("pdf_path") or "",
-                "unique_code": unique_code.strip(),
-            },
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    with _session() as s:
+        return CertificateRepository(s).update_file(unique_code, fields)
 
 
 def update_certificate_status(
@@ -468,72 +427,207 @@ def update_certificate_status(
     revoked_by: int | None = None,
     revoke_reason: str | None = None,
 ) -> bool:
-    """Set a certificate's status (e.g. 'revogado'). Returns True if updated."""
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            """
-            UPDATE certificates
-               SET status = ?,
-                   revoked_at = CASE WHEN ? = 'revogado' THEN datetime('now') ELSE NULL END,
-                   revoked_by = ?,
-                   revoke_reason = ?,
-                   updated_at = datetime('now')
-             WHERE unique_code = ? COLLATE NOCASE
-            """,
-            (status, status, revoked_by, revoke_reason, unique_code.strip()),
+    with _session() as s:
+        return CertificateRepository(s).update_status(
+            unique_code, status=status, revoked_by=revoked_by, revoke_reason=revoke_reason
         )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 # ── Admin users ─────────────────────────────────────────────────────────────────
 
 def get_admin_user_by_username(username: str) -> dict | None:
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM admin_users WHERE username = ? LIMIT 1",
-            (username.strip(),),
-        ).fetchone()
-    finally:
-        conn.close()
-    return dict(row) if row else None
+    with _session() as s:
+        return AdminUserRepository(s).get_by_username(username)
 
 
 def get_admin_user_by_id(user_id: int) -> dict | None:
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM admin_users WHERE id = ? LIMIT 1", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return dict(row) if row else None
+    with _session() as s:
+        return AdminUserRepository(s).get_by_id(user_id)
 
 
 def create_admin_user(username: str, password_hash: str, role: str = "secretaria") -> int | None:
-    """Create an admin user. Returns the new id, or None if it already existed."""
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)",
-            (username.strip(), password_hash, role),
-        )
-        conn.commit()
-        return cur.lastrowid if cur.rowcount > 0 else None
-    finally:
-        conn.close()
+    with _session() as s:
+        return AdminUserRepository(s).create(username, password_hash, role)
 
 
 def count_admin_users() -> int:
-    conn = get_connection()
-    try:
-        return int(conn.execute("SELECT COUNT(*) AS n FROM admin_users").fetchone()["n"])
-    finally:
-        conn.close()
+    with _session() as s:
+        return AdminUserRepository(s).count()
+
+
+def set_admin_user_active(user_id: int, active: bool) -> bool:
+    with _session() as s:
+        changed = AdminUserRepository(s).set_active(user_id, active)
+        if changed and not active:
+            AuthSessionRepository(s).revoke_all(user_id, "user_deactivated")
+        return changed
+
+
+def set_admin_user_role(user_id: int, role: str) -> bool:
+    with _session() as s:
+        return AdminUserRepository(s).set_role(user_id, role)
+
+
+# ── Revocable authentication sessions ───────────────────────────────────────
+
+
+def create_auth_session(
+    *,
+    session_id: str,
+    user_id: int,
+    expires_at: datetime,
+    ip_hash: str | None = None,
+    user_agent_hash: str | None = None,
+) -> None:
+    with _session() as s:
+        AuthSessionRepository(s).create(
+            session_id=session_id,
+            user_id=user_id,
+            expires_at=expires_at,
+            ip_hash=ip_hash,
+            user_agent_hash=user_agent_hash,
+        )
+
+
+def get_active_auth_session(session_id: str, now: datetime) -> dict | None:
+    with _session() as s:
+        return AuthSessionRepository(s).get_active(session_id, now)
+
+
+def revoke_auth_session(session_id: str, reason: str = "logout") -> bool:
+    with _session() as s:
+        return AuthSessionRepository(s).revoke(session_id, reason)
+
+
+def revoke_all_auth_sessions(user_id: int, reason: str = "revoke_all") -> int:
+    with _session() as s:
+        return AuthSessionRepository(s).revoke_all(user_id, reason)
+
+
+def cleanup_auth_sessions(before: datetime) -> int:
+    with _session() as s:
+        return AuthSessionRepository(s).cleanup(before)
+
+
+def set_auth_session_expiry(session_id: str, expires_at: datetime) -> bool:
+    with _session() as s:
+        return AuthSessionRepository(s).set_expiry(session_id, expires_at)
+
+
+# ── Distributed login throttling (shared SQL database) ──────────────────────
+
+
+def get_login_throttles(scopes: list[tuple[str, str]]) -> list[dict]:
+    with _session() as s:
+        return LoginThrottleRepository(s).get_many(scopes)
+
+
+def record_login_failures(
+    scopes: list[tuple[str, str, int]],
+    *,
+    now: datetime,
+    window_seconds: int,
+    lockout_seconds: int,
+) -> list[dict]:
+    # A concurrent first failure can race on the composite primary key. Retry
+    # the whole transaction once; subsequent updates use SELECT ... FOR UPDATE.
+    for attempt in range(2):
+        try:
+            with _session() as s:
+                return LoginThrottleRepository(s).record_failures(
+                    scopes,
+                    now=now,
+                    window_seconds=window_seconds,
+                    lockout_seconds=lockout_seconds,
+                )
+        except IntegrityError:
+            if attempt:
+                raise
+    return []  # pragma: no cover
+
+
+def clear_login_throttle(scope_type: str, key: str) -> None:
+    with _session() as s:
+        LoginThrottleRepository(s).clear(scope_type, key)
+
+
+def cleanup_login_throttles(before: datetime) -> int:
+    with _session() as s:
+        return LoginThrottleRepository(s).cleanup(before)
+
+
+def consume_public_rate_limit(
+    bucket_key: str, *, now: datetime, window_seconds: int, limit: int
+) -> tuple[bool, int]:
+    for attempt in range(2):
+        try:
+            with _session() as s:
+                return PublicRateLimitRepository(s).consume(
+                    bucket_key, now=now, window_seconds=window_seconds, limit=limit
+                )
+        except IntegrityError:
+            if attempt:
+                raise
+    return False, window_seconds
+
+
+def cleanup_public_rate_limits(before: datetime) -> int:
+    with _session() as s:
+        return PublicRateLimitRepository(s).cleanup(before)
+
+
+# ── Template versions (single global template) ──────────────────────────────────
+
+def create_template_version(
+    *,
+    name: str | None,
+    layout_json: str,
+    image_width: int,
+    image_height: int,
+    background_image: bytes | None,
+    background_mime_type: str,
+    created_by: int | None = None,
+) -> dict:
+    with _session() as s:
+        return TemplateVersionRepository(s).create(
+            name=name,
+            layout_json=layout_json,
+            image_width=image_width,
+            image_height=image_height,
+            background_image=background_image,
+            background_mime_type=background_mime_type,
+            created_by=created_by,
+        )
+
+
+def get_template_version(version_id: int) -> dict | None:
+    with _session() as s:
+        return TemplateVersionRepository(s).get(version_id)
+
+
+def get_active_template_version() -> dict | None:
+    with _session() as s:
+        return TemplateVersionRepository(s).get_active()
+
+
+def list_template_versions() -> list[dict]:
+    with _session() as s:
+        return TemplateVersionRepository(s).list_all()
+
+
+def count_template_versions() -> int:
+    with _session() as s:
+        return TemplateVersionRepository(s).count()
+
+
+def get_template_background(version_id: int) -> tuple[bytes | None, str] | None:
+    with _session() as s:
+        return TemplateVersionRepository(s).get_background(version_id)
+
+
+def activate_template_version(version_id: int, actor: int | None = None) -> bool:
+    with _session() as s:
+        return TemplateVersionRepository(s).activate(version_id, actor)
 
 
 # ── Audit log ───────────────────────────────────────────────────────────────────
@@ -547,16 +641,17 @@ def insert_audit_log(
     target_id: str | None = None,
     details: str | None = None,
 ) -> None:
-    conn = get_connection()
-    try:
-        conn.execute(
-            """
-            INSERT INTO audit_log
-                (actor_id, actor_username, action, target_type, target_id, details)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (actor_id, actor_username, action, target_type, target_id, details),
+    with _session() as s:
+        AuditLogRepository(s).insert(
+            action=action,
+            actor_id=actor_id,
+            actor_username=actor_username,
+            target_type=target_type,
+            target_id=target_id,
+            details=details,
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+
+def list_audit_logs(action: str | None = None, limit: int = 100) -> list[dict]:
+    with _session() as s:
+        return AuditLogRepository(s).list(action=action, limit=limit)

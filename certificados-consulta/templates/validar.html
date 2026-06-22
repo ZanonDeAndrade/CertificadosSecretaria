@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Validação de certificado{% endblock %}
+
+{% block content %}
+  <section class="validation" aria-labelledby="validation-title">
+    {% if state == "valid" %}
+      <div class="validation-status validation-valid" role="status" aria-live="polite">
+        <span class="status-icon" aria-hidden="true">✓</span>
+        <div>
+          <p class="eyebrow">Autenticidade confirmada</p>
+          <h2 id="validation-title">Certificado válido</h2>
+          <p>Este certificado está ativo e foi localizado no registro oficial.</p>
+        </div>
+      </div>
+    {% elif state == "revoked" %}
+      <div class="validation-status validation-revoked" role="alert">
+        <span class="status-icon" aria-hidden="true">!</span>
+        <div>
+          <p class="eyebrow">Atenção</p>
+          <h2 id="validation-title">Certificado revogado</h2>
+          <p>Este registro existe, mas o certificado não é mais válido e não pode ser baixado.</p>
+        </div>
+      </div>
+    {% elif state == "rate_limited" %}
+      <div class="validation-status validation-error" role="alert">
+        <span class="status-icon" aria-hidden="true">!</span>
+        <div>
+          <p class="eyebrow">Limite temporário</p>
+          <h2 id="validation-title">Muitas tentativas</h2>
+          <p>Aguarde alguns instantes antes de tentar validar outro código.</p>
+        </div>
+      </div>
+    {% elif state == "error" %}
+      <div class="validation-status validation-error" role="alert">
+        <span class="status-icon" aria-hidden="true">!</span>
+        <div>
+          <p class="eyebrow">Serviço indisponível</p>
+          <h2 id="validation-title">Não foi possível validar agora</h2>
+          <p>Tente novamente mais tarde. Nenhum dado do certificado foi exibido.</p>
+        </div>
+      </div>
+    {% else %}
+      <div class="validation-status validation-missing" role="alert">
+        <span class="status-icon" aria-hidden="true">?</span>
+        <div>
+          <p class="eyebrow">Código não localizado</p>
+          <h2 id="validation-title">Certificado inexistente</h2>
+          <p>Não há certificado público para o código informado. Confira o código impresso e tente novamente.</p>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if certificate %}
+      <dl class="public-details" aria-label="Dados públicos do certificado">
+        <div><dt>Participante</dt><dd>{{ certificate.participant_name }}</dd></div>
+        {% if certificate.event_name %}<div><dt>Evento</dt><dd>{{ certificate.event_name }}</dd></div>{% endif %}
+        {% if certificate.course_name %}<div><dt>Curso</dt><dd>{{ certificate.course_name }}</dd></div>{% endif %}
+        {% if certificate.workload_hours %}<div><dt>Carga horária</dt><dd>{{ certificate.workload_hours }} horas</dd></div>{% endif %}
+        {% if certificate.issue_date %}<div><dt>Data de emissão</dt><dd>{{ certificate.issue_date }}</dd></div>{% endif %}
+        <div><dt>Código de validação</dt><dd class="mono">{{ certificate.unique_code }}</dd></div>
+      </dl>
+    {% endif %}
+
+    <div class="validation-actions">
+      {% if download_url %}
+        <a class="btn btn-download" href="{{ download_url }}" aria-label="Baixar certificado válido em PDF">Baixar PDF</a>
+      {% endif %}
+      <a class="btn btn-page" href="/">Consultar outro certificado</a>
+    </div>
+  </section>
+{% endblock %}

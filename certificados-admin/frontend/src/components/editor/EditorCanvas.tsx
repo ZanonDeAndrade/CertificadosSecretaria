@@ -1,7 +1,7 @@
 import React from "react";
 
 interface EditorCanvasProps {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  canvasRef: React.Ref<HTMLCanvasElement>;
   backgroundUrl: string | null;
   zoom: number;
 }

@@ -16,10 +16,8 @@ from __future__ import annotations
 import dataclasses
 import sqlite3
 import sys
-from io import BytesIO
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 # Ensure both backEnd/ and the repo root are importable.
@@ -72,14 +70,18 @@ class FakeDriveStorage(CertificateStorage):
             raise FileNotFoundError(file_id)
         return self.files[file_id]
 
+    def delete(self, cert_row) -> None:
+        file_id = (cert_row.get("drive_file_id") or "").strip()
+        self.files.pop(file_id, None)  # idempotent
+
 
 class FakeGenerator:
     """Generator stub that returns fixed bytes (no Pillow/templates needed)."""
 
-    def render_pdf_bytes_default(self, record, template_path=None) -> bytes:
+    def render_pdf_bytes_default(self, record, template_path=None, qr_url=None) -> bytes:
         return PDF_BYTES
 
-    def render_pdf_bytes_visual(self, record, layout) -> bytes:
+    def render_pdf_bytes_visual(self, record, layout, *, qr_url=None, background_bytes=None) -> bytes:
         return PDF_BYTES
 
 
@@ -269,54 +271,5 @@ def test_insert_persists_drive_metadata(monkeypatch, tmp_path):
     assert (row["pdf_path"] or "") == ""  # nothing stored locally
 
 
-# ── End-to-end generation via LocalStorage ────────────────────────────────────
-
-
-def test_generate_from_excel_saves_via_local_storage(monkeypatch, tmp_path):
-    db = _point_db_at(monkeypatch, tmp_path)
-    db.init_db()
-
-    from models import CertificateFormData
-    from services.certificate_service import (
-        CertificateBatchConfig,
-        CertificateBatchService,
-    )
-
-    # Tiny spreadsheet with the expected columns.
-    xlsx = tmp_path / "participantes.xlsx"
-    pd.DataFrame(
-        {"nome": ["Joao Teste"], "email": ["joao@x.com"], "curso": ["Direito"]}
-    ).to_excel(xlsx, index=False)
-
-    storage = LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
-    config = CertificateBatchConfig(
-        template_path=tmp_path / "template.png",  # unused (fake generator)
-        regular_font_path=tmp_path / "r.ttf",
-        bold_font_path=tmp_path / "b.ttf",
-        output_dir=tmp_path / "pdfs",
-    )
-    service = CertificateBatchService(config, storage=storage, generator=FakeGenerator())
-
-    results = service.generate_from_excel(
-        xlsx,
-        CertificateFormData(texto_certificado="participou do evento.", data_emissao="10/06/2026"),
-    )
-
-    assert len(results) == 1
-    result = results[0]
-    code = result.validation_code
-    assert code.startswith("CERT-")
-    # Public file URL is code-based and exposes no provider link.
-    assert result.file_url == f"/certificate-file/{code}"
-    assert "drive" not in result.file_url
-
-    # Metadata persisted.
-    row = db.get_by_code(code)
-    assert row["storage_provider"] == "local"
-    assert row["pdf_path"] == f"pdfs/{result.pdf_path.split('/')[-1]}"
-    assert row["checksum_sha256"] == sha256_hex(PDF_BYTES)
-    assert row["file_size"] == len(PDF_BYTES)
-
-    # The PDF actually landed in the temp storage and is downloadable.
-    retrieved = download_certificate(dict(row))
-    assert retrieved.content == PDF_BYTES
+# NOTE: the legacy /generate-certificates flow (generate_from_excel) was
+# removed; structured generation is covered by test_saga / test_admin_certificates.

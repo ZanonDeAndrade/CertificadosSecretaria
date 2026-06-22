@@ -20,7 +20,7 @@ def main(argv: list[str]) -> int:
 
     if len(argv) >= 3:
         username, password = argv[1], argv[2]
-        role = argv[3] if len(argv) > 3 else "secretaria"
+        role = argv[3] if len(argv) > 3 else "admin"
     else:
         username = input("Usuário: ").strip()
         password = getpass("Senha: ")
@@ -28,10 +28,14 @@ def main(argv: list[str]) -> int:
         if password != confirm:
             print("As senhas não conferem.")
             return 1
-        role = "secretaria"
+        role = "admin"
 
     if not username or not password:
         print("Usuário e senha são obrigatórios.")
+        return 1
+
+    if role not in auth.VALID_ROLES:
+        print(f"Papel inválido. Use: {', '.join(sorted(auth.VALID_ROLES))}.")
         return 1
 
     existing = db.get_admin_user_by_username(username)

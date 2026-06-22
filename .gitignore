@@ -22,17 +22,48 @@ certificados-admin/frontend/node_modules/
 certificados-admin/frontend/dist/
 certificados-admin/frontend/*.tsbuildinfo
 
-# Banco e storage compartilhados (gerados em runtime)
-database/certificates.db
-database/certificates.db-wal
-database/certificates.db-shm
-storage/pdfs/*.pdf
+# Banco e storage compartilhados (gerados em runtime) — NUNCA comitar bancos
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+storage/pdfs/
+!storage/pdfs/.gitkeep
 
-# Stores/artefatos gerados pelo admin
+# Dados reais de participantes / planilhas de entrada (PII) — usar sintéticos
+data/
+*.xlsx
+*.xls
+*.csv
+
+# PDFs gerados (contêm dados pessoais)
+*.pdf
+
+# Stores/artefatos gerados pelo admin (legado/runtime)
 certificados-admin/backEnd/visual_templates.json
 certificados-admin/backEnd/visual_template_backgrounds/
 certificados-admin/backEnd/certificates.json
-certificados-admin/backEnd/output/certificados/*.pdf
+certificados-admin/backEnd/output/
+
+# Credenciais e segredos adicionais — NUNCA comitar
+*.pem
+*.key
+*.p12
+secrets/
+
+# Cobertura / caches de teste e build
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+_alembic_tmp*.db
+_mig*_tmp*.db
+
+# SO
+.DS_Store
+Thumbs.db
 
 # Logs
 *.log

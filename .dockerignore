@@ -1,0 +1,29 @@
+.git
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Frontend (é buildado na imagem web)
+certificados-admin/frontend/node_modules/
+certificados-admin/frontend/dist/
+
+# Dados/artefatos (PII e gerados em runtime) — nunca vão para a imagem
+data/
+storage/pdfs/
+*.db
+*.db-wal
+*.db-shm
+*.pdf
+*.xlsx
+*.log
+certificados-admin/backEnd/output/
+certificados-admin/backEnd/visual_template_backgrounds/
+
+# Segredos
+.env
+*service-account*.json
+credentials*.json

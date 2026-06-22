@@ -71,13 +71,39 @@ class LocalStorage(CertificateStorage):
             pdf_path=rel,
         )
 
-    def download(self, cert_row: Mapping[str, Any]) -> bytes:
-        pdf_path = (cert_row.get("pdf_path") or "").strip()
-        if not pdf_path:
+    def _resolve_within_storage(self, pdf_path: str) -> Path:
+        """Resolve a ``pdf_path`` strictly inside ``storage_dir``.
+
+        Absolute paths and ``..`` traversal are REJECTED (no reading/deleting
+        files outside the storage root, even if a row was tampered with).
+        """
+        p = (pdf_path or "").strip()
+        if not p:
             raise FileNotFoundError("Certificado sem pdf_path local.")
-        path = Path(pdf_path)
-        if not path.is_absolute():
-            path = self._storage_dir / pdf_path
+        candidate = Path(p)
+        if candidate.is_absolute() or candidate.drive or candidate.root:
+            raise StorageError("Caminho absoluto não é permitido no storage local.")
+        if ".." in candidate.parts:
+            raise StorageError("Travessia de diretório não é permitida.")
+        base = self._storage_dir.resolve()
+        full = (base / candidate).resolve()
+        if full != base and not full.is_relative_to(base):
+            raise StorageError("Caminho fora do diretório de armazenamento.")
+        return full
+
+    def download(self, cert_row: Mapping[str, Any]) -> bytes:
+        path = self._resolve_within_storage(cert_row.get("pdf_path") or "")
         if not path.is_file():
             raise FileNotFoundError(f"Arquivo local não encontrado: {path}")
         return path.read_bytes()
+
+    def delete(self, cert_row: Mapping[str, Any]) -> None:
+        """Remove the local PDF. Idempotent (missing file is a no-op)."""
+        if not (cert_row.get("pdf_path") or "").strip():
+            return
+        path = self._resolve_within_storage(cert_row["pdf_path"])
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:  # pragma: no cover - filesystem dependent
+            raise StorageError(f"Falha ao remover PDF local: {exc}") from exc
+        LOGGER.info("Certificado local removido (compensação): %s", cert_row["pdf_path"])

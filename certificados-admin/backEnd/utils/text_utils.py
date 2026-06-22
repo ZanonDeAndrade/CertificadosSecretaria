@@ -63,6 +63,28 @@ def wrap_text_para(
     return result
 
 
+def wrap_hard_breaks(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> list[str]:
+    """Wrap text honouring EXPLICIT line breaks typed by the user.
+
+    Every ``\\n`` is treated as a hard break (the secretaria's typed line breaks
+    are respected), and each segment is then word-wrapped to ``max_width`` so a
+    long body never leaves the certificate. Blank lines are preserved.
+    """
+    lines: list[str] = []
+    for segment in str(text).split("\n"):
+        stripped = segment.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        lines.extend(_wrap_paragraph(draw, stripped, font, max(max_width, 1)))
+    return lines
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _split_paragraphs(text: str) -> list[str]:

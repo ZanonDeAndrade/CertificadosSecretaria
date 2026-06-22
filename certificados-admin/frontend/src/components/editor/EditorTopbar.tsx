@@ -1,6 +1,24 @@
 import { useRef } from "react";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
-import { uploadTemplateBackground } from "../../services/visualTemplateApi";
+
+/** Read an image file as a data URL and resolve its natural pixel dimensions. */
+function readImageAsDataUrl(
+  file: File,
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Falha ao ler a imagem."));
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const img = new Image();
+      img.onload = () =>
+        resolve({ dataUrl, width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => reject(new Error("Imagem inválida."));
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 interface EditorTopbarProps {
   templateName: string;
@@ -12,7 +30,8 @@ interface EditorTopbarProps {
   onNameChange: (name: string) => void;
   onSave: () => void;
   onBack: () => void;
-  onClearAll: EditorAPI["clearAll"];
+  onRequestClear: () => void;
+  onError: (message: string) => void;
   onSetMock: EditorAPI["setShowMockData"];
   onSetGrid: EditorAPI["setShowGrid"];
   onSetZoom: EditorAPI["setZoom"];
@@ -32,7 +51,8 @@ function EditorTopbar({
   onNameChange,
   onSave,
   onBack,
-  onClearAll,
+  onRequestClear,
+  onError,
   onSetMock,
   onSetGrid,
   onSetZoom,
@@ -50,14 +70,12 @@ function EditorTopbar({
     if (!file) return;
 
     try {
-      const result = await uploadTemplateBackground(file);
-      onBackgroundUploaded(
-        result.background_url,
-        result.image_width,
-        result.image_height,
-      );
+      // The background travels as a data URL inside the layout; it is persisted
+      // durably in the DB when the version is saved (never as a local file).
+      const { dataUrl, width, height } = await readImageAsDataUrl(file);
+      onBackgroundUploaded(dataUrl, width, height);
     } catch {
-      alert("Erro ao enviar o background. Verifique o servidor.");
+      onError("Erro ao carregar o fundo. Selecione um PNG ou JPG válido.");
     }
 
     e.target.value = "";
@@ -70,7 +88,7 @@ function EditorTopbar({
     try {
       await onImageUploaded(file);
     } catch {
-      alert("Erro ao carregar imagem no editor.");
+      onError("Erro ao carregar imagem no editor.");
     }
 
     e.target.value = "";
@@ -83,7 +101,13 @@ function EditorTopbar({
     const reader = new FileReader();
     reader.onload = (ev) => {
       const json = ev.target?.result as string;
-      if (json) onImport(json);
+      if (json) {
+        try {
+          onImport(json);
+        } catch (error) {
+          onError(error instanceof Error ? error.message : "JSON inválido ou malformado.");
+        }
+      }
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -210,9 +234,7 @@ function EditorTopbar({
 
       <button
         type="button"
-        onClick={() => {
-          if (confirm("Remover todos os elementos do canvas?")) onClearAll();
-        }}
+        onClick={onRequestClear}
         className="rounded-full border border-rose-200 px-3 py-1.5 text-sm font-medium text-rose-600 transition hover:bg-rose-50"
       >
         Limpar

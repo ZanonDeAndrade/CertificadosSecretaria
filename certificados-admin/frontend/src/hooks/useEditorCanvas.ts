@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fabric } from "fabric";
+import * as fabric from "fabric";
 import {
   ElementKey,
   ImageTemplateElement,
@@ -56,30 +56,12 @@ function readFileAsDataURL(file: File): Promise<string> {
   });
 }
 
-function loadFabricImage(url: string, options?: fabric.IImageOptions): Promise<fabric.Image> {
-  return new Promise((resolve, reject) => {
-    if (!url) {
-      reject(new Error("URL de imagem invalida."));
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      reject(new Error("Timeout ao carregar imagem no canvas."));
-    }, 15000);
-
-    fabric.Image.fromURL(
-      url,
-      (img) => {
-        clearTimeout(timer);
-        if (!img) {
-          reject(new Error("Nao foi possivel criar imagem do Fabric."));
-          return;
-        }
-        resolve(img);
-      },
-      options,
-    );
-  });
+async function loadFabricImage(
+  url: string,
+  options?: { crossOrigin?: "" | "anonymous" | "use-credentials"; signal?: AbortSignal },
+): Promise<fabric.FabricImage> {
+  if (!url) throw new Error("URL de imagem inválida.");
+  return await fabric.FabricImage.fromURL(url, options);
 }
 
 function buildFabricTextOptions(
@@ -102,6 +84,82 @@ function buildFabricTextOptions(
     textAlign: element.align,
     fontWeight: element.bold ? "bold" : "normal",
     fontStyle: element.italic ? "italic" : "normal",
+    lockScalingX: true,
+    lockScalingY: true,
+    lockSkewingX: true,
+    lockSkewingY: true,
+    hasControls: false,
+    hasBorders: true,
+    editable: false,
+    selectable: true,
+    hoverCursor: "move",
+  };
+}
+
+// Text element keys whose content is the (long) certificate body. These are
+// rendered as a wrapping Textbox so the editor preview mirrors the PDF.
+const BODY_TEXT_KEYS = new Set<string>(["texto_certificado", "certificate_text"]);
+
+function isBodyTextElement(element: TemplateElement): boolean {
+  return element.type === "text" && BODY_TEXT_KEYS.has(element.key);
+}
+
+/** Image width in DISPLAY pixels (or the canvas width before a background). */
+function computeDisplayImageWidth(
+  naturalWidth: number,
+  scale: number,
+  canvas: fabric.Canvas | null,
+): number {
+  if (naturalWidth > 1) return naturalWidth * scale;
+  return canvas ? canvas.getWidth() : CANVAS_MAX_WIDTH;
+}
+
+/**
+ * Wrap width (display px) for a body Textbox — mirrors the PDF generator's
+ * ``_wrap_bound``: the text grows toward the page edge implied by its alignment,
+ * leaving a 4% margin, so the editor preview wraps where the PDF wraps.
+ */
+function bodyWrapWidthDisplay(
+  element: TextTemplateElement,
+  scale: number,
+  displayImageWidth: number,
+): number {
+  const anchor = element.x * scale;
+  const margin = Math.max(displayImageWidth * 0.04, 8);
+  let bound: number;
+  if (element.align === "center") {
+    bound = 2 * (Math.min(anchor, displayImageWidth - anchor) - margin);
+  } else if (element.align === "right") {
+    bound = anchor - margin;
+  } else {
+    bound = displayImageWidth - anchor - margin;
+  }
+  return Math.max(bound, 16);
+}
+
+function buildFabricTextboxOptions(
+  element: TextTemplateElement,
+  scale: number,
+  width: number,
+): Partial<fabric.Textbox> {
+  return {
+    left: element.x * scale,
+    top: element.y * scale,
+    width,
+    originX:
+      element.align === "center"
+        ? "center"
+        : element.align === "right"
+          ? "right"
+          : "left",
+    originY: "top",
+    fontSize: Math.max(element.fontSize * scale, 4),
+    fontFamily: element.fontFamily,
+    fill: element.color,
+    textAlign: element.align,
+    fontWeight: element.bold ? "bold" : "normal",
+    fontStyle: element.italic ? "italic" : "normal",
+    lineHeight: 1.3,
     lockScalingX: true,
     lockScalingY: true,
     lockSkewingX: true,
@@ -157,6 +215,13 @@ function normalizeTemplateElement(raw: any): TemplateElement | null {
 }
 
 export interface EditorAPI {
+  /**
+   * Callback ref to attach to the `<canvas>` element. Fabric is initialized the
+   * moment the node mounts and torn down when it unmounts — this is essential
+   * because the canvas only exists in "edit" mode, not when the hook first
+   * mounts in "list" mode.
+   */
+  canvasRef: React.RefCallback<HTMLCanvasElement>;
   elements: TemplateElement[];
   selectedId: string | null;
   backgroundUrl: string | null;
@@ -165,6 +230,7 @@ export interface EditorAPI {
   showMockData: boolean;
   showGrid: boolean;
   zoom: number;
+  canvasError: string | null;
   addTextElement: (key?: ElementKey) => void;
   addImageElement: (file: File) => Promise<void>;
   updateElement: (id: string, changes: Partial<TemplateElement>) => void;
@@ -180,13 +246,12 @@ export interface EditorAPI {
   clearAll: () => void;
   exportJSON: () => string;
   importJSON: (json: string) => void;
+  clearCanvasError: () => void;
 }
 
-export function useEditorCanvas(
-  canvasRef: React.RefObject<HTMLCanvasElement | null>,
-): EditorAPI {
+export function useEditorCanvas(): EditorAPI {
   const fabricRef = useRef<fabric.Canvas | null>(null);
-  const objectMapRef = useRef<Map<string, fabric.Object>>(new Map());
+  const objectMapRef = useRef<Map<string, fabric.FabricObject>>(new Map());
   const scaleRef = useRef(1);
   const showMockRef = useRef(true);
   const showGridRef = useRef(false);
@@ -202,6 +267,12 @@ export function useEditorCanvas(
   const [showMockData, setShowMockDataState] = useState(true);
   const [showGrid, setShowGridState] = useState(false);
   const [zoom, setZoomState] = useState(1);
+  const [canvasError, setCanvasError] = useState<string | null>(null);
+
+  const reportCanvasError = useCallback((message: string, error: unknown) => {
+    console.error(`[EditorCanvas] ${message}`, error);
+    setCanvasError(message);
+  }, []);
 
   useEffect(() => {
     elementsRef.current = elements;
@@ -216,9 +287,23 @@ export function useEditorCanvas(
     scaleRef.current = scale;
   }, [scale]);
 
-  useEffect(() => {
-    const el = canvasRef.current;
-    if (!el || fabricRef.current) return;
+  // Initialize fabric via a *callback ref* rather than a mount-time effect.
+  // React invokes this with the node when the <canvas> mounts and with null
+  // when it unmounts. This is required because the canvas only renders in
+  // "edit" mode — a `useEffect(…, [])` would run once while the hook is still
+  // in "list" mode (no canvas yet) and never re-run, leaving fabric
+  // uninitialized so uploads silently do nothing.
+  const attachCanvas = useCallback((el: HTMLCanvasElement | null) => {
+    if (!el) {
+      const existing = fabricRef.current;
+      if (existing) {
+        existing.dispose();
+        fabricRef.current = null;
+        objectMapRef.current.clear();
+      }
+      return;
+    }
+    if (fabricRef.current) return;
 
     const canvas = new fabric.Canvas(el, {
       width: CANVAS_MAX_WIDTH,
@@ -228,8 +313,8 @@ export function useEditorCanvas(
     });
     fabricRef.current = canvas;
 
-    const onSelect = (event: fabric.IEvent) => {
-      const selected = (event as any).selected?.[0] as fabric.Object | undefined;
+    const onSelect = (event: { selected?: fabric.FabricObject[] }) => {
+      const selected = event.selected?.[0];
       const id = (selected as any)?.data?.elementId as string | undefined;
       if (id) setSelectedId(id);
     };
@@ -237,8 +322,8 @@ export function useEditorCanvas(
     canvas.on("selection:updated", onSelect);
     canvas.on("selection:cleared", () => setSelectedId(null));
 
-    canvas.on("object:modified", (event: fabric.IEvent) => {
-      const object = event.target as fabric.Object | undefined;
+    canvas.on("object:modified", (event) => {
+      const object = event.target;
       const id = (object as any)?.data?.elementId as string | undefined;
       if (!object || !id) return;
 
@@ -248,21 +333,27 @@ export function useEditorCanvas(
       const sc = Math.max(scaleRef.current, MIN_SCALE);
 
       if (isTextElement(current)) {
+        const newX = Math.round((object.left ?? 0) / sc);
+        const newY = Math.round((object.top ?? 0) / sc);
         setElements((prev) =>
-          prev.map((el2) =>
-            el2.id === id
-              ? {
-                  ...el2,
-                  x: Math.round((object.left ?? 0) / sc),
-                  y: Math.round((object.top ?? 0) / sc),
-                }
-              : el2,
-          ),
+          prev.map((el2) => (el2.id === id ? { ...el2, x: newX, y: newY } : el2)),
         );
+        // Body Textbox: re-derive the wrap width from the new position so the
+        // preview keeps matching the PDF after a drag.
+        if (isBodyTextElement(current) && object instanceof fabric.Textbox) {
+          const displayImgW = computeDisplayImageWidth(
+            imageSizeRef.current.width, sc, fabricRef.current,
+          );
+          object.set(
+            "width",
+            bodyWrapWidthDisplay({ ...current, x: newX } as TextTemplateElement, sc, displayImgW),
+          );
+          fabricRef.current?.requestRenderAll();
+        }
         return;
       }
 
-      if (isImageElement(current) && object instanceof fabric.Image) {
+      if (isImageElement(current) && object instanceof fabric.FabricImage) {
         const naturalW = object.width ?? 1;
         const naturalH = object.height ?? 1;
         const scaledWidth = (naturalW * (object.scaleX ?? 1)) / sc;
@@ -285,7 +376,7 @@ export function useEditorCanvas(
       }
     });
 
-    canvas.on("object:moving", (event: fabric.IEvent) => {
+    canvas.on("object:moving", (event) => {
       if (!showGridRef.current) return;
       const object = event.target;
       if (!object) return;
@@ -296,13 +387,7 @@ export function useEditorCanvas(
         top: Math.round((object.top ?? 0) / gridPx) * gridPx,
       });
     });
-
-    return () => {
-      canvas.dispose();
-      fabricRef.current = null;
-      objectMapRef.current.clear();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const _addFabricTextObject = useCallback(
     (element: TextTemplateElement, sc: number, useMock: boolean) => {
@@ -310,8 +395,19 @@ export function useEditorCanvas(
       if (!canvas) return;
 
       const text = resolveDisplayText(element, useMock);
-      const options = buildFabricTextOptions(element, sc);
-      const obj = new fabric.IText(text, options);
+      let obj: fabric.FabricObject;
+      if (isBodyTextElement(element)) {
+        // The body wraps to a derived width (matches the PDF) — use a Textbox.
+        const displayImgW = computeDisplayImageWidth(
+          imageSizeRef.current.width, sc, canvas,
+        );
+        obj = new fabric.Textbox(
+          text,
+          buildFabricTextboxOptions(element, sc, bodyWrapWidthDisplay(element, sc, displayImgW)),
+        );
+      } else {
+        obj = new fabric.IText(text, buildFabricTextOptions(element, sc));
+      }
       (obj as any).data = { elementId: element.id };
 
       canvas.add(obj);
@@ -379,7 +475,12 @@ export function useEditorCanvas(
   }, []);
 
   const _applyBackground = useCallback(
-    (url: string, width: number, height: number, afterLoad?: () => void) => {
+    async (
+      url: string,
+      width: number,
+      height: number,
+      afterLoad?: () => void | Promise<void>,
+    ) => {
       const canvas = fabricRef.current;
       if (!canvas) return;
 
@@ -387,39 +488,48 @@ export function useEditorCanvas(
       const sc = displayW / Math.max(width, 1);
       const displayH = Math.round(height * sc);
 
-      void loadFabricImage(toAbsoluteUrl(url), { crossOrigin: "anonymous" })
-        .then((img) => {
-          canvas.setWidth(displayW);
-          canvas.setHeight(displayH);
-          img.set({ selectable: false, evented: false });
-          canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas), {
-            scaleX: sc,
-            scaleY: sc,
-            originX: "left",
-            originY: "top",
-          });
+      setCanvasError(null);
 
-          scaleRef.current = sc;
-          imageSizeRef.current = { width, height };
-          bgUrlRef.current = url;
-
-          setScale(sc);
-          setImageSize({ width, height });
-          setBackgroundUrl(url);
-
-          afterLoad?.();
-          canvas.renderAll();
-        })
-        .catch(() => {
-          // keep current state untouched if background fails
+      try {
+        const img = await loadFabricImage(toAbsoluteImageSource(url), {
+          crossOrigin: "anonymous",
         });
+        if (fabricRef.current !== canvas) return;
+
+        canvas.setDimensions({ width: displayW, height: displayH });
+        img.set({
+          selectable: false,
+          evented: false,
+          scaleX: sc,
+          scaleY: sc,
+          originX: "left",
+          originY: "top",
+        });
+        canvas.backgroundImage = img;
+
+        scaleRef.current = sc;
+        imageSizeRef.current = { width, height };
+        bgUrlRef.current = url;
+
+        setScale(sc);
+        setImageSize({ width, height });
+        setBackgroundUrl(url);
+
+        await afterLoad?.();
+        canvas.requestRenderAll();
+      } catch (error) {
+        reportCanvasError(
+          "Não foi possível carregar a imagem ou os elementos no canvas.",
+          error,
+        );
+      }
     },
-    [],
+    [reportCanvasError],
   );
 
   const setBackground = useCallback(
     (url: string, width: number, height: number) => {
-      _applyBackground(url, width, height);
+      void _applyBackground(url, width, height);
     },
     [_applyBackground],
   );
@@ -442,16 +552,13 @@ export function useEditorCanvas(
         layout.background,
         layout.image_width,
         layout.image_height,
-        () => {
+        async () => {
           const sc = scaleRef.current;
-          void (async () => {
-            for (const el of normalizedElements) {
-              await _addElementObject(el, sc, showMockRef.current);
-            }
-          })().finally(() => {
-            setElements(normalizedElements);
-            canvas.renderAll();
-          });
+          for (const el of normalizedElements) {
+            await _addElementObject(el, sc, showMockRef.current);
+          }
+          setElements(normalizedElements);
+          canvas.requestRenderAll();
         },
       );
     },
@@ -491,47 +598,56 @@ export function useEditorCanvas(
     [_addFabricTextObject],
   );
 
-  const addImageElement = useCallback(async (file: File) => {
-    const canvas = fabricRef.current;
-    if (!canvas) return;
+  const addImageElement = useCallback(
+    async (file: File) => {
+      const canvas = fabricRef.current;
+      if (!canvas) return;
 
-    const sc = Math.max(scaleRef.current, MIN_SCALE);
-    const src = await readFileAsDataURL(file);
+      try {
+        setCanvasError(null);
+        const sc = Math.max(scaleRef.current, MIN_SCALE);
+        const src = await readFileAsDataURL(file);
 
-    const probe = await loadFabricImage(src);
-    const naturalW = Math.max(probe.width ?? 1, 1);
-    const naturalH = Math.max(probe.height ?? 1, 1);
+        const probe = await loadFabricImage(src, { crossOrigin: "anonymous" });
+        const naturalW = Math.max(probe.width ?? 1, 1);
+        const naturalH = Math.max(probe.height ?? 1, 1);
 
-    const maxDisplayW = canvas.getWidth() * 0.35;
-    const maxDisplayH = canvas.getHeight() * 0.35;
-    const fitScale = Math.min(maxDisplayW / naturalW, maxDisplayH / naturalH, 1);
-    const displayW = Math.max(naturalW * fitScale, 1);
-    const displayH = Math.max(naturalH * fitScale, 1);
-    const displayX = Math.max((canvas.getWidth() - displayW) / 2, 0);
-    const displayY = Math.max((canvas.getHeight() - displayH) / 2, 0);
+        const maxDisplayW = canvas.getWidth() * 0.35;
+        const maxDisplayH = canvas.getHeight() * 0.35;
+        const fitScale = Math.min(maxDisplayW / naturalW, maxDisplayH / naturalH, 1);
+        const displayW = Math.max(naturalW * fitScale, 1);
+        const displayH = Math.max(naturalH * fitScale, 1);
+        const displayX = Math.max((canvas.getWidth() - displayW) / 2, 0);
+        const displayY = Math.max((canvas.getHeight() - displayH) / 2, 0);
 
-    const id = crypto.randomUUID();
-    const element: ImageTemplateElement = {
-      id,
-      type: "image",
-      key: "image",
-      label: file.name || KEY_LABELS.image,
-      x: Math.round(displayX / sc),
-      y: Math.round(displayY / sc),
-      width: Math.max(1, Math.round(displayW / sc)),
-      height: Math.max(1, Math.round(displayH / sc)),
-      src,
-      opacity: 1,
-    };
+        const id = crypto.randomUUID();
+        const element: ImageTemplateElement = {
+          id,
+          type: "image",
+          key: "image",
+          label: file.name || KEY_LABELS.image,
+          x: Math.round(displayX / sc),
+          y: Math.round(displayY / sc),
+          width: Math.max(1, Math.round(displayW / sc)),
+          height: Math.max(1, Math.round(displayH / sc)),
+          src,
+          opacity: 1,
+        };
 
-    await _addFabricImageObject(element, sc);
-    const object = objectMapRef.current.get(id);
-    if (object) canvas.setActiveObject(object);
-    canvas.renderAll();
+        await _addFabricImageObject(element, sc);
+        const object = objectMapRef.current.get(id);
+        if (object) canvas.setActiveObject(object);
+        canvas.requestRenderAll();
 
-    setElements((prev) => [...prev, element]);
-    setSelectedId(id);
-  }, [_addFabricImageObject]);
+        setElements((prev) => [...prev, element]);
+        setSelectedId(id);
+      } catch (error) {
+        reportCanvasError("Não foi possível adicionar a imagem ao canvas.", error);
+        throw error;
+      }
+    },
+    [_addFabricImageObject, reportCanvasError],
+  );
 
   const updateElement = useCallback(
     (id: string, changes: Partial<TemplateElement>) => {
@@ -573,10 +689,22 @@ export function useEditorCanvas(
           }
 
           object.set(textChanges);
+          // Body Textbox: x or alignment changes move the page-edge the text
+          // grows toward, so re-derive the wrap width to keep matching the PDF.
+          if (
+            isBodyTextElement(merged) &&
+            object instanceof fabric.Textbox &&
+            ("x" in changes || "align" in changes)
+          ) {
+            const displayImgW = computeDisplayImageWidth(
+              imageSizeRef.current.width, sc, canvas,
+            );
+            object.set("width", bodyWrapWidthDisplay(merged, sc, displayImgW));
+          }
           canvas.renderAll();
         }
 
-        if (isImageElement(current) && object instanceof fabric.Image) {
+        if (isImageElement(current) && object instanceof fabric.FabricImage) {
           const imageChanges: Record<string, unknown> = {};
           const naturalW = Math.max(object.width ?? 1, 1);
           const naturalH = Math.max(object.height ?? 1, 1);
@@ -636,13 +764,17 @@ export function useEditorCanvas(
       void _addElementObject(duplicated, sc, showMockRef.current).then(() => {
         const object = objectMapRef.current.get(newId);
         if (object) canvas.setActiveObject(object);
-        canvas.renderAll();
+        canvas.requestRenderAll();
+      }).catch((error: unknown) => {
+        reportCanvasError("Não foi possível duplicar o elemento no canvas.", error);
+        setElements((prev) => prev.filter((element) => element.id !== newId));
+        setSelectedId((current) => (current === newId ? id : current));
       });
 
       setElements((prev) => [...prev, duplicated]);
       setSelectedId(newId);
     },
-    [_addElementObject],
+    [_addElementObject, reportCanvasError],
   );
 
   const selectElement = useCallback((id: string | null) => {
@@ -702,7 +834,7 @@ export function useEditorCanvas(
         };
       }
 
-      if (isImageElement(el) && object instanceof fabric.Image) {
+      if (isImageElement(el) && object instanceof fabric.FabricImage) {
         const naturalW = Math.max(object.width ?? 1, 1);
         const naturalH = Math.max(object.height ?? 1, 1);
         return {
@@ -746,14 +878,15 @@ export function useEditorCanvas(
       try {
         const parsed = JSON.parse(json) as TemplateLayout;
         loadTemplate(parsed);
-      } catch {
-        alert("JSON invalido ou malformado.");
+      } catch (error) {
+        throw new Error("JSON inválido ou malformado.", { cause: error });
       }
     },
     [loadTemplate],
   );
 
   return {
+    canvasRef: attachCanvas,
     elements,
     selectedId,
     backgroundUrl,
@@ -777,5 +910,7 @@ export function useEditorCanvas(
     clearAll,
     exportJSON,
     importJSON,
+    canvasError,
+    clearCanvasError: () => setCanvasError(null),
   };
 }

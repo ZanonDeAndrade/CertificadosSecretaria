@@ -1,9 +1,9 @@
-"""Certificate persistence for certificados-admin.
+"""Certificate code generation + lookup helpers for certificados-admin.
 
-Backed by the shared SQLite database (database/db.py) so that
-certificados-consulta can read what the admin writes. The public function
-names (allocate_codes / save_certificates / find_certificate) are kept stable
-so the rest of the backend keeps working unchanged.
+Persistence itself now goes through the saga in :mod:`services.certificate_service`
+(reserve → upload → finalize), which relies on the database UNIQUE constraints
+instead of pre-checking codes outside a transaction. This module only provides
+the random code factory and the legacy lookup shape used by ``/validate``.
 """
 from __future__ import annotations
 
@@ -34,60 +34,13 @@ def _generate_code(year: int) -> str:
     return f"CERT-{year}-{suffix}"
 
 
-def allocate_codes(count: int, year: int | None = None) -> list[str]:
-    """Generate `count` unique CERT-ANO-XXXXXX codes, collision-safe vs the DB."""
-    if year is None:
-        year = datetime.now().year
-    existing = db.existing_codes()
-    seen: set[str] = set()
-    codes: list[str] = []
-    while len(codes) < count:
-        code = _generate_code(year)
-        key = code.upper()
-        if key in existing or key in seen:
-            continue
-        seen.add(key)
-        codes.append(code)
-    return codes
+def generate_code(year: int | None = None) -> str:
+    """Return a fresh random ``CERT-<ano>-XXXXXX`` code.
 
-
-def save_certificates(entries: list[dict]) -> None:
-    """Persist generated certificates into the shared SQLite database.
-
-    Each entry must contain: validationCode, name, event, issued_at/date and
-    (optionally) certificate_text plus the storage metadata produced by the
-    storage layer (storage_provider, drive_file_id, drive_folder_id,
-    original_filename, mime_type, file_size, checksum_sha256, pdf_path).
+    Uniqueness is NOT checked here — the saga inserts under the UNIQUE
+    constraint and retries on the (astronomically rare) collision.
     """
-    db.init_db()
-    rows = [
-        {
-            "unique_code": entry["validationCode"],
-            "participant_name": entry["name"],
-            "participant_email": entry.get("participant_email"),
-            "participant_document": entry.get("participant_document"),
-            "course_name": entry.get("course_name"),
-            "event_name": entry["event"],
-            "workload_hours": entry.get("workload_hours"),
-            "issue_date": entry.get("issued_at") or entry.get("date") or "",
-            "start_date": entry.get("start_date"),
-            "end_date": entry.get("end_date"),
-            "pdf_path": entry.get("pdf_path") or "",
-            "certificate_text": entry.get("certificate_text"),
-            "storage_provider": entry.get("storage_provider"),
-            "drive_file_id": entry.get("drive_file_id"),
-            "drive_folder_id": entry.get("drive_folder_id"),
-            "original_filename": entry.get("original_filename"),
-            "mime_type": entry.get("mime_type"),
-            "file_size": entry.get("file_size"),
-            "checksum_sha256": entry.get("checksum_sha256"),
-            "status": entry.get("status"),
-            "business_key": entry.get("business_key"),
-            "issued_by": entry.get("issued_by"),
-        }
-        for entry in entries
-    ]
-    db.insert_certificates(rows)
+    return _generate_code(year if year is not None else datetime.now().year)
 
 
 def find_certificate(code: str) -> dict | None:

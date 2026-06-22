@@ -10,13 +10,16 @@ import base64
 import binascii
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from .base import StorageConfigError
 
 # storage_service/ lives directly under the repo root.
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PUBLIC_VALIDATION_BASE_URL = "http://localhost:8001"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -37,12 +40,30 @@ def _load_dotenv(path: Path) -> None:
 _load_dotenv(REPO_ROOT / ".env")
 
 
+# ── App environment ─────────────────────────────────────────────────────────
+
+
+def get_app_env() -> str:
+    return (os.getenv("APP_ENV") or "development").strip().lower()
+
+
+def is_production() -> bool:
+    return get_app_env() in ("prod", "production")
+
+
 # ── Simple getters ──────────────────────────────────────────────────────────
 
 
 def get_storage_provider() -> str:
-    """``local`` (default) or ``google_drive``."""
-    return (os.getenv("STORAGE_PROVIDER") or "local").strip().lower()
+    """``google_drive`` ou ``local``.
+
+    Em produção o padrão é ``google_drive`` (o local nunca é usado como
+    armazenamento definitivo); em desenvolvimento o padrão é ``local``.
+    """
+    raw = (os.getenv("STORAGE_PROVIDER") or "").strip().lower()
+    if raw:
+        return raw
+    return "google_drive" if is_production() else "local"
 
 
 def get_drive_folder_id() -> str | None:
@@ -50,11 +71,83 @@ def get_drive_folder_id() -> str | None:
     return value or None
 
 
-def get_public_validation_base_url() -> str | None:
-    """Base URL used to build the public validation link / QR (e.g.
-    https://certificados.exemplo.edu.br). Returned without a trailing slash."""
+def normalize_public_validation_base_url(value: str) -> str:
+    """Validate and normalize the public origin/base path used by QR links.
+
+    Only absolute HTTP(S) URLs are accepted. Credentials, query strings and
+    fragments are forbidden because they make the validation route ambiguous.
+    Repeated/trailing path separators are collapsed so callers cannot produce
+    ``//validar`` accidentally.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL não foi definida.")
+    if "\\" in raw or any(ord(char) < 32 or char.isspace() for char in raw):
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL contém caracteres inválidos.")
+    if re.search(r"%(?![0-9A-Fa-f]{2})", raw):
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL contém escape inválido.")
+
+    try:
+        parsed = urlsplit(raw)
+        # Accessing .port validates malformed/non-numeric port values.
+        parsed.port
+    except ValueError as exc:
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL é inválida.") from exc
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise StorageConfigError(
+            "PUBLIC_VALIDATION_BASE_URL deve ser uma URL HTTP(S) absoluta."
+        )
+    if parsed.username or parsed.password:
+        raise StorageConfigError(
+            "PUBLIC_VALIDATION_BASE_URL não pode conter usuário ou senha."
+        )
+    if parsed.query or parsed.fragment:
+        raise StorageConfigError(
+            "PUBLIC_VALIDATION_BASE_URL não pode conter query string ou fragmento."
+        )
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if any(segment in {".", ".."} for segment in segments):
+        raise StorageConfigError(
+            "PUBLIC_VALIDATION_BASE_URL não pode conter segmentos '.' ou '..'."
+        )
+    normalized_path = f"/{'/'.join(segments)}" if segments else ""
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc, normalized_path, "", "")
+    )
+
+
+def get_public_validation_base_url() -> str:
+    """Return the validated base URL used by every certificate QR.
+
+    Development defaults to the local public app. Production has no fallback
+    and is validated explicitly during startup.
+    """
     value = (os.getenv("PUBLIC_VALIDATION_BASE_URL") or "").strip()
-    return value.rstrip("/") or None
+    if not value:
+        value = DEFAULT_PUBLIC_VALIDATION_BASE_URL
+    return normalize_public_validation_base_url(value)
+
+
+def build_public_validation_url(code: str) -> str:
+    """Build the canonical public validation URL for a certificate code."""
+    clean_code = (code or "").strip()
+    if not clean_code:
+        raise ValueError("O código de validação não pode ser vazio.")
+    return f"{get_public_validation_base_url()}/validar/{quote(clean_code, safe='')}"
+
+
+def validate_production_public_validation_url() -> None:
+    """Require an explicit HTTPS public validation base URL in production."""
+    if not is_production():
+        return
+    value = (os.getenv("PUBLIC_VALIDATION_BASE_URL") or "").strip()
+    base_url = normalize_public_validation_base_url(value)
+    if urlsplit(base_url).scheme != "https":
+        raise StorageConfigError(
+            "Em produção, PUBLIC_VALIDATION_BASE_URL deve usar HTTPS."
+        )
 
 
 def get_max_file_size_bytes() -> int | None:
@@ -110,3 +203,28 @@ def load_service_account_info() -> dict[str, Any]:
         "Credenciais do Google Drive ausentes. Defina "
         "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 ou GOOGLE_SERVICE_ACCOUNT_FILE."
     )
+
+
+# ── Fail-closed startup validation (production) ────────────────────────────────
+
+
+def validate_production_storage() -> None:
+    """Abort startup in production unless Google Drive is fully configured.
+
+    Requires ``STORAGE_PROVIDER=google_drive``, a folder id and loadable
+    service-account credentials. No silent fallback to local storage is allowed.
+    """
+    if not is_production():
+        return
+    provider = get_storage_provider()
+    if provider != "google_drive":
+        raise StorageConfigError(
+            "Em produção, STORAGE_PROVIDER deve ser 'google_drive' "
+            f"(recebido: '{provider}'). O storage local não é permitido em produção."
+        )
+    if not get_drive_folder_id():
+        raise StorageConfigError(
+            "Em produção, GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID é obrigatório."
+        )
+    # Raises StorageConfigError if neither credential source is usable.
+    load_service_account_info()

@@ -12,7 +12,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 from models import ParticipantRegistryRecord
 from utils.file_utils import ensure_directory, sanitize_filename
-from utils.text_utils import calculate_centered_x, get_text_size, wrap_text, wrap_text_para
+from utils.text_utils import (
+    calculate_centered_x,
+    get_text_size,
+    wrap_hard_breaks,
+    wrap_text,
+    wrap_text_para,
+)
 
 _SYSTEM = platform.system()
 _WINDOWS_FONTS = Path("C:/Windows/Fonts")
@@ -24,6 +30,10 @@ _RESAMPLE_LANCZOS = (
 )
 
 TEXT_COLOR     = "#000000"
+
+# Visual-template element keys that hold the (potentially long) certificate body
+# authored by the secretaria. These are word-wrapped and may span many lines.
+_BODY_TEXT_KEYS = {"texto_certificado", "certificate_text"}
 
 # ── Font sizes as fraction of image HEIGHT (scale with any template) ──────────
 # Calibrated for a 3508×2480 px (A4 @ 300 dpi) template.
@@ -355,47 +365,37 @@ class CertificateGenerator:
 
     # ── Visual template generation ────────────────────────────────────────────
 
-    def generate_from_visual_template(
-        self,
-        participant: ParticipantRegistryRecord,
-        layout: dict[str, Any],
-        qr_url: str | None = None,
-    ) -> Path:
-        """Render a visual-template certificate to ``output_dir`` (compat)."""
-        image = self._compose_visual_image(participant, layout, qr_url)
-        output_path = self.config.output_dir / build_pdf_filename(participant)
-        image.convert("RGB").save(output_path, "PDF", resolution=300.0)
-        return output_path
-
     def render_pdf_bytes_visual(
         self,
         participant: ParticipantRegistryRecord,
         layout: dict[str, Any],
+        *,
         qr_url: str | None = None,
+        background_bytes: bytes | None = None,
     ) -> bytes:
-        """Compose a visual-template certificate and return PDF bytes."""
-        image = self._compose_visual_image(participant, layout, qr_url)
+        """Compose a visual-template certificate and return PDF bytes.
+
+        The background is provided as raw bytes (durable DB-stored template
+        image) — the generator never reads template assets from disk.
+        """
+        image = self._compose_visual_image(
+            participant, layout, qr_url=qr_url, background_bytes=background_bytes
+        )
         return _image_to_pdf_bytes(image)
 
     def _compose_visual_image(
         self,
         participant: ParticipantRegistryRecord,
         layout: dict[str, Any],
+        *,
         qr_url: str | None = None,
+        background_bytes: bytes | None = None,
     ) -> Image.Image:
         """Render a certificate image using a visual template layout dict."""
-        bg_url: str = layout.get("background", "")
-        image = self._load_visual_background(bg_url)
+        image = self._open_background_bytes(background_bytes)
         draw = ImageDraw.Draw(image)
 
-        participant_data: dict[str, str] = {
-            "name": participant.nome,
-            "event": participant.curso,
-            "date": participant.data_emissao,
-            "validation_code": participant.validation_code,
-            "texto_certificado": participant.texto_certificado,
-            "certificate_text": participant.certificate_text or participant.texto_certificado,
-        }
+        participant_data = self._participant_data(participant)
 
         for element in layout.get("elements", []):
             element_type = element.get("type", "text")
@@ -421,13 +421,24 @@ class CertificateGenerator:
             font_size = max(int(element.get("fontSize", 24)), 6)
             font_family: str = element.get("fontFamily", "Times New Roman")
             bold: bool = bool(element.get("bold", False))
-            italic: bool = bool(element.get("italic", False))
             color: str = element.get("color", "#000000")
             align: str = element.get("align", "left")
             anchor_x = int(element.get("x", 0))
             anchor_y = int(element.get("y", 0))
 
             font = self._resolve_visual_font(font_family, font_size, bold)
+
+            # The body text can be long: wrap it, respect typed line breaks, keep
+            # it inside the certificate, and honour the configured alignment.
+            if key in _BODY_TEXT_KEYS:
+                self._draw_text_block(
+                    draw, image, text, font,
+                    color=color, align=align,
+                    anchor_x=anchor_x, anchor_y=anchor_y,
+                    font_size=font_size, element=element,
+                )
+                continue
+
             tw, _ = get_text_size(draw, text, font)
 
             if align == "center":
@@ -441,15 +452,82 @@ class CertificateGenerator:
 
         return image
 
-    def _load_visual_background(self, background_url: str) -> Image.Image:
-        from services.visual_template_store import resolve_background_path
+    def _wrap_bound(self, align: str, anchor_x: int, image_width: int, margin: int) -> int:
+        """Max line width that keeps the text inside the page for an alignment.
 
-        path = resolve_background_path(background_url)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Background do template visual não encontrado: {path}"
+        - left  → grows right: room from the anchor to the right margin;
+        - right → grows left:  room from the anchor to the left margin;
+        - center→ grows both ways: symmetric room around the anchor.
+        """
+        if align == "center":
+            return max(2 * (min(anchor_x, image_width - anchor_x) - margin), 1)
+        if align == "right":
+            return max(anchor_x - margin, 1)
+        return max(image_width - anchor_x - margin, 1)
+
+    def _draw_text_block(
+        self,
+        draw: ImageDraw.ImageDraw,
+        image: Image.Image,
+        text: str,
+        font: ImageFont.FreeTypeFont,
+        *,
+        color: str,
+        align: str,
+        anchor_x: int,
+        anchor_y: int,
+        font_size: int,
+        element: dict[str, Any],
+    ) -> None:
+        """Render a (possibly long) body text: word-wrap + typed line breaks,
+        alignment, and a width limit so it never leaves the certificate."""
+        image_width = image.size[0]
+        margin = max(int(image_width * 0.04), 8)
+        bound = self._wrap_bound(align, anchor_x, image_width, margin)
+
+        explicit = element.get("width") or element.get("maxWidth")
+        if isinstance(explicit, (int, float)) and explicit > 0:
+            wrap_w = max(1, min(int(explicit), bound))
+        else:
+            wrap_w = bound
+
+        line_spacing = max(int(font_size * 0.3), 2)
+        line_h = get_text_size(draw, "Ag", font)[1] + line_spacing
+
+        y = anchor_y
+        for line in wrap_hard_breaks(draw, text, font, wrap_w):
+            if line:
+                lw, _ = get_text_size(draw, line, font)
+                if align == "center":
+                    draw_x = anchor_x - lw // 2
+                elif align == "right":
+                    draw_x = anchor_x - lw
+                else:
+                    draw_x = anchor_x
+                draw.text((draw_x, y), line, fill=color, font=font)
+            y += line_h
+
+    def _participant_data(self, participant: ParticipantRegistryRecord) -> dict[str, str]:
+        """Map template keys to certificate values.
+
+        ``event`` and ``course`` are DISTINCT fields (bug fix: ``event`` used to
+        receive the course)."""
+        return {
+            "name": participant.nome,
+            "event": participant.evento,
+            "course": participant.curso,
+            "date": participant.data_emissao,
+            "validation_code": participant.validation_code,
+            "texto_certificado": participant.texto_certificado,
+            "certificate_text": participant.certificate_text or participant.texto_certificado,
+        }
+
+    def _open_background_bytes(self, background_bytes: bytes | None) -> Image.Image:
+        if not background_bytes:
+            raise ValueError(
+                "Template sem imagem de fundo (background_bytes ausente)."
             )
-        return Image.open(path).convert("RGBA")
+        return Image.open(BytesIO(background_bytes)).convert("RGBA")
 
     def _draw_visual_image(self, base_image: Image.Image, element: dict[str, Any]) -> None:
         source = str(element.get("src", "")).strip()
@@ -493,6 +571,8 @@ class CertificateGenerator:
             pass
 
     def _load_visual_element_image(self, source: str) -> Image.Image:
+        # Element (overlay) images are embedded as data URLs in the immutable
+        # layout snapshot — durable and self-contained, no disk/asset lookup.
         if source.startswith("data:image"):
             _, _, encoded = source.partition(",")
             if not encoded:
@@ -502,14 +582,6 @@ class CertificateGenerator:
             except (binascii.Error, ValueError) as exc:
                 raise ValueError("Imagem em Data URL invalida.") from exc
             return Image.open(BytesIO(raw)).convert("RGBA")
-
-        if source.startswith("/visual-template-backgrounds/"):
-            from services.visual_template_store import resolve_background_path
-
-            path = resolve_background_path(source)
-            if not path.exists():
-                raise FileNotFoundError(f"Arquivo de imagem nao encontrado: {path}")
-            return Image.open(path).convert("RGBA")
 
         raise ValueError("Tipo de origem de imagem nao suportado no template visual.")
 
@@ -549,18 +621,6 @@ class CertificateGenerator:
         if fallback.exists():
             return ImageFont.truetype(str(fallback), size=size)
         return ImageFont.load_default()
-
-    def _prepare_for_future_qr_code(
-        self, participant: ParticipantRegistryRecord
-    ) -> dict[str, str]:
-        return {
-            "nome": participant.nome,
-            "referencia_registro": participant.referencia_registro,
-            "curso": participant.curso,
-            "livro": str(participant.livro),
-            "folha": str(participant.folha),
-            "linha": str(participant.linha),
-        }
 
     def _load_base_image(self, override: Path | None = None) -> Image.Image:
         path = override if override is not None else self.config.template_path

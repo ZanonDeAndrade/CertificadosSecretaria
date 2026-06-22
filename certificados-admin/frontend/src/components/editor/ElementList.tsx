@@ -1,13 +1,19 @@
 import { KEY_LABELS, TemplateElement, ElementKey } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
 
-const QUICK_KEYS: { key: ElementKey; label: string }[] = [
-  { key: "name", label: "Nome" },
-  { key: "event", label: "Evento" },
-  { key: "date", label: "Data" },
-  { key: "validation_code", label: "Codigo" },
-  { key: "texto_certificado", label: "Texto" },
-  { key: "static", label: "Texto fixo" },
+const QUICK_KEYS: { key: ElementKey; label: string; title?: string }[] = [
+  { key: "name", label: "Nome", title: "Nome do participante (vem da planilha)" },
+  {
+    key: "texto_certificado",
+    label: "Corpo do certificado",
+    title:
+      "Onde o “Texto padrão do certificado” (escrito na emissão) é impresso. " +
+      "Posicione este bloco onde o parágrafo deve começar.",
+  },
+  { key: "event", label: "Evento", title: "Nome do evento (vem da planilha)" },
+  { key: "date", label: "Data", title: "Data de emissão (vem da planilha)" },
+  { key: "validation_code", label: "Codigo", title: "Código de validação do certificado" },
+  { key: "static", label: "Texto fixo", title: "Texto fixo, igual em todos os certificados" },
 ];
 
 interface ElementListProps {
@@ -38,11 +44,12 @@ function ElementList({
       <div className="border-b border-slate-100 p-3">
         <p className="mb-2 text-xs text-slate-400">Adicionar campo:</p>
         <div className="flex flex-wrap gap-1">
-          {QUICK_KEYS.map(({ key, label }) => (
+          {QUICK_KEYS.map(({ key, label, title }) => (
             <button
               key={key}
               type="button"
               onClick={() => onAdd(key)}
+              title={title}
               className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700 transition hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
             >
               + {label}

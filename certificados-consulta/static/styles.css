@@ -367,3 +367,89 @@ body {
 .btn-page:hover {
   background: var(--slate-100, #f1f5f9);
 }
+
+.result-item form {
+  display: grid;
+  gap: 0.45rem;
+  min-width: min(100%, 18rem);
+}
+
+.result-item form input[type="password"] {
+  border: 1px solid var(--slate-300);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.75rem;
+}
+
+/* ── Canonical validation page ───────────────────────────────────────────── */
+.validation {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.validation-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  border: 1px solid;
+  border-radius: 1.75rem;
+  padding: 1.25rem;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.validation-status h2 {
+  margin: 0.25rem 0;
+  font-size: 1.5rem;
+  color: var(--slate-950);
+}
+
+.validation-status p:last-child {
+  margin: 0;
+  color: var(--slate-600);
+}
+
+.status-icon {
+  flex: 0 0 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 999px;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.validation-valid { border-color: #a7f3d0; }
+.validation-valid .status-icon { background: #d1fae5; color: #047857; }
+.validation-revoked { border-color: #fecaca; }
+.validation-revoked .status-icon { background: #fee2e2; color: #b91c1c; }
+.validation-missing,
+.validation-error { border-color: #fde68a; }
+.validation-missing .status-icon,
+.validation-error .status-icon { background: #fef3c7; color: #92400e; }
+
+.public-details {
+  margin: 0;
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--slate-200);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.public-details > div {
+  padding: 0.9rem 1.15rem;
+  border-bottom: 1px solid var(--slate-200);
+}
+
+.public-details > div:last-child { border-bottom: 0; }
+.public-details dt { font-size: 0.75rem; color: var(--slate-500); }
+.public-details dd { margin: 0.2rem 0 0; font-weight: 600; color: var(--slate-900); }
+
+.validation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
