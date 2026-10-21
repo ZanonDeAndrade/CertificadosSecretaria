@@ -112,10 +112,27 @@
 
     {% if certificate %}
       <dl class="public-details" aria-label="Dados públicos do certificado">
-        <div>
-          <dt>Participante</dt>
-          <dd>{{ certificate.participant_name }}</dd>
-        </div>
+        {% if certificate.per_work and certificate.authors %}
+          <div>
+            <dt>Autores</dt>
+            <dd>
+              <ol class="authors-list">
+                {% for author in certificate.authors %}<li>{{ author }}</li>{% endfor %}
+              </ol>
+            </dd>
+          </div>
+        {% else %}
+          <div>
+            <dt>Participante</dt>
+            <dd>{{ certificate.participant_name }}</dd>
+          </div>
+        {% endif %}
+        {% if certificate.work_title %}
+          <div><dt>Título do trabalho</dt><dd>{{ certificate.work_title }}</dd></div>
+        {% endif %}
+        {% if certificate.team_name %}
+          <div><dt>Equipe</dt><dd>{{ certificate.team_name }}</dd></div>
+        {% endif %}
         {% if certificate.event_name %}
           <div><dt>Evento</dt><dd>{{ certificate.event_name }}</dd></div>
         {% endif %}

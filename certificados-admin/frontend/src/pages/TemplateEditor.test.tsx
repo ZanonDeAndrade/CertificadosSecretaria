@@ -18,6 +18,12 @@ vi.mock("../services/templateApi", () => ({
   activateVersion: vi.fn(),
   renameVersion: vi.fn(),
   deleteVersion: vi.fn(),
+  getTemplateSampleData: vi.fn(async () => ({
+    values: {},
+    empty_settings: [],
+    can_manage_settings: true,
+  })),
+  computeTextLayouts: vi.fn(async () => []),
 }));
 
 const ACTIVE = {

@@ -19,6 +19,9 @@ import EditorCanvas from "../components/editor/EditorCanvas";
 import EditorTopbar from "../components/editor/EditorTopbar";
 import ElementList from "../components/editor/ElementList";
 import PropertiesPanel from "../components/editor/PropertiesPanel";
+import SettingsNotice from "../components/editor/SettingsNotice";
+import { certificateTypeLabel } from "../domain/certificateTypes";
+import { getTemplateSampleData, TemplateSampleData } from "../services/templateApi";
 import AccessibleModal from "../components/AccessibleModal";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import PageHeader from "../ui/PageHeader";
@@ -53,6 +56,13 @@ type EditorMode = "list" | "edit";
 
 function bgUrl(version: TemplateVersion): string {
   return `${API_BASE_URL.replace(/\/$/, "")}${version.background_url}`;
+}
+
+/** "Genérico" or the type the version is dedicated to. */
+function versionTypeLabel(version: Pick<TemplateVersion, "certificate_type">): string {
+  return version.certificate_type
+    ? certificateTypeLabel(version.certificate_type)
+    : "Genérico (todos os tipos)";
 }
 
 function formatDate(value?: string | null): string {
@@ -99,6 +109,10 @@ export default function TemplateEditor() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [compare, setCompare] = useState<TemplateVersion[] | null>(null);
+  const [sample, setSample] = useState<TemplateSampleData | null>(null);
+  const [sampleFailed, setSampleFailed] = useState(false);
+  /* Type the version being edited is dedicated to; null = generic. */
+  const [templateType, setTemplateType] = useState<string | null>(null);
 
   const editor = useEditorCanvas();
   const history = useTemplateHistory(editor);
@@ -124,6 +138,7 @@ export default function TemplateEditor() {
       addTextElement: edited(editor.addTextElement),
       addImageElement: edited(editor.addImageElement),
       updateElement: edited(editor.updateElement),
+      nudgeElement: edited(editor.nudgeElement),
       deleteElement: edited(editor.deleteElement),
       duplicateElement: edited(editor.duplicateElement),
       setBackground: edited(editor.setBackground),
@@ -135,6 +150,7 @@ export default function TemplateEditor() {
       editor.addTextElement,
       editor.addImageElement,
       editor.updateElement,
+      editor.nudgeElement,
       editor.deleteElement,
       editor.duplicateElement,
       editor.setBackground,
@@ -155,7 +171,8 @@ export default function TemplateEditor() {
     try {
       const list = await listVersions();
       setVersions(list);
-      setActive(list.find((version) => version.is_active) ?? null);
+      // The generic active version serves every type without one of its own.
+      setActive(list.find((version) => version.is_active && !version.certificate_type) ?? null);
     } catch (error) {
       setLoadError(
         failureMessage(error, "Não foi possível carregar as versões do template."),
@@ -175,14 +192,35 @@ export default function TemplateEditor() {
     };
   }, [mode, refreshList]);
 
-  const openEditor = async (versionId: number | null, name: string) => {
+  /* Sample values come from the backend so the preview shows what the PDF
+   * will print, institutional data included. Without the backend the editor
+   * keeps its built-in sample and says so. */
+  const loadSampleData = async () => {
+    try {
+      const data = await getTemplateSampleData();
+      editor.setSampleData(data.values);
+      setSample(data);
+      setSampleFailed(false);
+    } catch {
+      setSample(null);
+      setSampleFailed(true);
+    }
+  };
+
+  const openEditor = async (
+    versionId: number | null,
+    name: string,
+    certificateType: string | null = null,
+  ) => {
     setSaveError("");
     setTemplateName(name);
+    setTemplateType(certificateType);
     setMode("edit");
     history.reset();
     // Whatever settles on the canvas next is the clean starting point, whether
     // that is an empty canvas or a loaded version.
     history.markNextAsBaseline();
+    void loadSampleData();
     if (versionId == null) {
       editor.clearAll();
       return;
@@ -207,7 +245,7 @@ export default function TemplateEditor() {
     setSaving(true);
     setSaveError("");
     try {
-      await createVersion(name || "Nova versão", layout);
+      await createVersion(name || "Nova versão", layout, templateType);
       history.markSaved();
       setMode("list");
       setNotice(
@@ -291,9 +329,28 @@ export default function TemplateEditor() {
         target &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
           target.isContentEditable);
 
       const mod = event.ctrlKey || event.metaKey;
+
+      /* Arrow keys nudge the selected element: 1 px, or 10 px with Shift.
+       * A field keeps its own cursor movement, and the element list keeps its
+       * own navigation (it has already handled, and prevented, the event). */
+      const arrows: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const arrow = arrows[event.key];
+      if (arrow && !mod && !event.altKey) {
+        if (typing || event.defaultPrevented || !editor.selectedId) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 10 : 1;
+        editorActions.nudgeElement(editor.selectedId, arrow[0] * step, arrow[1] * step);
+        return;
+      }
 
       if (mod && event.key.toLowerCase() === "z") {
         if (typing) return;
@@ -336,7 +393,7 @@ export default function TemplateEditor() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing, history, editor.zoom]);
+  }, [isEditing, history, editor.zoom, editor.selectedId, editorActions]);
 
   /* ── List view ──────────────────────────────────────────────────────── */
   if (mode === "list") {
@@ -344,7 +401,7 @@ export default function TemplateEditor() {
       <>
         <PageHeader
           title="Template do certificado"
-          description="Existe um único template global. Cada alteração cria uma nova versão imutável; ative a que deve valer para as próximas emissões."
+          description="O template genérico vale para todos os tipos; um tipo pode ter a própria versão ativa. Cada alteração cria uma nova versão imutável; ative a que deve valer para as próximas emissões."
           actions={
             canManage ? (
               <Button
@@ -385,8 +442,8 @@ export default function TemplateEditor() {
         {/* Active version */}
         <Panel className="mb-4">
           <PanelHeader
-            title="Versão ativa"
-            description="Layout usado em todos os certificados emitidos agora."
+            title="Versão ativa (genérica)"
+            description="Usada por todos os tipos de certificado que não têm uma versão própria ativa."
           />
           <div className="px-4 py-4 sm:px-5">
             {loading ? (
@@ -410,7 +467,7 @@ export default function TemplateEditor() {
                     {active.name ? ` — ${active.name}` : ""}
                   </p>
                   <div className="mt-1.5">
-                    <StatusBadge tone="ok">Ativa</StatusBadge>
+                    <StatusBadge tone="ok">Ativa (genérica)</StatusBadge>
                   </div>
                   <dl className="mt-3 space-y-1 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
                     <div className="flex gap-2">
@@ -502,13 +559,17 @@ export default function TemplateEditor() {
                       {version.name ? ` — ${version.name}` : ""}
                     </p>
                     <p className="mt-0.5 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
-                      Criada em {formatDate(version.created_at)}
+                      {versionTypeLabel(version)} · Criada em {formatDate(version.created_at)}
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
                     {version.is_active ? (
-                      <StatusBadge tone="ok">Ativa</StatusBadge>
+                      <StatusBadge tone="ok">
+                        {version.certificate_type
+                          ? `Ativa para ${certificateTypeLabel(version.certificate_type)}`
+                          : "Ativa (genérica)"}
+                      </StatusBadge>
                     ) : (
                       canManage && (
                         <Button
@@ -555,7 +616,11 @@ export default function TemplateEditor() {
                         variant="ghost"
                         icon="duplicate"
                         onClick={() =>
-                          openEditor(version.id, `Cópia de v${version.version_number}`)
+                          openEditor(
+                            version.id,
+                            `Cópia de v${version.version_number}`,
+                            version.certificate_type ?? null,
+                          )
                         }
                       >
                         Editar como nova
@@ -572,7 +637,11 @@ export default function TemplateEditor() {
         <ConfirmDialog
           open={Boolean(activating)}
           title={`Ativar versão ${activating?.version_number ?? ""}`}
-          description="Todos os certificados emitidos a partir de agora usarão este layout."
+          description={
+            activating?.certificate_type
+              ? `Todos os certificados do tipo ${certificateTypeLabel(activating.certificate_type)} emitidos a partir de agora usarão este layout.`
+              : "Todos os certificados emitidos a partir de agora usarão este layout, exceto os tipos com versão própria ativa."
+          }
           confirmLabel="Ativar esta versão"
           tone="primary"
           busy={activateBusy}
@@ -595,9 +664,17 @@ export default function TemplateEditor() {
               />
               <div className="min-w-0 text-[length:var(--text-sm)]">
                 <p className="text-[color:var(--ink)]">
-                  A versão ativa passará de{" "}
+                  A versão ativa {versionTypeLabel(activating).toLowerCase()} passará de{" "}
                   <strong>
-                    {active ? `v${active.version_number}` : "nenhuma"}
+                    {(() => {
+                      const current = versions.find(
+                        (version) =>
+                          version.is_active &&
+                          (version.certificate_type ?? null) ===
+                            (activating.certificate_type ?? null),
+                      );
+                      return current ? `v${current.version_number}` : "nenhuma";
+                    })()}
                   </strong>{" "}
                   para <strong>v{activating.version_number}</strong>.
                 </p>
@@ -747,6 +824,8 @@ export default function TemplateEditor() {
       <div className="-mx-3 -my-5 flex h-[calc(100vh-var(--topbar-height))] flex-col sm:-mx-5 sm:-my-6 lg:-mx-8">
         <EditorTopbar
           templateName={templateName}
+          certificateType={templateType}
+          onCertificateTypeChange={setTemplateType}
           saving={saving}
           hasBackground={Boolean(editor.backgroundUrl)}
           isDirty={history.isDirty}
@@ -793,6 +872,13 @@ export default function TemplateEditor() {
           </Alert>
         )}
 
+        <SettingsNotice
+          emptySettings={sample?.empty_settings ?? []}
+          canManage={sample?.can_manage_settings ?? false}
+          elements={editor.elements}
+          fallback={sampleFailed}
+        />
+
         <div className="flex min-h-0 flex-1">
           {isWideEditor ? (
             <>
@@ -800,6 +886,7 @@ export default function TemplateEditor() {
                 <ElementList
                   elements={editor.elements}
                   selectedId={editor.selectedId}
+                  certificateType={templateType}
                   onAdd={editorActions.addTextElement}
                   onSelect={editor.selectElement}
                   onDelete={editorActions.deleteElement}
@@ -817,9 +904,13 @@ export default function TemplateEditor() {
                 <PropertiesPanel
                   elements={editor.elements}
                   selectedId={editor.selectedId}
+                  certificateType={templateType}
                   onUpdate={editorActions.updateElement}
                   onDelete={editorActions.deleteElement}
                   onDuplicate={editorActions.duplicateElement}
+                  textLayouts={editor.textLayouts}
+                  layoutSource={editor.layoutSource}
+                  imageSize={editor.imageSize}
                 />
               </aside>
             </>
@@ -861,6 +952,7 @@ export default function TemplateEditor() {
                     <ElementList
                       elements={editor.elements}
                       selectedId={editor.selectedId}
+                      certificateType={templateType}
                       onAdd={editorActions.addTextElement}
                       onSelect={editor.selectElement}
                       onDelete={editorActions.deleteElement}
@@ -870,9 +962,13 @@ export default function TemplateEditor() {
                     <PropertiesPanel
                       elements={editor.elements}
                       selectedId={editor.selectedId}
+                      certificateType={templateType}
                       onUpdate={editorActions.updateElement}
                       onDelete={editorActions.deleteElement}
                       onDuplicate={editorActions.duplicateElement}
+                      textLayouts={editor.textLayouts}
+                      layoutSource={editor.layoutSource}
+                      imageSize={editor.imageSize}
                     />
                   )}
                 </div>
@@ -936,7 +1032,8 @@ export default function TemplateEditor() {
             ["Ctrl + +", "Aumentar zoom"],
             ["Ctrl + −", "Diminuir zoom"],
             ["Ctrl + 0", "Zoom 100%"],
-            ["Setas", "Mover o elemento selecionado"],
+            ["Setas", "Mover o elemento selecionado em 1 px"],
+            ["Shift + Setas", "Mover o elemento selecionado em 10 px"],
             ["Delete", "Excluir o elemento selecionado"],
             ["?", "Abrir esta lista"],
           ].map(([keys, description]) => (

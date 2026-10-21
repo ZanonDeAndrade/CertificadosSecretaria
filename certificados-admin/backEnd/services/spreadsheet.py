@@ -36,6 +36,8 @@ import pandas as pd
 from certificados_backend.utils.courses import COURSES, normalize_course_name
 from certificados_backend.utils.dates import normalize_date
 
+from database.certificate_types import MAX_WORK_AUTHORS, certificate_type_traits
+
 DEFAULT_MAX_ROWS = 2000
 DEFAULT_MAX_COLS = 50
 DEFAULT_MAX_CELL_LEN = 2000
@@ -75,9 +77,26 @@ _COLUMN_SYNONYMS: dict[str, set[str]] = {
         "issuedate",
         "dataemissaocertificado",
     },
+    "equipe": {"equipe", "team", "nomeequipe", "nomedaequipe", "grupo"},
+    "titulo_trabalho": {
+        "titulotrabalho",
+        "titulodotrabalho",
+        "titulo",
+        "trabalho",
+        "title",
+        "worktitle",
+    },
+    # Per-work certificates: "Autor 1", "autor_1", "Autor01" all map to autor1.
+    **{
+        f"autor{index}": {f"autor{index}", f"autor0{index}", f"author{index}", f"coautor{index}"}
+        for index in range(1, MAX_WORK_AUTHORS + 1)
+    },
 }
 
 REQUIRED_COLUMNS = ("nome", "carga_horaria")
+# Per-work certificates need the first author; the workload may be blank.
+PER_WORK_REQUIRED_COLUMNS = ("autor1",)
+_AUTHOR_HEADER_RE = re.compile(r"^(?:co)?aut(?:h)?or0*(\d+)$")
 
 
 def _norm_header(value: object) -> str:
@@ -104,7 +123,8 @@ class SpreadsheetError(Exception):
 class SpreadsheetRow:
     row_number: int
     nome: str
-    carga_horaria: int
+    # ``None`` only for types whose workload is optional (per-work certificates).
+    carga_horaria: int | None
     # Optional fields — written by the secretary in the body text when absent.
     curso: str = ""  # canonical course name when matched, else raw
     evento: str = ""
@@ -113,6 +133,11 @@ class SpreadsheetRow:
     documento: str = ""
     data_inicio: str = ""
     data_fim: str = ""
+    # Per-work certificates: the authors in order, blanks already dropped.
+    # ``nome`` is the first author, the certificate's holder.
+    autores: tuple[str, ...] = ()
+    equipe: str = ""
+    titulo_trabalho: str = ""
 
 
 @dataclass
@@ -126,6 +151,8 @@ class InvalidRow:
 class ValidationReport:
     valid: list[SpreadsheetRow] = field(default_factory=list)
     invalid: list[InvalidRow] = field(default_factory=list)
+    #: File-level notes that do not invalidate rows (e.g. ignored columns).
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -211,6 +238,15 @@ def compute_business_key(
         parts.append(_norm_text(body))
     if certificate_type is not None:
         parts.append(_norm_text(certificate_type))
+    # Per-work data joins the key only when present, so historical keys of
+    # ordinary certificates are unchanged while two works that share a first
+    # author are still told apart.
+    if row.autores:
+        parts.append("autores=" + "/".join(_norm_text(name) for name in row.autores))
+    if row.equipe:
+        parts.append("equipe=" + _norm_text(row.equipe))
+    if row.titulo_trabalho:
+        parts.append("titulo=" + _norm_text(row.titulo_trabalho))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -293,8 +329,16 @@ def read_and_validate(
     max_cols: int = DEFAULT_MAX_COLS,
     max_cell_len: int = DEFAULT_MAX_CELL_LEN,
     max_seconds: float = DEFAULT_MAX_SECONDS,
+    certificate_type: str | None = None,
 ) -> ValidationReport:
-    """Read an xlsx and return a per-row validation report (nothing persisted)."""
+    """Read an xlsx and return a per-row validation report (nothing persisted).
+
+    ``certificate_type`` selects the column contract: per-work types take the
+    authors columns (``autor1`` required, ``nome`` standing in for it only when
+    ``autor1`` is absent) and may leave the workload blank.
+    """
+    traits = certificate_type_traits(certificate_type)
+    per_work = traits.per_work_authors
     data = _materialize_bytes(source)
     enforce_xlsx_limits(
         data,
@@ -311,7 +355,24 @@ def read_and_validate(
         if canonical and canonical not in colmap:
             colmap[canonical] = column
 
-    missing = [c for c in REQUIRED_COLUMNS if c not in colmap]
+    report = ValidationReport()
+    if per_work:
+        if "autor1" not in colmap and "nome" in colmap:
+            colmap["autor1"] = colmap.pop("nome")
+        ignored = sorted(
+            str(column)
+            for column in dataframe.columns
+            if (match := _AUTHOR_HEADER_RE.match(_norm_header(column)))
+            and int(match.group(1)) > MAX_WORK_AUTHORS
+        )
+        if ignored:
+            report.warnings.append(
+                "Colunas ignoradas: "
+                + ", ".join(ignored)
+                + f". Um trabalho tem no máximo {MAX_WORK_AUTHORS} autores."
+            )
+    required = PER_WORK_REQUIRED_COLUMNS if per_work else REQUIRED_COLUMNS
+    missing = [c for c in required if c not in colmap]
     if missing:
         raise SpreadsheetError(
             "Colunas obrigatórias ausentes na planilha: " + ", ".join(sorted(set(missing)))
@@ -323,25 +384,36 @@ def read_and_validate(
 
     default_emissao_norm = normalize_date(default_data_emissao) if has_emissao_default else None
 
-    report = ValidationReport()
+    author_columns = [f"autor{index}" for index in range(1, MAX_WORK_AUTHORS + 1)]
     for offset, (_, raw) in enumerate(dataframe.iterrows()):
         row_number = offset + 2  # +1 header, +1 to 1-based
         values = {canonical: _cell(raw[col]) for canonical, col in colmap.items()}
 
-        if not values.get("nome") and not values.get("carga_horaria"):
+        # Blank cells between authors are dropped; the rest keep their order.
+        autores = tuple(values.get(column, "") for column in author_columns if values.get(column))
+        if per_work:
+            if not autores and not values.get("carga_horaria"):
+                continue  # skip fully empty rows
+        elif not values.get("nome") and not values.get("carga_horaria"):
             continue  # skip fully empty rows
 
         errors: list[str] = []
 
-        # ── Required: name + workload ─────────────────────────────────────────
-        nome = values.get("nome", "")
-        if not nome:
-            errors.append("nome é obrigatório")
+        # ── Required: name (or first author) + workload ───────────────────────
+        if per_work:
+            nome = autores[0] if autores else ""
+            if not nome:
+                errors.append("autor1 é obrigatório")
+        else:
+            nome = values.get("nome", "")
+            if not nome:
+                errors.append("nome é obrigatório")
 
         carga_raw = values.get("carga_horaria", "")
         carga = parse_workload(carga_raw) if carga_raw else None
         if not carga_raw:
-            errors.append("carga_horaria é obrigatória")
+            if not traits.optional_workload:
+                errors.append("carga_horaria é obrigatória")
         elif carga is None:
             errors.append(f"carga_horaria inválida: '{carga_raw}'")
 
@@ -367,7 +439,6 @@ def read_and_validate(
         if errors:
             report.invalid.append(InvalidRow(row_number=row_number, data=values, errors=errors))
             continue
-        assert carga is not None  # required and parsed above; narrows for the type checker
 
         report.valid.append(
             SpreadsheetRow(
@@ -381,6 +452,9 @@ def read_and_validate(
                 documento=values.get("documento", ""),
                 data_inicio=inicio,
                 data_fim=fim,
+                autores=autores if per_work else (),
+                equipe=values.get("equipe", ""),
+                titulo_trabalho=values.get("titulo_trabalho", ""),
             )
         )
 

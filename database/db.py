@@ -104,6 +104,11 @@ def check_connection() -> None:
 # predate them (PostgreSQL schema is owned by Alembic migrations). Keep in sync
 # with database/models.py.
 _EXTRA_COLUMNS: dict[str, str] = {
+    # Per-work certificates (authors, team, work title).
+    "authors_json": "TEXT",
+    "authors_search": "TEXT",
+    "team_name": "TEXT",
+    "work_title": "TEXT",
     "storage_provider": "TEXT NOT NULL DEFAULT 'local'",
     "drive_file_id": "TEXT",
     "drive_folder_id": "TEXT",
@@ -116,6 +121,7 @@ _EXTRA_COLUMNS: dict[str, str] = {
     "participant_email": "TEXT",
     "participant_document": "TEXT",
     "participant_name_normalized": "TEXT",
+    "event_name_normalized": "TEXT",
     "participant_document_hash": "TEXT",
     "participant_document_hash_key_id": "TEXT",
     "course_name": "TEXT",
@@ -151,11 +157,17 @@ _EMISSION_BATCH_EXTRA_COLUMNS: dict[str, str] = {
     "certificate_type": "TEXT",
 }
 
+_TEMPLATE_VERSION_EXTRA_COLUMNS: dict[str, str] = {
+    "certificate_type": "TEXT",
+    "active_type_key": "TEXT",
+}
+
 _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_certificates_participant_name ON certificates (participant_name)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_name_normalized ON certificates (participant_name_normalized)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_name_normalized_status ON certificates (participant_name_normalized, status)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_event_name ON certificates (event_name)",
+    "CREATE INDEX IF NOT EXISTS idx_certificates_event_name_normalized ON certificates (event_name_normalized)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_course_name ON certificates (course_name)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_status ON certificates (status)",
     # Chronological ordering/filtering uses the real (ISO) issue date.
@@ -163,6 +175,7 @@ _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_certificates_batch_id ON certificates (batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_certificates_certificate_type ON certificates (certificate_type)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_certificates_business_key ON certificates (business_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_template_versions_active_type_key ON template_versions (active_type_key)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_action_created_at ON audit_log (action, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_actor_created_at ON audit_log (actor_id, created_at)",
@@ -183,6 +196,8 @@ def _legacy_sqlite_migrate(eng) -> None:
             for column, ddl in _EXTRA_COLUMNS.items():
                 if column not in existing:
                     conn.exec_driver_sql(f"ALTER TABLE certificates ADD COLUMN {column} {ddl}")
+            if "event_name_normalized" not in existing:
+                _backfill_event_name_normalized(conn)
         existing_users = {
             row[1] for row in conn.exec_driver_sql("PRAGMA table_info(admin_users)").fetchall()
         }
@@ -200,8 +215,35 @@ def _legacy_sqlite_migrate(eng) -> None:
             for column, ddl in _EMISSION_BATCH_EXTRA_COLUMNS.items():
                 if column not in existing_batches:
                     conn.exec_driver_sql(f"ALTER TABLE emission_batches ADD COLUMN {column} {ddl}")
+        existing_versions = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(template_versions)").fetchall()
+        }
+        if existing_versions:
+            # Templates per type: the version active so far becomes the generic
+            # one, and one active version per type replaces the single-active rule.
+            for column, ddl in _TEMPLATE_VERSION_EXTRA_COLUMNS.items():
+                if column not in existing_versions:
+                    conn.exec_driver_sql(f"ALTER TABLE template_versions ADD COLUMN {column} {ddl}")
+            conn.exec_driver_sql("DROP INDEX IF EXISTS uq_template_versions_single_active")
+            conn.exec_driver_sql(
+                "UPDATE template_versions SET active_type_key = '__generic__' "
+                "WHERE is_active = 1 AND active_type_key IS NULL"
+            )
         for statement in _INDEXES:
             conn.exec_driver_sql(statement)
+
+
+def _backfill_event_name_normalized(conn) -> None:
+    """Fill the event search column of rows written before it existed."""
+    from .privacy import normalize_name
+
+    rows = conn.exec_driver_sql("SELECT id, event_name FROM certificates").fetchall()
+    for row_id, event_name in rows:
+        conn.exec_driver_sql(
+            "UPDATE certificates SET event_name_normalized = ? WHERE id = ?",
+            (normalize_name(event_name), row_id),
+        )
 
 
 def init_db() -> None:
@@ -1048,6 +1090,7 @@ def create_template_version(
     background_image: bytes | None,
     background_mime_type: str,
     created_by: int | None = None,
+    certificate_type: str | None = None,
 ) -> dict:
     with _session() as s:
         return TemplateVersionRepository(s).create(
@@ -1058,6 +1101,7 @@ def create_template_version(
             background_image=background_image,
             background_mime_type=background_mime_type,
             created_by=created_by,
+            certificate_type=certificate_type,
         )
 
 
@@ -1066,9 +1110,9 @@ def get_template_version(version_id: int) -> dict | None:
         return TemplateVersionRepository(s).get(version_id)
 
 
-def get_active_template_version() -> dict | None:
+def get_active_template_version(certificate_type: str | None = None) -> dict | None:
     with _session() as s:
-        return TemplateVersionRepository(s).get_active()
+        return TemplateVersionRepository(s).get_active(certificate_type)
 
 
 def list_template_versions() -> list[dict]:

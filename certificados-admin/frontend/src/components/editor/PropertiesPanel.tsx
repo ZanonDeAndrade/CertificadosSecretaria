@@ -7,6 +7,7 @@
  * units stated in the label, and position is editable by keyboard — dragging on
  * the canvas cannot be the only way to place an element.
  */
+import { useEffect, useState } from "react";
 import {
   AVAILABLE_FONTS,
   ElementKey,
@@ -17,6 +18,10 @@ import {
   TextTemplateElement,
 } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
+import { isPerWorkType } from "../../domain/certificateTypes";
+import { PER_WORK_KEYS } from "../../types/template";
+import { TEXT_BOX_MIN_SIZE, maxBoxWidth } from "../../lib/textBoxResize";
+import Alert from "../../ui/Alert";
 import Button from "../../ui/Button";
 import Icon from "../../ui/Icon";
 import { cn } from "../../ui/cn";
@@ -34,15 +39,24 @@ const VARIABLE_KEYS: ElementKey[] = [
   "validation_code",
   "texto_certificado",
   "certificate_type",
+  "equipe",
+  "work_title",
   "static",
 ];
 
 interface PropertiesPanelProps {
   elements: TemplateElement[];
   selectedId: string | null;
+  /** Type the template is dedicated to; null for the generic template. */
+  certificateType?: string | null;
   onUpdate: EditorAPI["updateElement"];
   onDelete: EditorAPI["deleteElement"];
   onDuplicate: EditorAPI["duplicateElement"];
+  /** Line breaks per text element, as the PDF will break them. */
+  textLayouts?: EditorAPI["textLayouts"];
+  layoutSource?: EditorAPI["layoutSource"];
+  /** Size of the background art, which bounds the text boxes. */
+  imageSize?: { width: number; height: number };
 }
 
 function isTextElement(element: TemplateElement): element is TextTemplateElement {
@@ -59,8 +73,16 @@ export default function PropertiesPanel({
   onUpdate,
   onDelete,
   onDuplicate,
+  certificateType = null,
+  textLayouts = {},
+  layoutSource = "pending",
+  imageSize = { width: 1, height: 1 },
 }: PropertiesPanelProps) {
   const element = elements.find((entry) => entry.id === selectedId) ?? null;
+  const layout = element ? textLayouts[element.id] : undefined;
+  const variableKeys = isPerWorkType(certificateType)
+    ? [...VARIABLE_KEYS, ...PER_WORK_KEYS]
+    : VARIABLE_KEYS;
 
   if (!element) {
     return (
@@ -114,7 +136,7 @@ export default function PropertiesPanel({
                 }
                 className={CONTROL}
               >
-                {VARIABLE_KEYS.map((key) => (
+                {variableKeys.map((key) => (
                   <option key={key} value={key}>
                     {KEY_LABELS[key] ?? key}
                   </option>
@@ -160,10 +182,89 @@ export default function PropertiesPanel({
               </Row>
             </div>
             <p className="text-[length:var(--text-2xs)] text-[color:var(--ink-subtle)]">
-              Coordenadas em pixels da arte original. Também é possível usar as
-              setas do teclado com o elemento selecionado.
+              Coordenadas em pixels da arte original. Com o elemento selecionado,
+              as setas do teclado movem 1 px e, com Shift, 10 px.
             </p>
           </Group>
+
+          {element.key !== "qr" && (
+            <Group title="Caixa de texto">
+              <div className="grid grid-cols-2 gap-2">
+                <Row label="Largura (px)">
+                  <SizeInput
+                    value={element.width}
+                    min={TEXT_BOX_MIN_SIZE}
+                    max={Math.max(
+                      maxBoxWidth(element.x, element.align, imageSize.width),
+                      TEXT_BOX_MIN_SIZE,
+                    )}
+                    ariaLabel="Largura da caixa de texto"
+                    onCommit={(width) => update({ width } as Partial<TemplateElement>)}
+                  />
+                </Row>
+                <Row label="Altura (px)">
+                  <SizeInput
+                    value={element.height}
+                    min={TEXT_BOX_MIN_SIZE}
+                    max={Math.max(imageSize.height - element.y, TEXT_BOX_MIN_SIZE)}
+                    ariaLabel="Altura da caixa de texto"
+                    onCommit={(height) => update({ height } as Partial<TemplateElement>)}
+                  />
+                </Row>
+              </div>
+              {(element.width !== undefined || element.height !== undefined) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    update({ width: undefined, height: undefined } as Partial<TemplateElement>)
+                  }
+                  className="self-start text-[length:var(--text-xs)] font-medium text-[color:var(--brand-700)] hover:underline"
+                >
+                  Voltar ao tamanho automático
+                </button>
+              )}
+              <label className="flex items-start gap-2 text-[length:var(--text-xs)] text-[color:var(--ink)]">
+                <input
+                  type="checkbox"
+                  checked={element.anchorY === "bottom"}
+                  onChange={(event) =>
+                    update({
+                      anchorY: event.target.checked ? "bottom" : undefined,
+                    } as Partial<TemplateElement>)
+                  }
+                  className="mt-0.5 accent-[var(--brand-700)]"
+                />
+                <span>
+                  Base fixa: Y é a base do bloco, que cresce para cima
+                  {element.key === "authors" ? " conforme o número de autores" : ""}.
+                </span>
+              </label>
+              {element.key === "authors" && (
+                <p className="text-[length:var(--text-2xs)] text-[color:var(--ink-subtle)]">
+                  A prévia mostra oito autores, o caso mais alto. Deixe espaço acima
+                  do bloco para o corpo do texto.
+                </p>
+              )}
+              {layout?.overflow && element.height !== undefined && (
+                <Alert tone="warn" live={false}>
+                  O texto não cabe na caixa: {layout.lines.length} linha(s) ocupam{" "}
+                  {layout.textHeight} px e a altura é {element.height} px. Aumente a
+                  altura, reduza a fonte ou o texto. O PDF não corta o texto.
+                </Alert>
+              )}
+              {layoutSource === "local" && (
+                <p className="text-[length:var(--text-2xs)] text-[color:var(--warn-fg)]">
+                  Prévia aproximada: não foi possível consultar o servidor para as
+                  quebras de linha exatas.
+                </p>
+              )}
+              <p className="text-[length:var(--text-2xs)] text-[color:var(--ink-subtle)]">
+                Arraste as alças da caixa no canvas ou digite os valores. A largura
+                define onde o texto quebra a linha; a altura, a área reservada.
+                Vazio significa automático.
+              </p>
+            </Group>
+          )}
 
           <Group title="Tipografia">
             <Row label="Fonte">
@@ -387,6 +488,77 @@ const CONTROL = cn(
   "h-8 w-full rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2",
   "text-[length:var(--text-xs)] text-[color:var(--ink)]",
 );
+
+/**
+ * Number field for a box dimension. Keeps a local draft while typing so a
+ * half-typed "15" is not snapped to the minimum before "150" is complete:
+ * values inside the range apply live, the rest on blur or Enter. Empty means
+ * automatic.
+ */
+function SizeInput({
+  value,
+  min,
+  max,
+  ariaLabel,
+  onCommit,
+}: {
+  value: number | undefined;
+  min: number;
+  max: number;
+  ariaLabel: string;
+  onCommit: (value: number | undefined) => void;
+}) {
+  const shown = value === undefined ? "" : String(Math.round(value));
+  const [draft, setDraft] = useState(shown);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(shown);
+  }, [shown, focused]);
+
+  const commit = (raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      onCommit(undefined);
+      return;
+    }
+    const number = Number(trimmed);
+    if (!Number.isFinite(number)) return;
+    onCommit(Math.min(Math.max(Math.round(number), min), max));
+  };
+
+  return (
+    <input
+      type="number"
+      inputMode="numeric"
+      min={min}
+      max={max}
+      placeholder="Auto"
+      value={draft}
+      aria-label={ariaLabel}
+      onFocus={() => setFocused(true)}
+      onChange={(event) => {
+        const raw = event.target.value;
+        setDraft(raw);
+        const number = Number(raw);
+        if (raw.trim() !== "" && Number.isFinite(number) && number >= min && number <= max) {
+          onCommit(Math.round(number));
+        }
+      }}
+      onBlur={(event) => {
+        setFocused(false);
+        commit(event.target.value);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit(event.currentTarget.value);
+        }
+      }}
+      className={CONTROL}
+    />
+  );
+}
 
 function PanelTitle() {
   return (

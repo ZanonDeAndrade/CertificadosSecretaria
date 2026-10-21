@@ -4,6 +4,7 @@ import { beforeEach, vi } from "vitest";
 import Historico from "./Historico";
 import { renderWithProviders } from "../test/renderWithProviders";
 import {
+  downloadCertificateFile,
   downloadCertificatesZip,
   listCertificates,
   revokeCertificate,
@@ -78,6 +79,24 @@ test("seleciona apenas disponíveis e informa download ZIP parcial", async () =>
 
   await waitFor(() => expect(downloadCertificatesZip).toHaveBeenCalledWith([active.unique_code], expect.any(Function)));
   expect(await screen.findByText(/ZIP gerado parcialmente/)).not.toBeNull();
+});
+
+test("salva o certificado com o nome sugerido pela API", async () => {
+  const user = userEvent.setup();
+  const filename = "Ana Ativa - Evento de Inovação - CERT-2026-ACTIVE.pdf";
+  vi.mocked(downloadCertificateFile).mockResolvedValue({ blob: new Blob(["pdf"]), filename });
+  const saved: string[] = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push(this.download);
+  });
+  render();
+  await screen.findByText("Ana Ativa");
+  await user.click(screen.getAllByRole("button", { name: "Baixar certificado de Ana Ativa" })[0]);
+
+  await waitFor(() => expect(saved).toEqual([filename]));
+  expect(downloadCertificateFile).toHaveBeenCalledWith(active.unique_code);
 });
 
 test("exige motivo e preserva erro específico ao revogar", async () => {

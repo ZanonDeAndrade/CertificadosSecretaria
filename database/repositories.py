@@ -8,6 +8,7 @@ data shape it had with the previous hand-written layer (``row["unique_code"]``,
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, cast
 
@@ -45,6 +46,7 @@ _INSERT_COLUMNS = (
     "participant_document_hash_key_id",
     "course_name",
     "event_name",
+    "event_name_normalized",
     "workload_hours",
     "issue_date",
     "start_date",
@@ -52,6 +54,10 @@ _INSERT_COLUMNS = (
     "pdf_path",
     "certificate_text",
     "certificate_type",
+    "authors_json",
+    "authors_search",
+    "team_name",
+    "work_title",
     "storage_provider",
     "drive_file_id",
     "drive_folder_id",
@@ -70,6 +76,42 @@ _INSERT_COLUMNS = (
 )
 
 
+def authors_from_json(value: object) -> list[str]:
+    """Ordered author names stored on a per-work certificate (empty otherwise)."""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(name).strip() for name in parsed if str(name).strip()]
+
+
+def authors_search_text(authors_json: object) -> str | None:
+    """Normalised author names, one search term per author."""
+    from .privacy import normalize_name
+
+    names = [normalize_name(name) for name in authors_from_json(authors_json)]
+    names = [name for name in names if name]
+    return " | ".join(names) if names else None
+
+
+def _escape_like(term: str) -> str:
+    """``term`` with LIKE wildcards taken literally (use with ``escape="\\"``)."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _name_match(escaped_term: str) -> ColumnElement[bool]:
+    """Match the holder or any author of a per-work certificate."""
+    pattern = f"%{escaped_term}%"
+    return or_(
+        Certificate.participant_name_normalized.like(pattern, escape="\\"),
+        Certificate.authors_search.like(pattern, escape="\\"),
+    )
+
+
 def _normalize_insert_row(row: dict) -> dict:
     from .privacy import (
         LEGACY_DOCUMENT_KEY_ID,
@@ -79,6 +121,8 @@ def _normalize_insert_row(row: dict) -> dict:
 
     normalized = {col: row.get(col) for col in _INSERT_COLUMNS}
     normalized["participant_name_normalized"] = normalize_name(normalized["participant_name"])
+    normalized["event_name_normalized"] = normalize_name(normalized["event_name"])
+    normalized["authors_search"] = authors_search_text(normalized.get("authors_json"))
     raw_document = normalized["participant_document"]
     if normalized["participant_document_hash"]:
         normalized["participant_document_hash_key_id"] = (
@@ -464,7 +508,7 @@ class CertificateRepository:
         rows = (
             self.session.execute(
                 select(Certificate.__table__)
-                .where(Certificate.participant_name_normalized.like(f"%{escaped}%", escape="\\"))
+                .where(_name_match(escaped))
                 .order_by(
                     func.lower(Certificate.participant_name),
                     Certificate.issue_date,
@@ -531,24 +575,22 @@ class CertificateRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
+        from .privacy import normalize_name
+
         conditions: list[ColumnElement[bool]] = []
         if name:
-            from .privacy import normalize_name
-
-            term = normalize_name(name)
-            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append(
-                Certificate.participant_name_normalized.like(f"%{escaped}%", escape="\\")
-            )
+            conditions.append(_name_match(_escape_like(normalize_name(name))))
         if code:
-            escaped_code = (
-                code.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
+            escaped_code = _escape_like(code.strip())
             conditions.append(Certificate.unique_code.ilike(f"%{escaped_code}%", escape="\\"))
         if course:
-            conditions.append(Certificate.course_name.ilike(f"%{course.strip()}%"))
+            escaped_course = _escape_like(course.strip())
+            conditions.append(Certificate.course_name.ilike(f"%{escaped_course}%", escape="\\"))
         if event:
-            conditions.append(Certificate.event_name.ilike(f"%{event.strip()}%"))
+            escaped_event = _escape_like(normalize_name(event))
+            conditions.append(
+                Certificate.event_name_normalized.like(f"%{escaped_event}%", escape="\\")
+            )
         if certificate_type:
             conditions.append(Certificate.certificate_type == certificate_type.strip())
         if status:
@@ -1734,11 +1776,19 @@ _VERSION_META = (
     TemplateVersion.image_height,
     TemplateVersion.background_mime_type,
     TemplateVersion.is_active,
+    TemplateVersion.certificate_type,
     TemplateVersion.created_at,
     TemplateVersion.created_by,
     TemplateVersion.activated_at,
     TemplateVersion.activated_by,
 )
+
+# ``active_type_key`` of the generic (type-less) active version.
+GENERIC_TEMPLATE_KEY = "__generic__"
+
+
+def template_type_key(certificate_type: str | None) -> str:
+    return certificate_type or GENERIC_TEMPLATE_KEY
 
 
 class TemplateVersionRepository:
@@ -1755,6 +1805,7 @@ class TemplateVersionRepository:
         background_image: bytes | None,
         background_mime_type: str,
         created_by: int | None = None,
+        certificate_type: str | None = None,
     ) -> dict:
         sequence = self.session.execute(
             select(TemplateVersionSequence).where(TemplateVersionSequence.id == 1).with_for_update()
@@ -1786,6 +1837,7 @@ class TemplateVersionRepository:
                 background_image=background_image,
                 background_mime_type=background_mime_type,
                 is_active=0,
+                certificate_type=certificate_type,
                 created_at=utcnow(),
                 created_by=created_by,
             )
@@ -1802,11 +1854,12 @@ class TemplateVersionRepository:
         )
         return _to_dict(row) if row else None
 
-    def get_active(self) -> dict | None:
+    def get_active(self, certificate_type: str | None = None) -> dict | None:
+        """The active version for a type, or the generic one when no type is given."""
         row = (
             self.session.execute(
                 select(*_VERSION_META)
-                .where(TemplateVersion.is_active == 1)
+                .where(TemplateVersion.active_type_key == template_type_key(certificate_type))
                 .order_by(TemplateVersion.version_number.desc())
                 .limit(1)
             )
@@ -1861,18 +1914,29 @@ class TemplateVersionRepository:
             )
             self.session.add(TemplateVersionSequence(id=1, next_number=next_number))
             self.session.flush()
-        exists = self.session.execute(
-            select(TemplateVersion.id).where(TemplateVersion.id == version_id).limit(1)
+        target = self.session.execute(
+            select(TemplateVersion.id, TemplateVersion.certificate_type)
+            .where(TemplateVersion.id == version_id)
+            .limit(1)
         ).first()
-        if not exists:
+        if not target:
             return False
+        # One active version per type: only the same type's version steps down.
+        type_key = template_type_key(target[1])
         self.session.execute(
-            update(TemplateVersion).where(TemplateVersion.is_active == 1).values(is_active=0)
+            update(TemplateVersion)
+            .where(TemplateVersion.active_type_key == type_key)
+            .values(is_active=0, active_type_key=None)
         )
         self.session.execute(
             update(TemplateVersion)
             .where(TemplateVersion.id == version_id)
-            .values(is_active=1, activated_at=utcnow(), activated_by=actor)
+            .values(
+                is_active=1,
+                active_type_key=type_key,
+                activated_at=utcnow(),
+                activated_by=actor,
+            )
         )
         return True
 

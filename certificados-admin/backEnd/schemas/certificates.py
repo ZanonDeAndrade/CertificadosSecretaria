@@ -20,6 +20,10 @@ class CertificateResponse(BaseModel):
     certificate_type: str | None = None
     certificate_type_label: str
     workload_hours: int | None = None
+    # Per-work certificates: every author (the first is participant_name).
+    authors: list[str] = []
+    team_name: str | None = None
+    work_title: str | None = None
     issue_date: str | None = None
     issue_date_iso: str | None = None
     status: str

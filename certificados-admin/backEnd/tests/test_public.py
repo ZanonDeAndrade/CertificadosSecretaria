@@ -263,6 +263,24 @@ def test_public_download_requires_code_and_streams_pdf(public):
     assert resp.headers["cache-control"] == "no-store, private"
 
 
+def test_public_download_names_file_with_holder_event_and_code(public):
+    from storage_service.filenames import content_disposition
+
+    client, db, tmp_path = public
+    # Seeded with a pre-format stored name ("j.pdf"): the download still offers
+    # the readable name, and the stored record is left untouched.
+    _seed_certificate(db, tmp_path)
+    resp = client.get(f"/public/certificates/{CODE}/download")
+    assert resp.status_code == 200
+    expected = f"João Público - Semana Acadêmica - {CODE}.pdf"
+    assert resp.headers["content-disposition"] == content_disposition(expected)
+    assert (
+        f'filename="Joao Publico - Semana Academica - {CODE}.pdf"'
+        in (resp.headers["content-disposition"])
+    )
+    assert db.get_by_code(CODE)["original_filename"] == "j.pdf"
+
+
 def test_code_validation_responses_are_not_cached(public):
     client, db, tmp_path = public
     _seed_certificate(db, tmp_path)

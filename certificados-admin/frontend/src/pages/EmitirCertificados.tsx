@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../app/AuthContext";
-import { failureMessage } from "../app/useAsyncData";
+import { failureMessage, useAsyncData } from "../app/useAsyncData";
 import {
   cancelEmissionBatch,
   disconnectGoogleDrive,
@@ -9,19 +9,23 @@ import {
   getEmissionBatch,
   getGoogleDrivePickerSession,
   getGoogleDriveStatus,
+  listBodyVariables,
   resumeEmissionBatch,
   retryEmissionBatch,
   selectGoogleDriveFolder,
-  spreadsheetTemplateUrl,
+  spreadsheetTemplateUrlFor,
   SpreadsheetPreview,
   startEmissionBatch,
   startGoogleDriveOAuth,
   validateSpreadsheet,
 } from "../services/api";
 import { pickGoogleDriveFolder } from "../lib/googlePicker";
+import { createUuid } from "../lib/uuid";
 import {
   CERTIFICATE_TYPES,
+  MAX_WORK_AUTHORS,
   certificateTypeLabel,
+  isPerWorkType,
 } from "../domain/certificateTypes";
 import Alert from "../ui/Alert";
 import Button, { AnchorButton, LinkButton } from "../ui/Button";
@@ -44,12 +48,6 @@ const STEPS = [
   { id: "done", label: "Resultado" },
 ];
 
-const BODY_VARIABLE_OPTIONS = [
-  { token: "{{nome}}", label: "Nome" },
-  { token: "{{carga_horaria}}", label: "Carga horária" },
-  { token: "{{certificate_type}}", label: "Tipo do certificado" },
-];
-
 const DEFAULT_BODY_TEXT =
   "participou da atividade descrita neste certificado, com carga horária total de " +
   "{{carga_horaria}} horas.";
@@ -62,13 +60,6 @@ interface StoredBatch {
 interface FolderChoice {
   folderId: string;
   folderName: string;
-}
-
-function makeIdempotencyKey(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `batch-${Date.now()}-${Math.random().toString(36).slice(2, 18)}`;
 }
 
 function saveBlob(blob: Blob, filename: string) {
@@ -118,6 +109,8 @@ export default function EmitirCertificados() {
   const [certificateType, setCertificateType] = useState("");
   const [certificateTypeError, setCertificateTypeError] = useState("");
   const [textoPadrao, setTextoPadrao] = useState(DEFAULT_BODY_TEXT);
+  // The insert buttons come from the backend allowlist, never a local copy.
+  const bodyVariables = useAsyncData(listBodyVariables, []);
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
   const [batch, setBatch] = useState<EmissionBatch | null>(null);
   const [summary, setSummary] = useState<GenerationSummary | null>(null);
@@ -354,8 +347,14 @@ export default function EmitirCertificados() {
     const element = textareaRef.current;
     const start = element ? element.selectionStart : textoPadrao.length;
     const end = element ? element.selectionEnd : textoPadrao.length;
-    setTextoPadrao(textoPadrao.slice(0, start) + token + textoPadrao.slice(end));
-    const caret = start + token.length;
+    const before = textoPadrao.slice(0, start);
+    const after = textoPadrao.slice(end);
+    // Keep the variable apart from adjacent words: "dias{{x}}" would print glued.
+    const spaceBefore = /[\p{L}\p{N}}]$/u.test(before) ? " " : "";
+    const spaceAfter = /^[\p{L}\p{N}{]/u.test(after) ? " " : "";
+    const inserted = `${spaceBefore}${token}${spaceAfter}`;
+    setTextoPadrao(before + inserted + after);
+    const caret = start + inserted.length;
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
@@ -395,7 +394,7 @@ export default function EmitirCertificados() {
     startLockRef.current = true;
     setStarting(true);
     setError("");
-    let idempotencyKey = makeIdempotencyKey();
+    let idempotencyKey = createUuid();
     try {
       const stored = JSON.parse(localStorage.getItem(storageKey) || "null") as StoredBatch | null;
       if (stored?.idempotencyKey) idempotencyKey = stored.idempotencyKey;
@@ -491,10 +490,14 @@ export default function EmitirCertificados() {
           <Panel>
             <PanelHeader
               title="1. Planilha do lote"
-              description="Colunas obrigatórias: nome e carga_horaria. Curso, evento, datas, e-mail e Registro Acadêmico (RA) são opcionais."
+              description={
+                isPerWorkType(certificateType)
+                  ? `Um certificado por trabalho, válido para todos os autores. Coluna obrigatória: autor1; use autor1 a autor${MAX_WORK_AUTHORS} (colunas vazias são ignoradas). Evento, titulo_trabalho, equipe, carga_horaria e datas são opcionais.`
+                  : "Colunas obrigatórias: nome e carga_horaria. Curso, evento, datas, e-mail, Registro Acadêmico (RA), equipe e titulo_trabalho são opcionais."
+              }
               actions={
                 <AnchorButton
-                  href={spreadsheetTemplateUrl}
+                  href={spreadsheetTemplateUrlFor(certificateType)}
                   download="modelo-certificados.xlsx"
                   variant="secondary"
                   size="sm"
@@ -570,8 +573,24 @@ export default function EmitirCertificados() {
                 <p className="mb-2 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
                   Inserir variável na posição do cursor:
                 </p>
+                {bodyVariables.error && (
+                  <div className="flex flex-wrap items-center gap-2 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
+                    <span role="status">
+                      Não foi possível carregar as variáveis. Você ainda pode digitá-las no
+                      formato <code>{"{{variavel}}"}</code>.
+                    </span>
+                    <Button size="sm" variant="ghost" icon="refresh" onClick={bodyVariables.reload}>
+                      Tentar novamente
+                    </Button>
+                  </div>
+                )}
+                {bodyVariables.initialLoading && (
+                  <p className="text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
+                    Carregando variáveis…
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2">
-                  {BODY_VARIABLE_OPTIONS.map(({ token, label }) => (
+                  {(bodyVariables.data ?? []).map(({ token, label }) => (
                     <button
                       key={token}
                       type="button"
@@ -632,6 +651,68 @@ export default function EmitirCertificados() {
             </Panel>
           )}
 
+          {preview.warnings && preview.warnings.length > 0 && (
+            <Alert tone="warn" title="Avisos da planilha" live={false}>
+              <ul className="list-disc space-y-1 pl-5">
+                {preview.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </Alert>
+          )}
+
+          {preview.missing_settings && preview.missing_settings.length > 0 && (
+            <Alert tone="danger" title="Não é possível confirmar este lote" live={false}>
+              <p>{preview.missing_settings_message}</p>
+              {preview.can_manage_settings && (
+                <LinkButton to="/configuracoes" size="sm" className="mt-2">
+                  Abrir Configurações
+                </LinkButton>
+              )}
+            </Alert>
+          )}
+
+          {preview.empty_fields && preview.empty_fields.length > 0 && (
+            <Alert tone="warn" title="Campos do template em branco em algumas linhas" live={false}>
+              <p>Os certificados dessas linhas serão gerados sem o campo indicado.</p>
+              <ul className="mt-2 space-y-1.5">
+                {preview.empty_fields.map((field) => (
+                  <li key={field.key}>
+                    <strong>{field.label}</strong>: {field.row_count} linha(s) —{" "}
+                    {field.rows.map((row) => `linha ${row.row_number}: ${row.nome}`).join("; ")}
+                    {field.row_count > field.rows.length ? "; …" : ""}
+                    {field.truncated &&
+                      ` Verificadas apenas as primeiras ${field.checked_rows} linhas válidas.`}
+                  </li>
+                ))}
+              </ul>
+            </Alert>
+          )}
+
+          {preview.layout_warnings && preview.layout_warnings.length > 0 && (
+            <Alert tone="warn" title="Textos que não cabem na caixa do template" live={false}>
+              <p>
+                Os certificados serão gerados sem cortar o texto, mas ele pode
+                ultrapassar a área reservada. Se preferir, ajuste a caixa ou a fonte
+                no template, ou encurte o texto, antes de confirmar.
+              </p>
+              <ul className="mt-2 space-y-1.5">
+                {preview.layout_warnings.map((warning) => (
+                  <li key={warning.key}>
+                    <strong>{warning.label}</strong> (caixa de {warning.height} px):{" "}
+                    {warning.applies_to_all
+                      ? "texto fixo do template; vale para todos os certificados."
+                      : `${warning.row_count} participante(s) — ${warning.rows
+                          .map((row) => `linha ${row.row_number}: ${row.nome}`)
+                          .join("; ")}${warning.row_count > warning.rows.length ? "; …" : ""}`}
+                    {warning.truncated &&
+                      ` Verificadas apenas as primeiras ${warning.checked_rows} linhas válidas.`}
+                  </li>
+                ))}
+              </ul>
+            </Alert>
+          )}
+
           {preview.invalid_count > 0 && (
             <Panel>
               <PanelHeader
@@ -672,9 +753,20 @@ export default function EmitirCertificados() {
                     {preview.valid.slice(0, 50).map((row) => (
                       <Tr key={row.row_number}>
                         <Td>{row.row_number}</Td>
-                        <TdHeader>{row.nome}</TdHeader>
-                        <Td className="hidden text-[color:var(--ink-muted)] md:table-cell">{row.evento || row.curso || "—"}</Td>
-                        <Td>{row.carga_horaria}h</Td>
+                        <TdHeader>
+                          {row.autores && row.autores.length > 1 ? (
+                            <span title={row.autores.join(", ")}>
+                              {row.nome}{" "}
+                              <span className="text-[color:var(--ink-muted)]">
+                                +{row.autores.length - 1} autor(es)
+                              </span>
+                            </span>
+                          ) : (
+                            row.nome
+                          )}
+                        </TdHeader>
+                        <Td className="hidden text-[color:var(--ink-muted)] md:table-cell">{row.titulo_trabalho || row.evento || row.curso || "—"}</Td>
+                        <Td>{row.carga_horaria == null ? "—" : `${row.carga_horaria}h`}</Td>
                         <Td>{row.data_emissao}</Td>
                       </Tr>
                     ))}
@@ -700,7 +792,11 @@ export default function EmitirCertificados() {
                   size="lg"
                   icon="certificate"
                   onClick={() => setStep("destination")}
-                  disabled={preview.valid_count === 0 || startLockRef.current}
+                  disabled={
+                    preview.valid_count === 0 ||
+                    startLockRef.current ||
+                    (preview.missing_settings?.length ?? 0) > 0
+                  }
                 >
                   Definir destino no Google Drive
                 </Button>

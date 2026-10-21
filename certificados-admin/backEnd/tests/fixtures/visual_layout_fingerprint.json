@@ -1,0 +1,425 @@
+{
+ "default": {
+  "image_size": [
+   1414,
+   1000
+  ],
+  "calls": [
+   {
+    "op": "text",
+    "xy": [
+     530,
+     120
+    ],
+    "text": "CERTIFICADO",
+    "font": "timesbd.ttf",
+    "size": 50,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     536,
+     300
+    ],
+    "text": "Certificamos, para os devidos fins, que",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     580,
+     338
+    ],
+    "text": "Maria Aparecida",
+    "font": "timesbd.ttf",
+    "size": 35,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     458,
+     373
+    ],
+    "text": "da Conceição dos Santos Oliveira",
+    "font": "timesbd.ttf",
+    "size": 35,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     70,
+     460
+    ],
+    "text": "participou da Semana Acadêmica de Tecnologia, promovida pelo Curso de Sistemas de Informação, realizada de 10 a 12 de junho de",
+    "font": "times.ttf",
+    "size": 24,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     70,
+     488
+    ],
+    "text": "2026, com carga horária total de 12 horas.",
+    "font": "times.ttf",
+    "size": 24,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     70,
+     516
+    ],
+    "text": "A atividade contou com palestras, oficinas práticas e mesa-redonda sobre inteligência artificial aplicada à educação.",
+    "font": "times.ttf",
+    "size": 24,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     570,
+     720
+    ],
+    "text": "São Paulo, 27 de abril de 2026.",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     652,
+     790
+    ],
+    "text": "Helena Martins",
+    "font": "times.ttf",
+    "size": 18,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     637,
+     825
+    ],
+    "text": "Secretária Acadêmica",
+    "font": "times.ttf",
+    "size": 16,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     650,
+     920
+    ],
+    "text": "CERT-2026-FP0001",
+    "font": "times.ttf",
+    "size": 14,
+    "fill": "#000000"
+   },
+   {
+    "op": "composite",
+    "dest": [
+     70,
+     820
+    ],
+    "size": [
+     120,
+     120
+    ]
+   }
+  ]
+ },
+ "mixed": {
+  "image_size": [
+   1414,
+   1000
+  ],
+  "calls": [
+   {
+    "op": "text",
+    "xy": [
+     537,
+     80
+    ],
+    "text": "CERTIFICADO",
+    "font": "timesbd.ttf",
+    "size": 48,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     170
+    ],
+    "text": "Linha um\nLinha dois",
+    "font": "times.ttf",
+    "size": 32,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     503,
+     232
+    ],
+    "text": "Maria Aparecida",
+    "font": "timesbd.ttf",
+    "size": 56,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     309,
+     288
+    ],
+    "text": "da Conceição dos Santos Oliveira",
+    "font": "timesbd.ttf",
+    "size": 56,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     1092,
+     365
+    ],
+    "text": "Maria Aparecida",
+    "font": "times.ttf",
+    "size": 31,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     881,
+     396
+    ],
+    "text": "da Conceição dos Santos Oliveira",
+    "font": "times.ttf",
+    "size": 31,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     450
+    ],
+    "text": "participou da Semana Acadêmica de Tecnologia, promovida pelo",
+    "font": "times.ttf",
+    "size": 26,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     480
+    ],
+    "text": "Curso de Sistemas de Informação, realizada de 10 a 12 de junho de",
+    "font": "times.ttf",
+    "size": 26,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     510
+    ],
+    "text": "2026, com carga horária total de 12 horas.",
+    "font": "times.ttf",
+    "size": 26,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     540
+    ],
+    "text": "A atividade contou com palestras, oficinas práticas e mesa-redonda",
+    "font": "times.ttf",
+    "size": 26,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     570
+    ],
+    "text": "sobre inteligência artificial aplicada à educação.",
+    "font": "times.ttf",
+    "size": 26,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     99,
+     450
+    ],
+    "text": "participou da Semana Acadêmica de Tecnologia, promovida pelo Curso de Sistemas de Informação, realizada de 10 a 12 de junho de 2026,",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     1009,
+     476
+    ],
+    "text": "com carga horária total de 12 horas.",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     305,
+     502
+    ],
+    "text": "A atividade contou com palestras, oficinas práticas e mesa-redonda sobre inteligência artificial aplicada à educação.",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     760
+    ],
+    "text": "Semana Acadêmica de Tecnologia",
+    "font": "times.ttf",
+    "size": 28,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     1055,
+     800
+    ],
+    "text": "Sistemas de Informação",
+    "font": "times.ttf",
+    "size": 28,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     557,
+     850
+    ],
+    "text": "São Paulo, 27 de abril de 2026.",
+    "font": "times.ttf",
+    "size": 24,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     639,
+     890
+    ],
+    "text": "Helena Martins",
+    "font": "times.ttf",
+    "size": 22,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     620,
+     915
+    ],
+    "text": "Secretária Acadêmica",
+    "font": "times.ttf",
+    "size": 20,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     634,
+     960
+    ],
+    "text": "CERT-2026-FP0001",
+    "font": "times.ttf",
+    "size": 18,
+    "fill": "#444444"
+   },
+   {
+    "op": "text",
+    "xy": [
+     1259,
+     40
+    ],
+    "text": "Ouvinte",
+    "font": "times.ttf",
+    "size": 20,
+    "fill": "#000000"
+   },
+   {
+    "op": "text",
+    "xy": [
+     90,
+     40
+    ],
+    "text": "[unknown_key]",
+    "font": "times.ttf",
+    "size": 20,
+    "fill": "#000000"
+   },
+   {
+    "op": "composite",
+    "dest": [
+     1200,
+     60
+    ],
+    "size": [
+     120,
+     90
+    ]
+   },
+   {
+    "op": "composite",
+    "dest": [
+     1200,
+     820
+    ],
+    "size": [
+     140,
+     140
+    ]
+   },
+   {
+    "op": "composite",
+    "dest": [
+     60,
+     820
+    ],
+    "size": [
+     160,
+     160
+    ]
+   }
+  ]
+ }
+}

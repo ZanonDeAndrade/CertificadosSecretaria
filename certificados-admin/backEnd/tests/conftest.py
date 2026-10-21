@@ -46,6 +46,12 @@ def client(tmp_path, monkeypatch, isolate_database_credentials):
     monkeypatch.setenv("ADMIN_USERNAME", ADMIN_USER)
     monkeypatch.setenv("ADMIN_PASSWORD", ADMIN_PASS)
     monkeypatch.setenv("ADMIN_INITIAL_ROLE", "admin")
+    # Complete institutional data: the default template prints the city and
+    # the signatory, and a batch cannot be confirmed while those are empty.
+    # Tests about that rule clear them explicitly.
+    monkeypatch.setenv("ISSUE_LOCATION", "Cidade Teste")
+    monkeypatch.setenv("SIGNATORY_NAME", "Assinante Teste")
+    monkeypatch.setenv("SIGNATORY_TITLE", "Cargo Teste")
     monkeypatch.setenv("FRONTEND_ADMIN_URL", "http://localhost:5173")
     monkeypatch.setenv("AUTH_COOKIE_SECURE", "true")
     monkeypatch.setenv("LOGIN_BACKOFF_BASE_MS", "0")

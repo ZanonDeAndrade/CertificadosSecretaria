@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import platform
 from dataclasses import dataclass
 from io import BytesIO
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from certificados_backend.models import ParticipantRegistryRecord
-from certificados_backend.utils.file_utils import ensure_directory, sanitize_filename
+from certificados_backend.utils.file_utils import ensure_directory
 from certificados_backend.utils.text_utils import (
     calculate_centered_x,
     get_text_size,
@@ -19,17 +20,81 @@ from certificados_backend.utils.text_utils import (
 )
 from PIL import Image, ImageDraw, ImageFont
 
+from database.certificate_types import MAX_WORK_AUTHORS
+from storage_service.filenames import build_certificate_filename, certificate_holder
+
 _SYSTEM = platform.system()
 _WINDOWS_FONTS = Path("C:/Windows/Fonts")
 _LINUX_FONTS = Path("/usr/share/fonts")
 _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
 _RESAMPLE_NEAREST = Image.Resampling.NEAREST
 
+LOGGER = logging.getLogger("certificados.generator")
+
 TEXT_COLOR = "#000000"
 
 # Visual-template element keys that hold the (potentially long) certificate body
 # authored by the secretaria. These are word-wrapped and may span many lines.
 _BODY_TEXT_KEYS = {"texto_certificado", "certificate_text"}
+
+# A text element may carry an explicit box: ``width`` is the wrap limit and
+# ``height`` the area reserved for it, both in pixels of the original art. Both
+# are optional — a layout without them renders exactly as it did before these
+# fields existed, which is what every template saved earlier relies on.
+TEXT_BOX_MIN_SIZE = 20
+
+
+@dataclass(slots=True, frozen=True)
+class TextBoxLayout:
+    """Where a text element's lines land.
+
+    Computed once and shared by the PDF renderer, the editor preview endpoint
+    and the batch pre-check, so all three agree on line breaks and heights.
+    """
+
+    lines: list[str]
+    font: ImageFont.FreeTypeFont
+    #: Effective size — the participant name shrinks to fit its box.
+    font_size: int
+    #: Distance between the tops of two consecutive lines.
+    line_height: int
+    #: Height occupied from the top of the first line to the bottom of the last.
+    text_height: int
+    #: Width the lines were wrapped to; ``None`` when the text is drawn as-is.
+    wrap_width: int | None
+    #: Explicit box height when the element has one.
+    height: int | None
+    #: True when the text is taller than its explicit box. Never clips.
+    overflow: bool
+    #: Legacy name centring: the first line starts at ``y - top_offset``.
+    top_offset: int
+
+
+def box_size(element: dict[str, Any], key: str) -> int | None:
+    """Explicit ``width``/``height``/``maxWidth`` of an element, if positive."""
+    value = element.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value) if value > 0 else None
+
+
+def _aligned_x(align: str, anchor_x: int, text_width: int) -> int:
+    if align == "center":
+        return anchor_x - text_width // 2
+    if align == "right":
+        return anchor_x - text_width
+    return anchor_x
+
+
+def _pillow_multiline_pitch(draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont) -> int:
+    """Line pitch Pillow itself uses when ``draw.text`` receives line breaks."""
+    return int(draw.textbbox((0, 0), "A", font=font)[3]) + 4
+
+
+def measuring_draw() -> ImageDraw.ImageDraw:
+    """A throwaway drawing context: text metrics do not depend on the image."""
+    return ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
 
 # A full participant name is a business value, not decorative text. When it has
 # a first name plus two or more surname tokens, keep the first surname beside
@@ -90,14 +155,15 @@ class CertificateGeneratorConfig:
 
 
 def build_pdf_filename(participant: ParticipantRegistryRecord) -> str:
-    """Build a unique PDF filename: "<nome>_<codigo>.pdf".
+    """Build a unique PDF filename: "<titular> - <evento> - <codigo>.pdf".
 
-    Including the validation code guarantees two participants with the same name
-    don't overwrite each other's file (and ties the file to its DB row)."""
-    stem = sanitize_filename(participant.nome)
-    if participant.validation_code:
-        stem = f"{stem}_{participant.validation_code}"
-    return f"{stem}.pdf"
+    The validation code closes the name, so two participants with the same name
+    (or one participant twice in an event) never overwrite each other's file.
+    Rules live in :mod:`storage_service.filenames`, shared with the downloads."""
+    holder = certificate_holder(
+        participant.nome, participant.titulo_trabalho, participant.certificate_type
+    )
+    return build_certificate_filename(holder, participant.evento, participant.validation_code)
 
 
 def _image_to_pdf_bytes(image: Image.Image) -> bytes:
@@ -501,109 +567,142 @@ class CertificateGenerator:
             if not text:
                 continue
 
-            font_size = max(int(element.get("fontSize", 24)), 6)
-            font_family: str = element.get("fontFamily", "Times New Roman")
-            bold: bool = bool(element.get("bold", False))
             color: str = element.get("color", "#000000")
             align: str = element.get("align", "left")
             anchor_x = int(element.get("x", 0))
             anchor_y = int(element.get("y", 0))
 
-            font = self._resolve_visual_font(font_family, font_size, bold)
-
-            if key == "name":
-                self._draw_visual_name(
-                    draw,
-                    image,
-                    text,
-                    color=color,
-                    align=align,
-                    anchor_x=anchor_x,
-                    anchor_y=anchor_y,
-                    font_family=font_family,
-                    font_size=font_size,
-                    bold=bold,
-                    element=element,
+            box = self.layout_text_box(draw, image.size[0], text, element)
+            if box.overflow:
+                # Never clip: the certificate is still complete. The editor and
+                # the batch pre-check surface this before emission; here it is
+                # only recorded (sizes only, never the participant's text).
+                LOGGER.warning(
+                    "Texto do elemento '%s' excede a caixa: %d px de %d px em %d linha(s).",
+                    key,
+                    box.text_height,
+                    box.height,
+                    len(box.lines),
                 )
-                continue
-
-            # The body text can be long: wrap it, respect typed line breaks, keep
-            # it inside the certificate, and honour the configured alignment.
-            if key in _BODY_TEXT_KEYS:
-                self._draw_text_block(
-                    draw,
-                    image,
-                    text,
-                    font,
-                    color=color,
-                    align=align,
-                    anchor_x=anchor_x,
-                    anchor_y=anchor_y,
-                    font_size=font_size,
-                    element=element,
-                )
-                continue
-
-            tw, _ = get_text_size(draw, text, font)
-
-            if align == "center":
-                draw_x = anchor_x - tw // 2
-            elif align == "right":
-                draw_x = anchor_x - tw
-            else:
-                draw_x = anchor_x
-
-            draw.text((draw_x, anchor_y), text, fill=color, font=font)
+            self._draw_text_box(
+                draw,
+                box,
+                text=text,
+                color=color,
+                align=align,
+                anchor_x=anchor_x,
+                anchor_y=anchor_y,
+                anchor_bottom=element.get("anchorY") == "bottom",
+            )
 
         return image
 
-    def _draw_visual_name(
+    def layout_text_box(
         self,
         draw: ImageDraw.ImageDraw,
-        image: Image.Image,
+        image_width: int,
         text: str,
+        element: dict[str, Any],
+    ) -> TextBoxLayout:
+        """Decide the lines, effective font and height of a text element.
+
+        Three regimes, chosen to keep every pre-existing template identical:
+
+        - ``name``: shrinks to fit and wraps at its box (or the page bound).
+          Without a box the lines are centred on Y, as they always were; with a
+          box they grow downward from Y like every other boxed text.
+        - body keys, or any text with an explicit ``width``: word-wrapped at
+          ``min(width, bound)`` honouring typed line breaks.
+        - everything else: drawn in one call, exactly as before; Pillow lays
+          out typed line breaks itself.
+        """
+        key = str(element.get("key", ""))
+        font_size = max(int(element.get("fontSize", 24)), 6)
+        font_family = str(element.get("fontFamily", "Times New Roman"))
+        bold = bool(element.get("bold", False))
+        align = str(element.get("align", "left"))
+        anchor_x = int(element.get("x", 0))
+
+        margin = max(int(image_width * 0.04), 8)
+        bound = self._wrap_bound(align, anchor_x, image_width, margin)
+        box_width = box_size(element, "width")
+        # ``maxWidth`` is a legacy hint still honoured for the name and body.
+        explicit_width = box_width or box_size(element, "maxWidth")
+        box_height = box_size(element, "height")
+        wrap_width: int | None = max(1, min(explicit_width, bound)) if explicit_width else bound
+        font = self._resolve_visual_font(font_family, font_size, bold)
+
+        if key == "name":
+            min_size = max(int(font_size * 0.5), 8)
+            font, lines = self._fit_name_to_width(
+                draw,
+                text,
+                lambda size: self._resolve_visual_font(font_family, size, bold),
+                font_size,
+                min_size,
+                wrap_width or bound,
+            )
+            effective_size = int(getattr(font, "size", font_size))
+            line_spacing = max(int(effective_size * 0.12), 2)
+            line_height = max(get_text_size(draw, "Ag", font)[1], 1) + line_spacing
+            top_offset = 0 if box_width else ((len(lines) - 1) * line_height) // 2
+        elif key in _BODY_TEXT_KEYS or box_width:
+            lines = wrap_hard_breaks(draw, text, font, wrap_width or bound)
+            effective_size = font_size
+            line_spacing = max(int(font_size * 0.3), 2)
+            line_height = get_text_size(draw, "Ag", font)[1] + line_spacing
+            top_offset = 0
+        else:
+            lines = str(text).split("\n")
+            effective_size = font_size
+            wrap_width = None
+            line_height = _pillow_multiline_pitch(draw, font)
+            top_offset = 0
+
+        glyph_height = max(get_text_size(draw, "Ag", font)[1], 1)
+        text_height = max(len(lines) - 1, 0) * line_height + glyph_height
+        return TextBoxLayout(
+            lines=lines,
+            font=font,
+            font_size=effective_size,
+            line_height=line_height,
+            text_height=text_height,
+            wrap_width=wrap_width,
+            height=box_height,
+            overflow=box_height is not None and text_height > box_height,
+            top_offset=top_offset,
+        )
+
+    def _draw_text_box(
+        self,
+        draw: ImageDraw.ImageDraw,
+        box: TextBoxLayout,
         *,
+        text: str,
         color: str,
         align: str,
         anchor_x: int,
         anchor_y: int,
-        font_family: str,
-        font_size: int,
-        bold: bool,
-        element: dict[str, Any],
+        anchor_bottom: bool = False,
     ) -> None:
-        """Render the dynamic participant name with adaptive size and wrapping."""
-        margin = max(int(image.size[0] * 0.04), 8)
-        bound = self._wrap_bound(align, anchor_x, image.size[0], margin)
-        explicit = element.get("width") or element.get("maxWidth")
-        max_width = (
-            max(1, min(int(explicit), bound))
-            if isinstance(explicit, (int, float)) and explicit > 0
-            else bound
-        )
-        min_size = max(int(font_size * 0.5), 8)
-        font, lines = self._fit_name_to_width(
-            draw,
-            text,
-            lambda size: self._resolve_visual_font(font_family, size, bold),
-            font_size,
-            min_size,
-            max_width,
-        )
-        line_spacing = max(int(getattr(font, "size", font_size) * 0.12), 2)
-        line_h = max(get_text_size(draw, "Ag", font)[1], 1) + line_spacing
-        y = anchor_y - ((len(lines) - 1) * line_h) // 2
+        """Draw a laid-out text element. X is the alignment anchor, never a box edge.
 
-        for line in lines:
-            line_width, _ = get_text_size(draw, line, font)
-            if align == "center":
-                draw_x = anchor_x - line_width // 2
-            elif align == "right":
-                draw_x = anchor_x - line_width
-            else:
-                draw_x = anchor_x
-            draw.text((draw_x, y), line, fill=color, font=font)
-            y += line_h
+        With ``anchor_bottom`` Y is the base of the text: the block keeps its
+        base in place and grows upward as it gains lines.
+        """
+        font = box.font
+        top = anchor_y - box.text_height if anchor_bottom else anchor_y
+        if box.wrap_width is None:
+            text_width, _ = get_text_size(draw, text, font)
+            draw.text((_aligned_x(align, anchor_x, text_width), top), text, fill=color, font=font)
+            return
+
+        y = top - box.top_offset
+        for line in box.lines:
+            if line:
+                line_width, _ = get_text_size(draw, line, font)
+                draw.text((_aligned_x(align, anchor_x, line_width), y), line, fill=color, font=font)
+            y += box.line_height
 
     def _wrap_bound(self, align: str, anchor_x: int, image_width: int, margin: int) -> int:
         """Max line width that keeps the text inside the page for an alignment.
@@ -618,47 +717,9 @@ class CertificateGenerator:
             return max(anchor_x - margin, 1)
         return max(image_width - anchor_x - margin, 1)
 
-    def _draw_text_block(
-        self,
-        draw: ImageDraw.ImageDraw,
-        image: Image.Image,
-        text: str,
-        font: ImageFont.FreeTypeFont,
-        *,
-        color: str,
-        align: str,
-        anchor_x: int,
-        anchor_y: int,
-        font_size: int,
-        element: dict[str, Any],
-    ) -> None:
-        """Render a (possibly long) body text: word-wrap + typed line breaks,
-        alignment, and a width limit so it never leaves the certificate."""
-        image_width = image.size[0]
-        margin = max(int(image_width * 0.04), 8)
-        bound = self._wrap_bound(align, anchor_x, image_width, margin)
-
-        explicit = element.get("width") or element.get("maxWidth")
-        if isinstance(explicit, (int, float)) and explicit > 0:
-            wrap_w = max(1, min(int(explicit), bound))
-        else:
-            wrap_w = bound
-
-        line_spacing = max(int(font_size * 0.3), 2)
-        line_h = get_text_size(draw, "Ag", font)[1] + line_spacing
-
-        y = anchor_y
-        for line in wrap_hard_breaks(draw, text, font, wrap_w):
-            if line:
-                lw, _ = get_text_size(draw, line, font)
-                if align == "center":
-                    draw_x = anchor_x - lw // 2
-                elif align == "right":
-                    draw_x = anchor_x - lw
-                else:
-                    draw_x = anchor_x
-                draw.text((draw_x, y), line, fill=color, font=font)
-            y += line_h
+    def participant_data(self, participant: ParticipantRegistryRecord) -> dict[str, str]:
+        """Values every template key resolves to; previews and pre-checks use it too."""
+        return self._participant_data(participant)
 
     def _participant_data(self, participant: ParticipantRegistryRecord) -> dict[str, str]:
         """Map template keys to certificate values.
@@ -669,6 +730,8 @@ class CertificateGenerator:
         """
         issue_location = self.config.issue_location.strip()
         issue_date = participant.data_emissao.strip()
+        authors = [str(name).strip() for name in participant.autores if str(name).strip()]
+        authors = authors[:MAX_WORK_AUTHORS]
         if issue_location and issue_date:
             issue_line = f"{issue_location}, {issue_date}."
         elif issue_location:
@@ -692,6 +755,17 @@ class CertificateGenerator:
             "texto_certificado": participant.texto_certificado,
             "certificate_text": participant.certificate_text or participant.texto_certificado,
             "certificate_type": participant.certificate_type,
+            "equipe": participant.equipe,
+            "work_title": participant.titulo_trabalho,
+            # Per-work certificates: one key per author plus the numbered block
+            # ("Autor 1: …"), which lists only the authors present.
+            **{
+                f"autor{index}": (authors[index - 1] if index <= len(authors) else "")
+                for index in range(1, MAX_WORK_AUTHORS + 1)
+            },
+            "authors": "\n".join(
+                f"Autor {index}: {name}" for index, name in enumerate(authors, start=1)
+            ),
         }
 
     def _open_background_bytes(self, background_bytes: bytes | None) -> Image.Image:

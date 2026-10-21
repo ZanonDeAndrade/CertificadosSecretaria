@@ -304,6 +304,67 @@ def test_reissue_uses_original_version_not_active(monkeypatch, tmp_path):
     assert db.get_by_code(cert["unique_code"])["template_version_id"] == 1
 
 
+def test_new_certificate_is_stored_under_holder_event_and_code(monkeypatch, tmp_path):
+    db = _point_db(monkeypatch, tmp_path)
+    service = _service(tmp_path, storage=RecordingDriveStorage())
+    cert = _generate_one(db, service)
+    assert cert["original_filename"] == (f"Ana Souza - Semana Jurídica - {cert['unique_code']}.pdf")
+
+
+def _set_original_filename(db, code: str, name: str | None) -> None:
+    import sqlite3
+
+    with sqlite3.connect(str(db.DATABASE_PATH)) as connection:
+        connection.execute(
+            "UPDATE certificates SET original_filename = ? WHERE unique_code = ?", (name, code)
+        )
+
+
+def test_reissue_keeps_the_name_the_certificate_was_stored_under(monkeypatch, tmp_path):
+    db = _point_db(monkeypatch, tmp_path)
+    storage = RecordingDriveStorage()
+    service = _service(tmp_path, storage=storage)
+    code = _generate_one(db, service)["unique_code"]
+    legacy_name = f"Ana_Souza_{code}.pdf"
+    _set_original_filename(db, code, legacy_name)
+
+    service.reissue_certificate(db.get_by_code(code))
+
+    reissued = db.get_by_code(code)
+    assert reissued["drive_file_id"] == "drive-2"  # a new file was uploaded...
+    assert reissued["original_filename"] == legacy_name  # ...under the same name
+
+
+def test_reissue_without_a_stored_name_uses_the_current_format(monkeypatch, tmp_path):
+    db = _point_db(monkeypatch, tmp_path)
+    service = _service(tmp_path, storage=RecordingDriveStorage())
+    code = _generate_one(db, service)["unique_code"]
+    _set_original_filename(db, code, None)
+
+    service.reissue_certificate(db.get_by_code(code))
+
+    assert db.get_by_code(code)["original_filename"] == (
+        f"Ana Souza - Semana Jurídica - {code}.pdf"
+    )
+
+
+def test_reissue_never_writes_a_tampered_stored_name_outside_the_pdf_folder(monkeypatch, tmp_path):
+    from storage_service.local import LocalStorage
+
+    db = _point_db(monkeypatch, tmp_path)
+    storage = LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
+    service = _service(tmp_path, storage=storage)
+    code = _generate_one(db, service)["unique_code"]
+    _set_original_filename(db, code, "../../fora.pdf")
+
+    service.reissue_certificate(db.get_by_code(code))
+
+    reissued = db.get_by_code(code)
+    assert reissued["original_filename"] == "fora.pdf"
+    assert reissued["pdf_path"] == "pdfs/fora.pdf"
+    assert not (tmp_path.parent / "fora.pdf").exists()
+
+
 def test_reissue_requires_version_and_snapshot(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
     service = _service(tmp_path, storage=RecordingDriveStorage())

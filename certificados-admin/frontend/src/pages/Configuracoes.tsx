@@ -126,7 +126,10 @@ export default function Configuracoes() {
                   />
                 )}
               </Field>
-              <Field label="Local de emissão">
+              <Field
+                label="Cidade (local de emissão)"
+                hint="Sai como “Cidade, data.” nos certificados. Vazio deixa só a data."
+              >
                 {(props) => (
                   <TextInput
                     {...props}

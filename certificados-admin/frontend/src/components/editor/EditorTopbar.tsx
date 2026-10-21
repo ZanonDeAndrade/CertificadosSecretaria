@@ -10,6 +10,7 @@
  * never adjacent to "Salvar".
  */
 import { useRef } from "react";
+import { CERTIFICATE_TYPES } from "../../domain/certificateTypes";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
 import Button, { IconButton } from "../../ui/Button";
 import Icon from "../../ui/Icon";
@@ -38,6 +39,8 @@ const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
 interface EditorTopbarProps {
   templateName: string;
+  /** Type the version is dedicated to; null keeps it generic. */
+  certificateType: string | null;
   saving: boolean;
   hasBackground: boolean;
   isDirty: boolean;
@@ -47,6 +50,7 @@ interface EditorTopbarProps {
   showGrid: boolean;
   zoom: number;
   onNameChange: (name: string) => void;
+  onCertificateTypeChange: (value: string | null) => void;
   onSave: () => void;
   onBack: () => void;
   onUndo: () => void;
@@ -65,6 +69,8 @@ interface EditorTopbarProps {
 
 export default function EditorTopbar({
   templateName,
+  certificateType,
+  onCertificateTypeChange,
   saving,
   hasBackground,
   isDirty,
@@ -180,6 +186,33 @@ export default function EditorTopbar({
             "text-[length:var(--text-sm)] text-[color:var(--ink)] lg:w-52",
           )}
         />
+      </div>
+
+      <div className="flex min-w-0 items-center gap-2">
+        <label
+          htmlFor="template-type"
+          className="whitespace-nowrap text-[length:var(--text-xs)] font-medium text-[color:var(--ink-muted)]"
+        >
+          Tipo
+        </label>
+        {/* A dedicated version only serves batches of its type; the generic one
+            serves every type without a dedicated active version. */}
+        <select
+          id="template-type"
+          value={certificateType ?? ""}
+          onChange={(event) => onCertificateTypeChange(event.target.value || null)}
+          className={cn(
+            "h-8 max-w-56 rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2",
+            "text-[length:var(--text-sm)] text-[color:var(--ink)]",
+          )}
+        >
+          <option value="">Genérico (todos os tipos)</option>
+          {CERTIFICATE_TYPES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </div>
 
       {isDirty && (

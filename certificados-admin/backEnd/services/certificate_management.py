@@ -15,7 +15,6 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from certificados_backend.services import audit_service
 from certificados_backend.utils.dates import extenso_from_iso
-from certificados_backend.utils.file_utils import sanitize_filename
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
@@ -23,12 +22,14 @@ from starlette.background import BackgroundTask
 import observability
 from database import db
 from database.certificate_types import certificate_type_label
+from database.repositories import authors_from_json
 from storage_service import (
     RetrievedFile,
     StorageError,
     StorageIntegrityError,
     download_certificate,
 )
+from storage_service.filenames import certificate_filename, content_disposition
 
 LOGGER = logging.getLogger("certificados.certificates")
 
@@ -93,6 +94,9 @@ def serialize(
         "certificate_type": cert.get("certificate_type"),
         "certificate_type_label": certificate_type_label(cert.get("certificate_type")),
         "workload_hours": cert.get("workload_hours"),
+        "authors": authors_from_json(cert.get("authors_json")),
+        "team_name": cert.get("team_name"),
+        "work_title": cert.get("work_title"),
         "issue_date": extenso_from_iso(cert.get("issue_date")),
         "issue_date_iso": cert.get("issue_date"),
         "status": status,
@@ -244,20 +248,23 @@ def stream(code: str, *, actor: dict, disposition: str = "attachment") -> Stream
         target_id=cert["unique_code"],
         details={"count": 1},
     )
-    safe_name = sanitize_filename(cert.get("participant_name") or code)
     return StreamingResponse(
         BytesIO(retrieved.content),
         media_type=retrieved.mime_type,
-        headers={"Content-Disposition": f'{disposition}; filename="{safe_name}.pdf"'},
+        headers={
+            "Content-Disposition": content_disposition(certificate_filename(cert), disposition)
+        },
     )
 
 
-def _unique_name(name: str, used: set[str]) -> str:
-    base = sanitize_filename(name)
-    candidate = f"{base}.pdf"
+def _unique_name(filename: str, used: set[str]) -> str:
+    # The code inside each name already keeps entries apart; this only guards
+    # against a repeated name on case-insensitive file systems.
+    stem, extension = os.path.splitext(filename)
+    candidate = filename
     counter = 2
     while candidate.casefold() in used:
-        candidate = f"{base}_{counter}.pdf"
+        candidate = f"{stem} ({counter}){extension}"
         counter += 1
     used.add(candidate.casefold())
     return candidate
@@ -320,7 +327,7 @@ def download_zip(codes: list[str], *, actor: dict) -> FileResponse:
                         status_code=413,
                         detail="O conteúdo total dos certificados excede o limite do ZIP.",
                     )
-                archive.writestr(_unique_name(cert["participant_name"], used), retrieved.content)
+                archive.writestr(_unique_name(certificate_filename(cert), used), retrieved.content)
                 total_uncompressed += content_size
                 included += 1
                 # Drop the only per-PDF byte reference before retrieving the next file.

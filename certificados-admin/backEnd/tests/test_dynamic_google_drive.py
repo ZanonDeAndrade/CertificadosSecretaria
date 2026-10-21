@@ -432,7 +432,9 @@ def test_single_and_multiple_event_batches_store_each_pdf_in_its_frozen_folder(
     }
 
 
-def test_batch_without_every_event_destination_is_blocked(client, auth_headers, google_drive_profile):
+def test_batch_without_every_event_destination_is_blocked(
+    client, auth_headers, google_drive_profile
+):
     rows = [
         {"nome": "Ana", "carga_horaria": 8, "evento": "Semana"},
         {"nome": "Bia", "carga_horaria": 4, "evento": "Workshop"},

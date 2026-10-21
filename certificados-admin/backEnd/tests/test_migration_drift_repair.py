@@ -49,7 +49,7 @@ def test_upgrade_repairs_compatible_tables_precreated_before_0007(tmp_path, monk
     with engine.connect() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "0011"
+            == "0013"
         )
         assert (
             connection.execute(
@@ -162,3 +162,80 @@ def test_certificate_type_migration_preserves_legacy_rows_and_enforces_domain(
                 "UPDATE emission_batches SET certificate_type = 'speaker' WHERE id = 'legacy-batch'"
             )
         )
+
+
+def _insert_legacy_events(engine) -> None:
+    with engine.begin() as connection:
+        for code, event in (
+            ("CERT-2025-EVT001", "Semana de Inovação"),
+            ("CERT-2025-EVT002", "  JORNADA   JURÍDICA "),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO certificates "
+                    "(unique_code, participant_name, event_name, issue_date) "
+                    "VALUES (:code, 'Pessoa Legada', :event, '2025-08-15')"
+                ),
+                {"code": code, "event": event},
+            )
+
+
+def _normalized_events(engine) -> dict[str, str | None]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT unique_code, event_name_normalized FROM certificates")
+        ).all()
+    return {code: normalized for code, normalized in rows}
+
+
+def test_event_name_migration_fills_existing_certificates_and_downgrades(tmp_path, monkeypatch):
+    database_path = tmp_path / "event-name.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("CERTIFICADOS_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    cfg = _alembic_config()
+    command.upgrade(cfg, "0012")
+    engine = create_engine(database_url)
+    _insert_legacy_events(engine)
+
+    command.upgrade(cfg, "head")
+    command.check(cfg)
+    assert _normalized_events(engine) == {
+        "CERT-2025-EVT001": "semana de inovacao",
+        "CERT-2025-EVT002": "jornada juridica",
+    }
+    indexes = {index["name"] for index in inspect(engine).get_indexes("certificates")}
+    assert "idx_certificates_event_name_normalized" in indexes
+
+    command.downgrade(cfg, "0012")
+    columns = {column["name"] for column in inspect(engine).get_columns("certificates")}
+    assert "event_name_normalized" not in columns
+    command.upgrade(cfg, "head")
+    assert _normalized_events(engine)["CERT-2025-EVT001"] == "semana de inovacao"
+
+
+def test_legacy_sqlite_startup_fills_the_event_search_column(tmp_path, monkeypatch):
+    from database import db
+    from database import engine as db_engine
+
+    database_path = tmp_path / "legacy-startup.db"
+    database_url = f"sqlite+pysqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("CERTIFICADOS_DISABLE_DOTENV", "1")
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    command.upgrade(_alembic_config(), "0012")
+    engine = create_engine(database_url)
+    _insert_legacy_events(engine)
+
+    db_engine.reset_engines()
+    try:
+        db.init_db()
+    finally:
+        db_engine.reset_engines()
+    assert _normalized_events(engine) == {
+        "CERT-2025-EVT001": "semana de inovacao",
+        "CERT-2025-EVT002": "jornada juridica",
+    }

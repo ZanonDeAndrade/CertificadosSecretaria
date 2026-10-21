@@ -151,7 +151,12 @@
           {% for cert in results %}
             <li class="result-item">
               <div class="result-info">
-                <h3>{{ cert.participant_name }}</h3>
+                {% if cert.per_work and cert.authors %}
+                  <h3>{{ cert.authors|join(', ') }}</h3>
+                  <p class="result-authors">Trabalho com {{ cert.authors|length }} autor(es)</p>
+                {% else %}
+                  <h3>{{ cert.participant_name }}</h3>
+                {% endif %}
                 {% if cert.event_name %}<p class="result-event">{{ cert.event_name }}</p>{% endif %}
                 {% if cert.course_name %}
                   <p class="result-course">

@@ -13,6 +13,7 @@ import pandas as pd
 
 from database import db
 from storage_service import config as storage_config
+from storage_service.filenames import content_disposition
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -409,6 +410,122 @@ def test_history_search_by_event(client, auth_headers):
     assert found["total"] == 1
     none = client.get("/certificates?event=Inexistente", headers=auth_headers).json()
     assert none["total"] == 0
+
+
+def test_history_event_filter_ignores_accents_and_case(client, auth_headers):
+    _emit(
+        client,
+        auth_headers,
+        [VALID, {**VALID, "nome": "Caio Lima", "evento": "Jornada de Inovação"}],
+    )
+    for term in ("juridica", "SEMANA JURÍDICA", "  semana   jur  "):
+        found = client.get("/certificates", params={"event": term}, headers=auth_headers).json()
+        assert [item["event_name"] for item in found["items"]] == ["Semana Jurídica"], term
+    found = client.get("/certificates", params={"event": "INOVACAO"}, headers=auth_headers).json()
+    assert [item["participant_name"] for item in found["items"]] == ["Caio Lima"]
+
+
+def _insert(code: str, *, event: str, course: str) -> None:
+    db.insert_certificates(
+        [
+            {
+                "unique_code": code,
+                "participant_name": "Pessoa Sintética",
+                "event_name": event,
+                "course_name": course,
+                "issue_date": "2026-06-10",
+                "status": "ativo",
+            }
+        ]
+    )
+
+
+def test_history_event_and_course_filters_take_wildcards_literally(client, auth_headers):
+    _insert("CERT-2026-WILD01", event="Evento 100% online", course="Curso_A")
+    _insert("CERT-2026-WILD02", event="Evento 1000 online", course="CursoXA")
+
+    def codes(**params) -> list[str]:
+        page = client.get("/certificates", params=params, headers=auth_headers).json()
+        return sorted(item["unique_code"] for item in page["items"])
+
+    assert codes(event="100%") == ["CERT-2026-WILD01"]
+    assert codes(event="%") == ["CERT-2026-WILD01"]
+    assert codes(event="Evento 10_0") == []
+    assert codes(course="Curso_A") == ["CERT-2026-WILD01"]
+    assert codes(course="_") == ["CERT-2026-WILD01"]
+    assert codes(course="curso") == ["CERT-2026-WILD01", "CERT-2026-WILD02"]
+
+
+def test_emission_stores_readable_filename_and_admin_download_uses_it(client, auth_headers):
+    code = _emit(client, auth_headers, [VALID])["generated"][0]["code"]
+    expected = f"Ana Souza - Semana Jurídica - {code}.pdf"
+
+    stored = db.get_by_code(code)
+    assert stored["original_filename"] == expected
+    assert stored["pdf_path"] == f"pdfs/{expected}"
+    assert (db.STORAGE_DIR / stored["pdf_path"]).is_file()
+
+    response = client.get(f"/certificate-file/{code}", headers=auth_headers)
+    assert response.status_code == 200
+    disposition = response.headers["content-disposition"]
+    assert disposition == content_disposition(expected)
+    assert f'filename="Ana Souza - Semana Juridica - {code}.pdf"' in disposition
+    assert "filename*=UTF-8''Ana%20Souza%20-%20Semana%20Jur%C3%ADdica%20-%20" in disposition
+
+
+def test_certificate_issued_before_the_format_downloads_under_it_without_renaming(
+    client, auth_headers
+):
+    code = "CERT-2025-OLD001"
+    legacy_name = f"Joao_Antigo_{code}.pdf"
+    (db.PDFS_DIR).mkdir(parents=True, exist_ok=True)
+    (db.PDFS_DIR / legacy_name).write_bytes(b"%PDF-1.4 legado")
+    db.insert_certificates(
+        [
+            {
+                "unique_code": code,
+                "participant_name": "João Antigo",
+                "event_name": "Semana de Inovação",
+                "issue_date": "2025-06-10",
+                "pdf_path": f"pdfs/{legacy_name}",
+                "original_filename": legacy_name,
+                "storage_provider": "local",
+                "status": "ativo",
+            }
+        ]
+    )
+
+    response = client.get(f"/certificate-file/{code}", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == content_disposition(
+        f"João Antigo - Semana de Inovação - {code}.pdf"
+    )
+    # Only the suggested name changes: the stored file and its record stay put.
+    assert db.get_by_code(code)["original_filename"] == legacy_name
+    assert db.get_by_code(code)["pdf_path"] == f"pdfs/{legacy_name}"
+    assert (db.PDFS_DIR / legacy_name).read_bytes() == b"%PDF-1.4 legado"
+
+
+def test_history_zip_names_entries_with_holder_event_and_code(client, auth_headers):
+    # The same person twice in the same event: the code keeps the names apart.
+    second = {**VALID, "carga_horaria": 20}
+    third = {**VALID, "nome": "Lúcia Ávila", "evento": "Jornada: Ética/Direito"}
+    generated = _emit(client, auth_headers, [VALID, second, third])["generated"]
+    codes = [item["code"] for item in generated]
+
+    response = client.post(
+        "/certificates/download-zip", json={"codes": codes}, headers=auth_headers
+    )
+    assert response.status_code == 200
+    with ZipFile(io.BytesIO(response.content)) as archive:
+        names = sorted(archive.namelist())
+    assert names == sorted(
+        [
+            f"Ana Souza - Semana Jurídica - {codes[0]}.pdf",
+            f"Ana Souza - Semana Jurídica - {codes[1]}.pdf",
+            f"Lúcia Ávila - Jornada Ética Direito - {codes[2]}.pdf",
+        ]
+    )
 
 
 def test_legacy_synchronous_generation_is_gone(client, auth_headers):

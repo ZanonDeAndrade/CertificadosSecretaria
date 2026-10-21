@@ -26,8 +26,10 @@ from certificados_backend.utils.dates import extenso_from_iso, normalize_date_te
 import observability
 from database import db
 from database.certificate_types import certificate_type_label, parse_certificate_type
+from database.repositories import authors_from_json
 from storage_service import CertificateStorage, StorageError, get_storage
 from storage_service import config as storage_config
+from storage_service.filenames import EXTENSION, clean_filename_part
 
 LOGGER = logging.getLogger("certificados.saga")
 
@@ -113,14 +115,16 @@ class CertificateBatchService:
         # (so STORAGE_PROVIDER is honoured and tests can inject a fake).
         self._storage = storage
         self._cache_active_template = cache_active_template
-        self._cached_template: _ActiveTemplate | None = None
+        self._cached_templates: dict[str | None, _ActiveTemplate] = {}
 
-    def _active_template(self, created_by: int | None) -> _ActiveTemplate:
-        """Resolve the single global active template version (seed default once)."""
-        if self._cache_active_template and self._cached_template is not None:
-            return self._cached_template
+    def _active_template(
+        self, created_by: int | None, certificate_type: str | None = None
+    ) -> _ActiveTemplate:
+        """Resolve the active template for a type: its own, else the generic one."""
+        if self._cache_active_template and certificate_type in self._cached_templates:
+            return self._cached_templates[certificate_type]
         template_service.ensure_default_version(self.config.template_path, created_by=created_by)
-        version = template_service.get_active_version()
+        version = template_service.get_active_version(certificate_type)
         if not version:
             raise ValueError(
                 "Nenhum template global ativo. Configure e ative um template antes de emitir."
@@ -135,7 +139,7 @@ class CertificateBatchService:
             background=background,
         )
         if self._cache_active_template:
-            self._cached_template = active
+            self._cached_templates[certificate_type] = active
         return active
 
     # ── Structured generation (saga: idempotent + QR + global template) ─────────
@@ -178,7 +182,7 @@ class CertificateBatchService:
             storage = self._storage or get_storage()
         max_bytes = storage_config.get_max_file_size_bytes()
         year = datetime.now().year
-        tmpl = self._active_template(created_by=issued_by)
+        tmpl = self._active_template(created_by=issued_by, certificate_type=frozen_type)
         institution = institutional_snapshot or {
             "institution_name": self.config.institution_name,
             "issue_location": self.config.issue_location,
@@ -224,6 +228,13 @@ class CertificateBatchService:
                 # so the reissue reproduces it faithfully.
                 "certificate_text": resolved_body,
                 "certificate_type": frozen_type,
+                # Per-work data, kept with the certificate for public validation,
+                # search by any author and a faithful reissue.
+                "authors_json": (
+                    json.dumps(list(row.autores), ensure_ascii=False) if row.autores else None
+                ),
+                "team_name": row.equipe or None,
+                "work_title": row.titulo_trabalho or None,
                 "issued_by": issued_by,
                 "template_used": tmpl.label,
                 "template_version_id": tmpl.version_id,
@@ -313,10 +324,9 @@ class CertificateBatchService:
             record = build_record(code)
             content = render(record, code)
             if max_bytes is not None and len(content) > max_bytes:
-                raise ValueError(
-                    f"Certificado de '{fields.get('participant_name')}' "
-                    "excede o tamanho máximo permitido."
-                )
+                # The failure report already names the row; the message itself
+                # may reach logs, so it carries no personal data.
+                raise ValueError("O certificado gerado excede o tamanho máximo permitido.")
             stored = storage.save(
                 content, filename=build_pdf_filename(record), mime_type="application/pdf"
             )
@@ -446,9 +456,12 @@ class CertificateBatchService:
         }
         old_has_file = bool((cert.get("drive_file_id") or "") or (cert.get("pdf_path") or ""))
 
-        # 1) Upload the NEW file.
+        # 1) Upload the NEW file under the name the certificate already has; only
+        #    a certificate stored without one gets the current naming format.
         stored = storage.save(
-            content, filename=build_pdf_filename(record), mime_type="application/pdf"
+            content,
+            filename=_stored_filename(cert) or build_pdf_filename(record),
+            mime_type="application/pdf",
         )
 
         # 2) Finalize the NEW file in the DB BEFORE deleting the old one.
@@ -495,8 +508,9 @@ def _build_body(row: SpreadsheetRow) -> str:
     parts = [
         f"participou do(a) {row.evento}",
         f"do curso de {row.curso}",
-        f"com carga horária de {row.carga_horaria} horas",
     ]
+    if row.carga_horaria is not None:
+        parts.append(f"com carga horária de {row.carga_horaria} horas")
     body = ", ".join(parts)
     if row.data_inicio and row.data_fim:
         body += f", realizado de {row.data_inicio} a {row.data_fim}"
@@ -539,11 +553,13 @@ def build_row_variables(row: SpreadsheetRow, certificate_type: str | None = None
         "nome": row.nome,
         "curso": row.curso,
         "evento": row.evento,
-        "carga_horaria": str(row.carga_horaria),
+        "carga_horaria": "" if row.carga_horaria is None else str(row.carga_horaria),
         "data_inicio": row.data_inicio or "",
         "data_fim": row.data_fim or "",
         "data_emissao": row.data_emissao or "",
         "certificate_type": certificate_type_label(certificate_type),
+        "equipe": row.equipe or "",
+        "titulo_trabalho": row.titulo_trabalho or "",
     }
 
 
@@ -567,6 +583,9 @@ def _row_to_record(
         certificate_text=resolved,
         data_emissao=row.data_emissao,
         certificate_type=certificate_type_label(certificate_type),
+        autores=tuple(row.autores),
+        equipe=row.equipe,
+        titulo_trabalho=row.titulo_trabalho,
     )
 
 
@@ -587,7 +606,20 @@ def _cert_to_record(cert: dict, code: str) -> ParticipantRegistryRecord:
         # Stored ISO → render 'por extenso' on the reissued PDF.
         data_emissao=extenso_from_iso(cert.get("issue_date")),
         certificate_type=certificate_type_label(cert.get("certificate_type")),
+        autores=tuple(authors_from_json(cert.get("authors_json"))),
+        equipe=cert.get("team_name") or "",
+        titulo_trabalho=cert.get("work_title") or "",
     )
+
+
+def _stored_filename(cert: dict) -> str:
+    """The name a certificate was stored under, or "" when it has none.
+
+    Passed through the filename rules so a tampered row can never point a local
+    write outside the PDF directory; any name this system wrote is unchanged.
+    """
+    name = clean_filename_part(cert.get("original_filename"))
+    return name if name.lower().endswith(EXTENSION) else ""
 
 
 def _same_storage_target(old_locator: dict, stored) -> bool:

@@ -5,11 +5,13 @@ from io import BytesIO
 
 from certificados_backend.policies import Permission, require_permission
 from certificados_backend.schemas.batches import (
+    BodyVariablesResponse,
     EmissionBatchPageResponse,
     EmissionBatchResponse,
     SpreadsheetPreviewResponse,
 )
 from certificados_backend.services import batch_service, job_dispatch
+from certificados_backend.services.certificate_text import BODY_VARIABLES
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -25,8 +27,10 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from database import db
+from database.certificate_types import MAX_WORK_AUTHORS, is_per_work_type
 
 router = APIRouter(tags=["emission-batches"])
 
@@ -39,25 +43,51 @@ router = APIRouter(tags=["emission-batches"])
     },
 )
 def spreadsheet_template(
+    certificate_type: str | None = None,
     _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
 ) -> StreamingResponse:
+    """Model workbook for a batch; per-work types get the authors columns."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "certificados"
-    columns = [
-        "nome",
-        "carga_horaria",
-        "curso",
-        "evento",
-        "data_emissao",
-        "data_inicio",
-        "data_fim",
-        "email",
-        "documento",
-    ]
-    sheet.append(columns)
-    sheet.append(
-        [
+    if is_per_work_type(certificate_type):
+        columns = [f"autor{index}" for index in range(1, MAX_WORK_AUTHORS + 1)] + [
+            "evento",
+            "titulo_trabalho",
+            "equipe",
+            "carga_horaria",
+            "data_emissao",
+            "data_inicio",
+            "data_fim",
+        ]
+        example: list[object] = [
+            "Nome do primeiro autor",
+            "Segundo autor (opcional)",
+            *([""] * (MAX_WORK_AUTHORS - 2)),
+            "Nome da mostra",
+            "Título do trabalho (opcional)",
+            "Equipe (opcional)",
+            "",
+            "10/06/2026",
+            "",
+            "",
+        ]
+        widths = (28,) * MAX_WORK_AUTHORS + (32, 36, 24, 16, 16, 16, 16)
+    else:
+        columns = [
+            "nome",
+            "carga_horaria",
+            "curso",
+            "evento",
+            "data_emissao",
+            "data_inicio",
+            "data_fim",
+            "email",
+            "documento",
+            "equipe",
+            "titulo_trabalho",
+        ]
+        example = [
             "Nome completo",
             8,
             "Curso (opcional)",
@@ -67,13 +97,17 @@ def spreadsheet_template(
             "",
             "",
             "",
+            "Equipe (opcional)",
+            "Título do trabalho (opcional)",
         ]
-    )
+        widths = (32, 18, 28, 32, 18, 18, 18, 32, 20, 24, 36)
+    sheet.append(columns)
+    sheet.append(example)
     for cell in sheet[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F4E78")
-    for index, width in enumerate((32, 18, 28, 32, 18, 18, 18, 32, 20), start=1):
-        sheet.column_dimensions[chr(64 + index)].width = width
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "A2"
     buffer = BytesIO()
     workbook.save(buffer)
@@ -86,6 +120,23 @@ def spreadsheet_template(
     )
 
 
+@router.get(
+    "/certificates/body-variables",
+    response_model=BodyVariablesResponse,
+    operation_id="list_certificate_body_variables",
+)
+def body_variables(
+    _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
+) -> dict:
+    """Variables the body text accepts; the emission screen builds its buttons from it."""
+    return {
+        "variables": [
+            {"name": name, "token": "{{%s}}" % name, "label": label}
+            for name, label in BODY_VARIABLES
+        ]
+    }
+
+
 @router.post(
     "/certificates/validate-spreadsheet",
     response_model=SpreadsheetPreviewResponse,
@@ -96,13 +147,14 @@ async def validate_spreadsheet(
     data_emissao: str | None = Form(None),
     texto_padrao: str | None = Form(None),
     certificate_type: str | None = Form(None),
-    _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
+    current: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
 ) -> dict:
     return await batch_service.preview(
         file,
         data_emissao=data_emissao,
         texto_padrao=texto_padrao,
         certificate_type=certificate_type,
+        actor=current,
     )
 
 

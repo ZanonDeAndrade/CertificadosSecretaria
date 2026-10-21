@@ -16,6 +16,20 @@ export const CERTIFICATE_TYPES = [
 
 export type CertificateType = (typeof CERTIFICATE_TYPES)[number]["value"];
 
+/** Upper bound of authors a per-work certificate carries (mirrors the backend). */
+export const MAX_WORK_AUTHORS = 8;
+
+/**
+ * Behaviour a type opts into. Mirrors `database/certificate_types.py`; code
+ * checks these flags, never the label text.
+ */
+const PER_WORK_TYPES = new Set<string>(["scientific_initiation"]);
+
+/** One certificate per work, valid for every author listed on it. */
+export function isPerWorkType(value?: string | null): boolean {
+  return Boolean(value && PER_WORK_TYPES.has(value));
+}
+
 export function certificateTypeLabel(
   value?: string | null,
   backendLabel?: string | null,

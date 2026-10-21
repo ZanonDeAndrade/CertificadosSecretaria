@@ -12,12 +12,22 @@ from urllib.request import urlopen
 import uvicorn
 from certificados_backend import auth
 from certificados_backend.policies import Permission, require_permission
+from certificados_backend.schemas.templates import (
+    TemplateSampleDataResponse,
+    TextLayoutRequest,
+    TextLayoutResponse,
+)
 from certificados_backend.services import (
     audit_service,
     batch_service,
+    template_fields,
     template_service,
 )
-from certificados_backend.services.runtime import build_certificate_service
+from certificados_backend.services.generator import measuring_draw
+from certificados_backend.services.runtime import (
+    build_certificate_service,
+    build_layout_generator,
+)
 from certificados_backend.services.template_service import TemplateConflictError, TemplateError
 from certificados_backend.utils.courses import COURSES
 from certificados_backend.utils.file_utils import ensure_directory
@@ -106,6 +116,8 @@ class CreateTemplateVersionRequest(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     # {background: <data URL or serving URL>, image_width, image_height, elements}
     layout: dict
+    # Dedicates the version to one certificate type; omitted = generic.
+    certificate_type: str | None = Field(default=None, max_length=32)
 
 
 class RenameTemplateVersionRequest(BaseModel):
@@ -278,9 +290,11 @@ def create_app() -> FastAPI:
 
     @app.get("/templates/active")
     def template_active(
+        certificate_type: str | None = None,
         _: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
     ) -> dict:
-        version = template_service.get_active_version()
+        """Active version for a type (its own, else the generic one)."""
+        version = template_service.get_active_version(certificate_type or None)
         if not version:
             raise HTTPException(status_code=404, detail="Nenhum template ativo.")
         return version
@@ -311,6 +325,60 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return StreamingResponse(BytesIO(content), media_type=mime)
 
+    @app.get("/templates/sample-data", response_model=TemplateSampleDataResponse)
+    def template_sample_data(
+        current: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
+    ) -> dict:
+        """Sample values for the editor, resolved exactly as the PDF resolves them.
+
+        Institutional values come from the current settings, so the preview
+        never shows a city or a signatory the certificate will not have.
+        """
+        return template_fields.sample_data(actor=current)
+
+    @app.post("/templates/text-layout", response_model=TextLayoutResponse)
+    def template_text_layout(
+        payload: TextLayoutRequest,
+        _: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
+    ) -> dict:
+        """Line breaks and heights the PDF will use, for the editor preview.
+
+        Measured with the same fonts and wrapping as the renderer, so the
+        editor shows the operator exactly what the certificate will contain.
+        """
+        generator = build_layout_generator()
+        draw = measuring_draw()
+        items: list[dict] = []
+        for item in payload.items:
+            if not item.text.strip():
+                items.append(
+                    {
+                        "id": item.id,
+                        "lines": [],
+                        "font_size": item.fontSize,
+                        "line_height": 0,
+                        "text_height": 0,
+                        "wrap_width": None,
+                        "overflow": False,
+                        "top_offset": 0,
+                    }
+                )
+                continue
+            box = generator.layout_text_box(draw, payload.image_width, item.text, item.as_element())
+            items.append(
+                {
+                    "id": item.id,
+                    "lines": box.lines,
+                    "font_size": box.font_size,
+                    "line_height": box.line_height,
+                    "text_height": box.text_height,
+                    "wrap_width": box.wrap_width,
+                    "overflow": box.overflow,
+                    "top_offset": box.top_offset,
+                }
+            )
+        return {"items": items}
+
     @app.post("/templates/versions")
     def create_template_version(
         payload: CreateTemplateVersionRequest,
@@ -318,7 +386,10 @@ def create_app() -> FastAPI:
     ) -> dict:
         try:
             version = template_service.create_version(
-                name=payload.name, layout=payload.layout, created_by=current["id"]
+                name=payload.name,
+                layout=payload.layout,
+                created_by=current["id"],
+                certificate_type=payload.certificate_type,
             )
         except TemplateError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

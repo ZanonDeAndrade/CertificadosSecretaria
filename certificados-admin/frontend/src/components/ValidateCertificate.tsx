@@ -176,7 +176,15 @@ export default function ValidateCertificate() {
                   <PanelHeader title="Dados do certificado" />
                   <PanelBody>
                     <dl className="divide-y divide-[color:var(--line)]">
-                      <DetailRow label="Participante" value={result.name} />
+                      {result.per_work && result.authors && result.authors.length > 0 ? (
+                        <DetailRow label="Autores" value={result.authors.join(", ")} />
+                      ) : (
+                        <DetailRow label="Participante" value={result.name} />
+                      )}
+                      {result.work_title && (
+                        <DetailRow label="Título do trabalho" value={result.work_title} />
+                      )}
+                      {result.team_name && <DetailRow label="Equipe" value={result.team_name} />}
                       <DetailRow label="Curso ou evento" value={result.event} />
                       <DetailRow
                         label="Tipo do certificado"

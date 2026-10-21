@@ -152,9 +152,9 @@ const PNG_1PX = Buffer.from(
   "base64",
 );
 const TEMPLATE_VERSIONS = [
-  { id: 4, version_number: 4, name: "Modelo 2026", is_active: true, image_width: 3508, image_height: 2480, background_url: "/templates/versions/4/background", created_at: "2026-05-02T10:00:00Z", activated_at: "2026-05-02T10:30:00Z" },
-  { id: 3, version_number: 3, name: "Ajuste de assinatura", is_active: false, image_width: 3508, image_height: 2480, background_url: "/templates/versions/3/background", created_at: "2026-03-18T10:00:00Z", activated_at: null },
-  { id: 2, version_number: 2, name: "Modelo 2025", is_active: false, image_width: 3508, image_height: 2480, background_url: "/templates/versions/2/background", created_at: "2025-08-01T10:00:00Z", activated_at: null },
+  { id: 4, version_number: 4, name: "Modelo 2026", is_active: true, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/4/background", created_at: "2026-05-02T10:00:00Z", activated_at: "2026-05-02T10:30:00Z" },
+  { id: 3, version_number: 3, name: "Ajuste de assinatura", is_active: false, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/3/background", created_at: "2026-03-18T10:00:00Z", activated_at: null },
+  { id: 2, version_number: 2, name: "Modelo 2025", is_active: false, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/2/background", created_at: "2025-08-01T10:00:00Z", activated_at: null },
 ];
 
 const BATCHES = new Map();
@@ -186,10 +186,20 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
+/** Same shape as the real API: ASCII `filename` plus the exact UTF-8 `filename*`. */
+function contentDisposition(filename) {
+  const ascii = filename
+    .replace(/…/g, "...")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7e]|["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
 function sendBinary(res, status, body, contentType, filename) {
   res.writeHead(status, {
     "content-type": contentType,
-    "content-disposition": `attachment; filename=\"${filename}\"`,
+    "content-disposition": contentDisposition(filename),
     "access-control-allow-origin": res.req?.headers?.origin ?? "*",
     "access-control-allow-credentials": "true",
     "access-control-expose-headers": "content-disposition,x-skipped-certificates",
@@ -356,6 +366,18 @@ const server = createServer(async (req, res) => {
     return send(res, 200, SETTINGS);
   }
 
+  if (path === "/certificates/body-variables" && req.method === "GET") {
+    // Mirrors BODY_VARIABLES in services/certificate_text.py.
+    const variables = [
+      ["nome", "Nome"],
+      ["carga_horaria", "Carga horária"],
+      ["certificate_type", "Tipo do certificado"],
+      ["evento", "Evento"],
+      ["equipe", "Equipe"],
+      ["titulo_trabalho", "Título do trabalho"],
+    ].map(([name, label]) => ({ name, token: `{{${name}}}`, label }));
+    return send(res, 200, { variables });
+  }
   if (path === "/certificates/spreadsheet-template") {
     return sendBinary(res, 200, Buffer.from("PK\u0003\u0004mock-xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "modelo-certificados.xlsx");
   }
@@ -401,6 +423,12 @@ const server = createServer(async (req, res) => {
       ],
       events: [{ key: "Semana de Inovação", label: "Semana de Inovação", count: 42 }],
       resolved_text_preview: "participou da Semana de Inovação, com carga horária total de 12 horas.",
+      warnings: [],
+      layout_warnings: [],
+      missing_settings: [],
+      missing_settings_message: null,
+      empty_fields: [],
+      can_manage_settings: role === "admin",
     });
   }
   if (path === "/emission-batches" && req.method === "POST") {
@@ -439,7 +467,10 @@ const server = createServer(async (req, res) => {
     return sendBinary(res, 200, Buffer.from("PK\u0003\u0004mock-zip"), "application/zip", "certificados.zip");
   }
   if (path.startsWith("/certificate-file/") && req.method === "GET") {
-    return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", "certificado.pdf");
+    const code = decodeURIComponent(path.slice("/certificate-file/".length));
+    const row = ALL.find((item) => item.unique_code === code);
+    const filename = row ? `${row.participant_name} - ${row.event_name} - ${code}.pdf` : `${code}.pdf`;
+    return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", filename);
   }
   if (path === "/certificates" && req.method === "GET") {
     const limit = Number(url.searchParams.get("limit") ?? 20);
@@ -482,6 +513,34 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  if (path === "/templates/sample-data") {
+    // Same shape the backend produces: institutional values come from SETTINGS.
+    const body = "participou da Semana de Inovação, com carga horária total de 12 horas.";
+    return send(res, 200, {
+      values: {
+        name: "Joao Silva",
+        event: "Workshop de Inteligencia Artificial",
+        course: "Sistemas de Informação",
+        date: "27 de abril de 2026",
+        institution_name: SETTINGS.institution_name,
+        issue_location: SETTINGS.issue_location,
+        issue_line: `${SETTINGS.issue_location}, 27 de abril de 2026.`,
+        signatory_name: SETTINGS.signatory_name,
+        signatory_title: SETTINGS.signatory_title,
+        validation_code: "CERT-2026-EXEMPL",
+        texto_certificado: body,
+        certificate_text: body,
+        certificate_type: "Ouvinte",
+      },
+      empty_settings: [],
+      can_manage_settings: role === "admin",
+    });
+  }
+  if (path === "/templates/text-layout" && req.method === "POST") {
+    // Line breaks are measured by the real backend; the mock lets the editor
+    // fall back to its local approximation by answering with no items.
+    return send(res, 200, { items: [] });
+  }
   if (path === "/templates/versions" && req.method === "GET") {
     return send(res, 200, empty ? [] : TEMPLATE_VERSIONS);
   }

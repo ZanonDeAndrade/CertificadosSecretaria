@@ -21,6 +21,8 @@ from certificados_backend.services.certificate_service import (
     build_row_variables,
 )
 from certificados_backend.services.certificate_text import (
+    ALLOWED_VARIABLES,
+    BODY_VARIABLE_LABELS,
     CertificateTextError,
     render_certificate_body,
     validate_body_template,
@@ -169,11 +171,63 @@ def test_allowed_variables_are_interpolated():
 
 
 def test_non_spreadsheet_variables_are_rejected():
-    # Spreadsheet columns beyond name/workload remain unavailable; the
-    # controlled certificate type is supplied by the batch, not the sheet.
-    for bad in ("{{curso}}", "{{evento}}", "{{data_inicio}}", "{{data_emissao}}"):
+    # Columns outside the allowlist remain unavailable; the controlled
+    # certificate type is supplied by the batch, not the sheet.
+    for bad in ("{{curso}}", "{{data_inicio}}", "{{data_emissao}}"):
         with pytest.raises(CertificateTextError):
             validate_body_template(f"texto {bad}")
+
+
+def test_evento_equipe_and_work_title_are_interpolated_per_row():
+    template = "participou de {{evento}} pela {{equipe}} com {{titulo_trabalho}}."
+    assert validate_body_template(template) == template
+    row = SpreadsheetRow(
+        row_number=2,
+        nome="Ana Souza",
+        curso="Direito",
+        evento="Semana Jurídica",
+        carga_horaria=40,
+        data_emissao="10 de junho de 2026",
+        equipe="Equipe Azul",
+        titulo_trabalho="Horta vertical",
+    )
+    out = render_certificate_body(template, build_row_variables(row))
+    assert out == "participou de Semana Jurídica pela Equipe Azul com Horta vertical."
+
+
+# ── Variables offered to the emission screen ──────────────────────────────────
+
+
+def test_api_offers_exactly_the_variables_the_body_accepts(client, auth_headers):
+    response = client.get("/certificates/body-variables", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    variables = response.json()["variables"]
+
+    # Same names, same order: a button can never offer a rejected variable,
+    # and an accepted variable can never lack its button.
+    assert [item["name"] for item in variables] == list(ALLOWED_VARIABLES)
+    assert {item["name"]: item["label"] for item in variables} == BODY_VARIABLE_LABELS
+    for item in variables:
+        assert item["token"] == "{{%s}}" % item["name"]
+        assert validate_body_template(f"texto {item['token']}")
+    assert {"{{equipe}}", "{{evento}}", "{{titulo_trabalho}}"} <= {
+        item["token"] for item in variables
+    }
+
+
+def test_body_variables_require_the_issue_permission(client):
+    assert client.get("/certificates/body-variables").status_code == 401
+
+    from certificados_backend import auth
+
+    from database import db
+
+    db.create_admin_user("auditor.vars", auth.hash_password("Senha-Forte-2026!"), "auditor")
+    login = client.post(
+        "/auth/login", json={"username": "auditor.vars", "password": "Senha-Forte-2026!"}
+    )
+    assert login.status_code == 200, login.text
+    assert client.get("/certificates/body-variables").status_code == 403
 
 
 def test_carga_horaria_is_number_only():

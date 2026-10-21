@@ -80,12 +80,22 @@ class Certificate(Base):
     participant_document_hash_key_id: Mapped[str | None] = mapped_column(String(32))
     course_name: Mapped[str | None] = mapped_column(String(255))
     event_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Same normalisation as the name search, so the event filter of the history
+    # ignores accents and case ("inovacao" finds "Inovação").
+    event_name_normalized: Mapped[str | None] = mapped_column(String(255))
     workload_hours: Mapped[int | None] = mapped_column(Integer)
     issue_date: Mapped[str] = mapped_column(String(64), nullable=False)
     start_date: Mapped[str | None] = mapped_column(String(64))
     end_date: Mapped[str | None] = mapped_column(String(64))
     certificate_text: Mapped[str | None] = mapped_column(Text)
     certificate_type: Mapped[str | None] = mapped_column(String(32))
+    # Per-work certificates: every author, in order, as a JSON list. The first
+    # author is also ``participant_name``; ``authors_search`` holds the
+    # normalised names so a search by any author finds the certificate.
+    authors_json: Mapped[str | None] = mapped_column(Text)
+    authors_search: Mapped[str | None] = mapped_column(Text)
+    team_name: Mapped[str | None] = mapped_column(String(255))
+    work_title: Mapped[str | None] = mapped_column(String(255))
 
     # ── Storage metadata (definitive file lives in Drive) ────────────────────
     storage_provider: Mapped[str] = mapped_column(
@@ -168,6 +178,7 @@ class Certificate(Base):
             "status",
         ),
         Index("idx_certificates_event_name", "event_name"),
+        Index("idx_certificates_event_name_normalized", "event_name_normalized"),
         Index("idx_certificates_course_name", "course_name"),
         Index("idx_certificates_status", "status"),
         # NULL business_keys are distinct, so legacy rows without one do not
@@ -590,6 +601,12 @@ class TemplateVersion(Base):
         String(128), nullable=False, server_default="image/png", default="image/png"
     )
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
+    # NULL is the generic template; a value makes the version apply only to
+    # batches of that type (falling back to the generic one otherwise).
+    certificate_type: Mapped[str | None] = mapped_column(String(32))
+    # Set only while active: the type (or the generic sentinel). Its UNIQUE
+    # index lets the database refuse two active versions for the same type.
+    active_type_key: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -602,11 +619,9 @@ class TemplateVersion(Base):
 
     __table_args__ = (
         Index("idx_template_versions_is_active", "is_active"),
-        Index(
-            "uq_template_versions_single_active",
-            "is_active",
-            unique=True,
-            sqlite_where=(is_active == 1),
-            postgresql_where=(is_active == 1),
+        Index("uq_template_versions_active_type_key", "active_type_key", unique=True),
+        CheckConstraint(
+            f"certificate_type IS NULL OR {_in_list_sql('certificate_type', CERTIFICATE_TYPE_VALUES)}",
+            name="ck_template_versions_certificate_type",
         ),
     )

@@ -16,8 +16,6 @@ import hmac
 import ipaddress
 import logging
 import os
-import re
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -32,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import observability
 from database import db
-from database.certificate_types import certificate_type_label
+from database.certificate_types import certificate_type_label, is_per_work_type
 from database.privacy import (
     active_document_key_id,
     document_hash,
@@ -44,11 +42,13 @@ from database.privacy import (
     public_result_reference,
     validate_production_privacy_config,
 )
+from database.repositories import authors_from_json
 from storage_service import (
     StorageError,
     StorageIntegrityError,
     download_certificate,
 )
+from storage_service.filenames import certificate_filename, content_disposition
 
 LOGGER = logging.getLogger("certificados.consulta")
 
@@ -172,6 +172,11 @@ def _public_view(cert: dict) -> dict:
         "workload_hours": cert.get("workload_hours"),
         "issue_date": _format_issue_date(cert.get("issue_date")),
         "status": cert.get("status") or "ativo",
+        # A per-work certificate belongs to every author, as printed on it.
+        "per_work": is_per_work_type(cert.get("certificate_type")),
+        "authors": authors_from_json(cert.get("authors_json")),
+        "work_title": cert.get("work_title"),
+        "team_name": cert.get("team_name"),
     }
 
 
@@ -187,6 +192,8 @@ def _public_name_view(cert: dict) -> dict:
         "issue_date": _format_issue_date(cert.get("issue_date")),
         "status": cert.get("status") or "ativo",
         "result_ref": public_result_reference(cert["unique_code"]),
+        "per_work": is_per_work_type(cert.get("certificate_type")),
+        "authors": [_mask_name(name) for name in authors_from_json(cert.get("authors_json"))],
     }
 
 
@@ -784,18 +791,11 @@ def _stream_public_certificate(unique_code: str) -> StreamingResponse:
         raise HTTPException(status_code=502, detail="Falha ao obter o arquivo.") from exc
 
     observability.metrics.increment(observability.CERT_DOWNLOADS)
-    filename = _download_filename(cert["participant_name"])
     return StreamingResponse(
         BytesIO(retrieved.content),
         media_type=retrieved.mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(certificate_filename(cert))},
     )
-
-
-def _download_filename(participant_name: str) -> str:
-    base = unicodedata.normalize("NFKD", participant_name).encode("ascii", "ignore").decode("ascii")
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-")
-    return f"{base or 'certificado'}.pdf"
 
 
 def _resolve_port() -> int:

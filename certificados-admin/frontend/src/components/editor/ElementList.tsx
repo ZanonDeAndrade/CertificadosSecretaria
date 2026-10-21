@@ -8,9 +8,21 @@
  */
 import { KEY_LABELS, TemplateElement, ElementKey } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
+import { isPerWorkType } from "../../domain/certificateTypes";
 import Icon from "../../ui/Icon";
 import { IconButton } from "../../ui/Button";
 import { cn } from "../../ui/cn";
+
+/* Offered only on templates for per-work certificate types. */
+const PER_WORK_QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
+  {
+    key: "authors",
+    label: "Autores",
+    title:
+      "Lista “Autor N: Nome” só com os autores preenchidos. A base do bloco " +
+      "fica fixa e ele cresce para cima.",
+  },
+];
 
 const QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
   { key: "name", label: "Nome", title: "Nome do participante (vem da planilha)" },
@@ -47,6 +59,12 @@ const QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
     label: "Código",
     title: "Código de validação do certificado",
   },
+  { key: "equipe", label: "Equipe", title: "Coluna “equipe” da planilha (opcional)" },
+  {
+    key: "work_title",
+    label: "Título",
+    title: "Coluna “titulo_trabalho” da planilha (opcional)",
+  },
   {
     key: "static",
     label: "Texto fixo",
@@ -57,6 +75,8 @@ const QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
 interface ElementListProps {
   elements: TemplateElement[];
   selectedId: string | null;
+  /** Type the template is dedicated to; null for the generic template. */
+  certificateType?: string | null;
   onAdd: EditorAPI["addTextElement"];
   onSelect: EditorAPI["selectElement"];
   onDelete: EditorAPI["deleteElement"];
@@ -66,11 +86,15 @@ interface ElementListProps {
 export default function ElementList({
   elements,
   selectedId,
+  certificateType = null,
   onAdd,
   onSelect,
   onDelete,
   onDuplicate,
 }: ElementListProps) {
+  const quickKeys = isPerWorkType(certificateType)
+    ? [...QUICK_KEYS, ...PER_WORK_QUICK_KEYS]
+    : QUICK_KEYS;
   const handleListKeyDown = (event: React.KeyboardEvent) => {
     if (elements.length === 0) return;
     const index = elements.findIndex((element) => element.id === selectedId);
@@ -93,7 +117,7 @@ export default function ElementList({
           Adicionar campo
         </h2>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {QUICK_KEYS.map(({ key, label, title }) => (
+          {quickKeys.map(({ key, label, title }) => (
             <button
               key={key}
               type="button"

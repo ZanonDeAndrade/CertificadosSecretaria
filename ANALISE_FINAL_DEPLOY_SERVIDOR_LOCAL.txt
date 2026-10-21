@@ -1,0 +1,877 @@
+# 1. Arquitetura atual
+
+Escopo analisado em 19/08/2026:
+
+    /home/arthur-zanon/Área de trabalho/Projetos/CertificadosSecretaria
+
+Esta análise descreve a árvore local atual. Nenhum arquivo da aplicação foi alterado.
+
+Arquitetura confirmada:
+
+- Frontend administrativo: React 19 + TypeScript + Vite. O build ocorre no estágio Node 20 de deploy/Dockerfile.web e o resultado estático é servido pelo Nginx.
+- Backend administrativo: FastAPI/Uvicorn, pacote certificados_backend, porta interna 8000.
+- Consulta pública: FastAPI/Uvicorn + Jinja2, pacote certificados_consulta, porta interna 8001.
+- Banco: PostgreSQL 16.14 Alpine, serviço db, sem porta publicada no host.
+- ORM: SQLAlchemy 2.0.52. Não existe Prisma.
+- Migrations: Alembic, revisões lineares 0001 a 0011. O banco observado está em 0011 (head).
+- Worker: serviço worker, processo certificados-worker residente, consumindo fila durável no PostgreSQL a cada 2 segundos. Não usa Redis.
+- Web/proxy: serviço web, Nginx não privilegiado na porta interna 8080, única publicação externa.
+- Storage LAN: bind mount ./runtime/storage para /data/storage no admin/worker e somente leitura no consulta. PDFs ficam em /data/storage/pdfs.
+- Banco persistente: volume Docker certificados-local_postgres_data.
+- Autenticação: usuário/senha no PostgreSQL, bcrypt e JWT em cookie HttpOnly; SameSite=Lax e Secure=false no HTTP LAN. Sessões são revogáveis e persistidas.
+- PDF: Pillow, fontes e template empacotados; QR aponta para PUBLIC_VALIDATION_BASE_URL/validar/<codigo>.
+- Upload: planilha .xlsx, limite LAN de 10 MB e 2.000 linhas.
+- Google Drive: implementado, mas desativado e bloqueado pelo perfil local_server, que exige STORAGE_PROVIDER=local.
+- Backup LAN: backup.sh gera dump PostgreSQL, tar.gz do storage e tar.gz de configuração/secrets.
+- Containers: aplicação roda como UID 10001; Nginx como UID 101; PostgreSQL com usuário da imagem oficial.
+
+Serviços reais do compose.local-server.yaml:
+
+| Serviço | Função | Porta interna | Porta no host | Persistência |
+| --- | --- | ---: | ---: | --- |
+| db | PostgreSQL | 5432 | nenhuma | certificados-local_postgres_data |
+| migrate | Alembic + seed | nenhuma | nenhuma | transitório |
+| admin | API administrativa | 8000 | nenhuma | banco + runtime/storage |
+| consulta | consulta pública | 8001 | nenhuma | banco + storage somente leitura |
+| worker | fila de emissão | nenhuma necessária | nenhuma | banco + runtime/storage |
+| web | Nginx + SPA + proxy | 8080 | HTTP_PORT, padrão 80 | imagem |
+
+EXPOSE 8000/8001 aparece nos metadados das imagens, mas não existe HostPort para essas portas.
+
+Limites: db 0,50 CPU/512 MB; admin 0,50/512 MB; consulta 0,50/384 MB; worker 0,50/512 MB; web 0,25/128 MB. O máximo somado é 2 GB. Recomenda-se 4 GB; em 2 GB, monitore o build/runtime e considere swap administrada pelo sistema.
+
+Fluxo exato de ./deploy.sh:
+
+    deploy.sh
+      -> entra na raiz do projeto
+      -> carrega scripts/local_server_env.sh
+      -> exige .env.local-server
+      -> resolve LOCAL_SECRETS_DIR
+      -> chama bootstrap se database_url não existir
+      -> secrets: diretório 0700, arquivos 0644
+      -> cria runtime/storage
+      -> alpine:3.24 aplica UID/GID 10001 e modo 0750
+      -> docker compose build
+      -> docker compose up -d db
+      -> espera pg_isready (30 x 2 s)
+      -> docker compose run --rm migrate
+           -> alembic upgrade head
+           -> python -m certificados_backend.seed_template
+      -> up -d --force-recreate --remove-orphans admin consulta worker web
+      -> descobre a porta do web
+      -> espera GET /api/health/ready (30 x 2 s)
+      -> imprime URL e compose ps
+
+Estado observado sem refazer o deploy: Docker 29.6.2/Compose v5.3.1; db, admin, consulta, worker e web healthy; PostgreSQL pronto; Alembic 0011 head; GET /health, /api/health/ready, /consulta/health/ready e /consulta/ retornam 200; só a porta 80 está publicada.
+
+
+# 2. Pré-requisitos
+
+OBRIGATÓRIO para instalar/deploy/atualizar:
+
+- Linux 64 bits suportado pelo Docker, bash e usuário com sudo;
+- Docker Engine, Docker Buildx e plugin Docker Compose v2 (docker compose);
+- Git, curl, OpenSSL, tar, ca-certificates;
+- uma implementação awk (o roteiro instala gawk);
+- utilitários básicos chmod, mkdir, seq, sleep, tr e cat;
+- internet no primeiro build para Git, imagens, npm e pacotes Python;
+- porta 80 livre;
+- pelo menos 5 GB livres além de banco, PDFs e backups.
+
+OBRIGATÓRIO para o roteiro operacional pedido:
+
+- ufw;
+- iproute2 (ip/ss);
+- iputils-ping;
+- destino de backup externo montado.
+
+OPCIONAL:
+
+- nano/vim;
+- swap, especialmente em 2 GB;
+- rotação adicional de logs;
+- DNS/HTTPS e Google Drive, somente no futuro.
+
+NÃO NECESSÁRIO NO HOST:
+
+- Python/pip/uv, Node/npm, PostgreSQL, Nginx, Alembic, Java, Prisma, Redis, Caddy ou LibreOffice.
+
+Esses runtimes estão nas imagens. Git, Docker, curl, OpenSSL, awk e tar são usados no host.
+
+
+# 3. Instalação do servidor
+
+Os comandos apt são exatos para Ubuntu LTS suportado. Como o destino foi descrito apenas como Linux, confirme:
+
+    cat /etc/os-release
+    uname -m
+
+Se ID não for ubuntu, não use o repositório ubuntu do Docker. Em Ubuntu:
+
+    sudo apt update
+    sudo apt upgrade -y
+    sudo apt install -y ca-certificates curl git openssl tar gawk ufw iproute2 iputils-ping
+
+Docker pelo repositório apt oficial:
+
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+    sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+    Types: deb
+    URIs: https://download.docker.com/linux/ubuntu
+    Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    Components: stable
+    Architectures: $(dpkg --print-architecture)
+    Signed-By: /etc/apt/keyrings/docker.asc
+    EOF
+
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo systemctl enable --now docker
+    sudo docker run --rm hello-world
+    sudo docker version
+    sudo docker compose version
+
+Autorize o operador:
+
+    sudo usermod -aG docker "$USER"
+
+Saia da sessão SSH e entre novamente. Depois:
+
+    id -nG
+    docker version
+    docker compose version
+
+O grupo docker equivale a acesso administrativo; inclua só operadores confiáveis.
+
+Confirme rede:
+
+    ip -4 addr
+    ip -4 route
+
+O firewall abaixo assume LAN 192.168.2.0/24. Se a rota mostrar outra máscara, ajuste antes. Garanta que a sessão SSH atual vem da rede permitida.
+
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow from 192.168.2.0/24 to any port 22 proto tcp comment 'SSH LAN'
+    sudo ufw allow from 192.168.2.0/24 to any port 80 proto tcp comment 'Certificados HTTP LAN'
+    sudo ufw enable
+    sudo ufw status verbose
+
+Não crie allow para 5432, 8000 ou 8001.
+
+Portas Docker podem contornar UFW. Aqui só web publica 80; banco/APIs não publicam porta. Verifique:
+
+    sudo ss -ltnp
+    docker ps --format 'table {{.Names}}\t{{.Ports}}'
+
+Não pode existir 0.0.0.0:5432, :8000 ou :8001.
+
+
+# 4. Configuração do projeto
+
+Diretório recomendado: /opt/certificados. Os scripts resolvem a própria raiz e os bind mounts relativos ficam previsíveis. Não use chmod 777.
+
+ATENÇÃO: o clone só reproduzirá o sistema depois do bloqueio Git das seções 16/17 ser resolvido.
+
+    sudo mkdir -p /opt/certificados
+    sudo chown "$(id -u):$(id -g)" /opt/certificados
+    sudo chmod 0750 /opt/certificados
+    git clone https://github.com/ZanonDeAndrade/CertificadosSecretaria.git /opt/certificados
+    cd /opt/certificados
+    git status --short
+
+Confirme:
+
+    test -f compose.local-server.yaml
+    test -f .env.local-server.example
+    test -x deploy.sh
+    test -x backup.sh
+    test -x scripts/bootstrap_local_server_secrets.sh
+    test -f deploy/nginx.local-server.conf
+    test -f deploy/nginx.local-server.main.conf
+    test -f deploy/Dockerfile.web
+    test -f Dockerfile
+
+Se um test falhar, não prossiga.
+
+    cp .env.local-server.example .env.local-server
+    chmod 0600 .env.local-server
+    grep -E '^(APP_ENV|HTTP_PORT|LOCAL_SERVER_URL|POSTGRES_USER|POSTGRES_DB|STORAGE_PROVIDER|LOCAL_SECRETS_DIR)=' .env.local-server
+
+Esperado:
+
+    APP_ENV=local_server
+    HTTP_PORT=80
+    LOCAL_SERVER_URL=http://192.168.2.192
+    POSTGRES_USER=certificados
+    POSTGRES_DB=certificados
+    STORAGE_PROVIDER=local
+    LOCAL_SECRETS_DIR=./secrets/local-server
+
+Se o IP mudar, edite LOCAL_SERVER_URL antes do primeiro deploy. ADMIN_FRONTEND_URL, PUBLIC_VALIDATION_BASE_URL e CORS_ALLOWED_ORIGINS derivam dela.
+
+Não altere POSTGRES_USER/POSTGRES_DB após gerar secrets ou inicializar o volume. Identificadores aceitam letras, números e underscore e começam por letra/underscore.
+
+Gere secrets:
+
+    ./scripts/bootstrap_local_server_secrets.sh
+
+Ele cria secrets/local-server em 0700, preserva arquivos existentes e gera:
+
+- postgres_password: 32 bytes aleatórios em hexadecimal;
+- database_url: PostgreSQL interno db:5432;
+- jwt_secret;
+- document_hash_keyring JSON v1;
+- batch_payload_keys JSON com chave AES de 32 bytes;
+- admin_initial_password digitada sem eco.
+
+Arquivos ficam 0644 para containers não-root; o diretório 0700 impede acesso de outros usuários do host.
+
+A senha inicial deve ter ao menos 6 caracteres, maiúscula, minúscula, número, especial, não ser comum, não conter admin e ter no máximo 72 bytes UTF-8. O bootstrap só rejeita vazio; o backend valida a política completa.
+
+    find secrets/local-server -maxdepth 1 -type f -printf '%f %m\n' | sort
+    stat -c '%A %a %n' secrets/local-server
+
+Esperados: admin_initial_password, batch_payload_keys, database_url, document_hash_keyring, jwt_secret e postgres_password.
+
+Secrets sobrevivem ao reboot. secrets/, .env.local-server e runtime/ estão no .gitignore. Nunca mostre valores nem envie ao Git.
+
+Antes do deploy: .env obrigatório; Docker e porta livres; bootstrap explícito é recomendado. Não crie banco, volume, storage, migrations ou containers manualmente.
+
+Depois do primeiro login:
+
+- altere a senha em Perfil;
+- remova/comente no .env as linhas ADMIN_INITIAL_USERNAME, ADMIN_INITIAL_NAME, ADMIN_INITIAL_ROLE e ADMIN_INITIAL_PASSWORD_FILE;
+- mantenha secrets/local-server/admin_initial_password, pois o Compose o monta;
+- rode ./deploy.sh e confirme a nova senha.
+
+O seed inicial não força troca automaticamente; essa etapa é manual.
+
+
+# 5. Deploy
+
+Comando normal:
+
+    cd /opt/certificados
+    ./deploy.sh
+
+Não execute compose up ou Alembic antes: o script já faz build, banco, espera, migrations, seed, serviços e readiness.
+
+Comando Compose interno:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml
+
+Um up -d --build isolado não reproduz a ordem segura.
+
+Containers persistentes: certificados-local-db-1, -admin-1, -consulta-1, -worker-1 e -web-1. migrate é transitório e removido.
+
+Criados: volume certificados-local_postgres_data; rede certificados-local_app (172.29.0.0/24); imagens locais; bind mount /opt/certificados/runtime/storage.
+
+Depois do deploy não há outro comando para subir serviços; passe à verificação.
+
+
+# 6. Verificação
+
+    cd /opt/certificados
+    docker ps
+    docker compose --env-file .env.local-server -f compose.local-server.yaml ps
+
+Os cinco persistentes devem estar Up/healthy.
+
+PostgreSQL:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+
+Migration:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin alembic current
+
+Esperado: 0011 (head).
+
+Backend:
+
+    curl --fail --silent --show-error http://127.0.0.1/api/health
+    curl --fail --silent --show-error http://127.0.0.1/api/health/ready
+
+Consulta:
+
+    curl --fail --silent --show-error http://127.0.0.1/consulta/health
+    curl --fail --silent --show-error http://127.0.0.1/consulta/health/ready
+    curl --fail --silent --show-error -o /dev/null -w '%{http_code}\n' http://127.0.0.1/consulta/
+
+Esperado: status ok/ready e HTTP 200.
+
+Worker:
+
+    docker inspect --format '{{.State.Health.Status}}' certificados-local-worker-1
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T worker \
+      python -c 'from database import db; db.check_connection(); print("worker-db-ok")'
+
+Nginx/frontend:
+
+    curl --fail --silent --show-error http://127.0.0.1/health
+    curl -I http://127.0.0.1/
+
+Portas/persistência:
+
+    sudo ss -ltnp
+    docker ps --format 'table {{.Names}}\t{{.Ports}}'
+    docker volume inspect certificados-local_postgres_data
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin du -sh /data/storage
+
+Não use docker compose down -v.
+
+
+# 7. Acesso pela rede
+
+No servidor:
+
+    ip -4 addr
+    ip -4 route
+    sudo ss -ltnp
+    sudo ufw status verbose
+
+A interface deve possuir 192.168.2.192 e escutar em 0.0.0.0:80. Garanta reserva DHCP ou IP estático fora do projeto.
+
+Em outro computador:
+
+    ping 192.168.2.192
+    curl -I http://192.168.2.192
+    curl -I http://192.168.2.192/consulta/
+
+No estado real, HEAD / retorna 200, mas HEAD /consulta/ retorna 405 porque a aplicação pública implementa GET, não HEAD. Validação correta:
+
+    curl --fail --silent --show-error -o /dev/null -w '%{http_code}\n' \
+      http://192.168.2.192/consulta/
+
+Esperado: 200. O 405 somente em curl -I /consulta/ não indica indisponibilidade.
+
+Navegador:
+
+    http://192.168.2.192
+    http://192.168.2.192/consulta/
+
+Não use localhost no cliente.
+
+
+# 8. Teste funcional
+
+Use dados sintéticos:
+
+1. Abra o sistema e confirme Entrar.
+2. Login com admin e senha do bootstrap.
+3. Perfil: altere a senha inicial.
+4. Logout.
+5. Login com a nova senha.
+6. Painel: confira indicadores/recentes.
+7. Configurações: revise instituição, local, signatário, URL e limites; salve alteração autorizada e recarregue.
+8. Usuários: crie usuário sintético com senha temporária, edite nome/perfil e teste troca obrigatória. Este é o CRUD real.
+9. Emitir certificados: baixe a planilha modelo.
+10. Preencha uma linha sintética, envie .xlsx e valide a prévia. O upload existente é da planilha, não de PDF.
+11. Escolha tipo, texto/datas e confirme lote; storage local não pede pasta Drive.
+12. Aguarde completed/partial; o worker gera PDFs.
+13. Histórico: filtre lote/código, abra detalhes.
+14. Baixe/abra PDF e confira texto, fundo, fontes e QR.
+15. Com dois sintéticos, teste ZIP.
+16. Abra /validar/<CODIGO_REAL> e confirme validação.
+17. Abra /consulta/ e teste consulta/download público com dados sintéticos.
+18. Reemita somente certificado sintético.
+19. Se permitido, revogue certificado sintético criado para isso; é permanente.
+20. Auditoria: confira eventos.
+21. Verifique worker/banco:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=200 worker
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+
+22. Recarregue, relogue e confirme persistência.
+
+
+# 9. Google Drive
+
+Ativado por padrão? NÃO.
+
+O perfil define APP_ENV=local_server, STORAGE_PROVIDER=local e /data/storage. validate_local_server_storage() recusa outro provider. Não basta trocar para google_drive; serviços falhariam. Isso impede o deploy LAN de depender de OAuth.
+
+Sem Google funcionam emissão, worker, PDF, storage, downloads, consulta e backup.
+
+Para ativar futuramente: domínio/HTTPS, perfil de produção, Drive API/Picker, consentimento, cliente OAuth Web, origem/callback exatos, credenciais separadas de escrita/leitura e validação em staging.
+
+Variáveis reais:
+
+- STORAGE_PROVIDER=google_drive;
+- GOOGLE_DRIVE_AUTH_MODE=oauth_user ou service_account;
+- GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID (opcional/legado);
+- GOOGLE_PICKER_CLIENT_ID;
+- GOOGLE_PICKER_CLIENT_SECRET ou _FILE;
+- GOOGLE_PICKER_API_KEY ou _FILE;
+- GOOGLE_PICKER_APP_ID;
+- GOOGLE_DRIVE_OAUTH_REDIRECT_URI;
+- GOOGLE_DRIVE_UPLOAD_PRINCIPAL_EMAIL;
+- GOOGLE_DRIVE_PUBLIC_READER_EMAIL;
+- GOOGLE_ADMIN_OAUTH_TOKEN_JSON_BASE64 ou _FILE;
+- GOOGLE_PUBLIC_OAUTH_TOKEN_JSON_BASE64 ou _FILE;
+- alternativas GOOGLE_ADMIN_SERVICE_ACCOUNT_JSON_BASE64/_FILE e GOOGLE_PUBLIC_SERVICE_ACCOUNT_JSON_BASE64/_FILE.
+
+Escopos: drive.file para escrita e drive.readonly para leitura.
+
+Google exige HTTPS para redirect URI Web e não aceita IP bruto; localhost é exceção. http://192.168.2.192 não serve. Callback deve coincidir exatamente. Sem domínio/HTTPS, mantenha local.
+
+
+# 10. Backup
+
+Monte disco/NAS externo em /mnt/backup:
+
+    findmnt /mnt/backup
+    df -h /mnt/backup
+    sudo mkdir -p /mnt/backup/certificados
+    sudo chown "$(id -u):$(id -g)" /mnt/backup/certificados
+    sudo chmod 0700 /mnt/backup/certificados
+
+Execute:
+
+    cd /opt/certificados
+    ./backup.sh /mnt/backup/certificados
+
+Gera:
+
+- postgres-AAAAMMDD-HHMMSS.dump: pg_dump custom sem owner/ACL;
+- storage-AAAAMMDD-HHMMSS.tar.gz: runtime/storage;
+- config-AAAAMMDD-HHMMSS.tar.gz: .env e secrets.
+
+umask 077 protege arquivos; mantenha diretório 0700. Config é sensível. Tamanho não é fixo: dump comprimido + storage comprimido + poucos KB. Meça:
+
+    du -sh /mnt/backup/certificados
+    ls -lh /mnt/backup/certificados
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin du -sh /data/storage
+
+Verifique, substituindo timestamp:
+
+    tar -tzf /mnt/backup/certificados/storage-AAAAMMDD-HHMMSS.tar.gz | head
+    tar -tzf /mnt/backup/certificados/config-AAAAMMDD-HHMMSS.tar.gz
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      pg_restore --list < /mnt/backup/certificados/postgres-AAAAMMDD-HHMMSS.dump | head
+
+Restore seguro: servidor limpo/isolado. backup.sh não tem subcomando restore. Não sobrescreva servidor ativo.
+
+No servidor de recuperação, com mesmo checkout e sem volume:
+
+    cd /opt/certificados
+    test ! -e .env.local-server
+    docker volume inspect certificados-local_postgres_data
+
+O último deve informar volume inexistente; se existir, pare.
+
+    tar -tzf /mnt/backup/certificados/config-AAAAMMDD-HHMMSS.tar.gz
+    tar -xzf /mnt/backup/certificados/config-AAAAMMDD-HHMMSS.tar.gz -C /opt/certificados
+    chmod 0600 .env.local-server
+    chmod 0700 secrets/local-server
+    chmod 0644 secrets/local-server/*
+    mkdir -p runtime
+    tar -xzf /mnt/backup/certificados/storage-AAAAMMDD-HHMMSS.tar.gz -C runtime
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml up -d db
+
+    until docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null; do
+      sleep 2
+    done
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      sh -ec 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-acl' \
+      < /mnt/backup/certificados/postgres-AAAAMMDD-HHMMSS.dump
+
+    ./deploy.sh
+    curl --fail http://127.0.0.1/api/health/ready
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin alembic current
+
+Não usa migrate reset, drop database, down -v ou remoção de volume. Para servidor populado, restaure isoladamente e faça troca controlada.
+
+
+# 11. Atualização
+
+    cd /opt/certificados
+    git status --short
+    ./backup.sh /mnt/backup/certificados
+    git pull --ff-only
+    ./deploy.sh
+    curl --fail http://127.0.0.1/api/health/ready
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin alembic current
+
+Migrations rodam automaticamente antes da recriação dos serviços. Se git status mostrar mudança versionada no servidor, não use reset hard; preserve e investigue.
+
+
+# 12. Reboot
+
+    sudo systemctl enable docker
+    sudo systemctl is-enabled docker
+    sudo reboot
+
+Após voltar:
+
+    cd /opt/certificados
+    docker ps
+    docker compose --env-file .env.local-server -f compose.local-server.yaml ps
+    curl --fail http://127.0.0.1/health
+    curl --fail http://127.0.0.1/api/health/ready
+    curl --fail http://127.0.0.1/consulta/health/ready
+    docker volume inspect certificados-local_postgres_data
+
+restart: unless-stopped inicia db/admin/consulta/worker/web com Docker. migrate não inicia; roda só no deploy.
+
+Em outro computador:
+
+    ping 192.168.2.192
+    curl -I http://192.168.2.192
+    curl --fail -o /dev/null -w '%{http_code}\n' http://192.168.2.192/consulta/
+
+Abra as URLs e confirme login/certificado persistente.
+
+
+# 13. Logs
+
+Todos:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=200
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200
+
+Backend:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200 admin
+
+Worker:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200 worker
+
+PostgreSQL:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200 db
+
+Nginx/frontend:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200 web
+
+Consulta:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs -f --tail=200 consulta
+
+migrate é removido. Veja migration na saída de ./deploy.sh; não rode migrate apenas para logs.
+
+    docker stats
+    df -h
+    docker system df
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin du -sh /data/storage
+
+
+# 14. Troubleshooting
+
+## Não abre pelo navegador
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml ps
+    curl -v http://127.0.0.1/health
+    sudo ss -ltnp
+
+Causas: web unhealthy, porta 80 ocupada, URL/IP incorreto. Veja logs; não abra 8000/8001.
+
+## Ping funciona, HTTP não
+
+    sudo ufw status verbose
+    sudo ss -ltnp '( sport = :80 )'
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=200 web
+
+Causas: UFW, Nginx, conflito ou VLAN. Libere 80 só ao CIDR correto.
+
+## Docker não inicia
+
+    sudo systemctl status docker --no-pager
+    sudo journalctl -u docker -n 200 --no-pager
+    df -h
+
+Ative com systemctl enable --now docker; resolva disco/instalação sem apagar volumes.
+
+## Permissão Docker
+
+    id -nG
+    ls -l /var/run/docker.sock
+
+Use usermod -aG docker "$USER", saia/entre. Não chmod 777.
+
+## PostgreSQL unhealthy
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=200 db
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T db \
+      sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+    docker volume inspect certificados-local_postgres_data
+
+Causas: secret, usuário/database alterado, disco/corrupção. Preserve volume e restaure isolado.
+
+## Migration falha
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=200 db
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin alembic current
+
+Veja ./deploy.sh. Não use migrate reset/downgrade improvisado.
+
+## Backend não inicia
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 admin
+    find secrets/local-server -maxdepth 1 -type f -printf '%f %m\n' | sort
+
+Causas: senha fora da política, keyring, CORS/URL/CIDR, storage ou banco. Corrija configuração e rode deploy.
+
+## Worker não inicia
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 worker
+    docker inspect --format '{{json .State.Health}}' certificados-local-worker-1
+
+Causas: banco, batch keys, modo, storage ou lote. Após correção:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml restart worker
+
+## Nginx não inicia
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 web
+    sudo ss -ltnp '( sport = :80 )'
+
+Causas: porta, upstream unhealthy ou imagem/config.
+
+## Login não funciona
+
+    curl --fail http://127.0.0.1/api/health/ready
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 admin
+    grep -E '^(LOCAL_SERVER_URL|ADMIN_FRONTEND_URL|CORS_ALLOWED_ORIGINS|AUTH_COOKIE_SECURE|AUTH_COOKIE_SAMESITE)=' .env.local-server
+
+Use exatamente http://192.168.2.192. Causas: origem/cookie, senha, bloqueio ou seed inválido.
+
+## Upload não funciona
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 admin
+    df -h
+
+Aceita .xlsx ZIP válido até 10 MB/2.000 linhas. Confira modelo, sessão, tamanho e disco.
+
+## PDF não gera
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 worker admin
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin \
+      sh -ec 'id; ls -ld /data/storage /data/storage/pdfs 2>/dev/null || true'
+    df -h
+
+Causas: worker, template/config, storage, disco, job/linha. Corrija e use Retomar lote.
+
+## Download não funciona
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 admin consulta
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T consulta \
+      sh -ec 'ls -ld /data/storage /data/storage/pdfs 2>/dev/null || true'
+
+Causas: revogado, ausente, checksum, mount/permissão. Restaure do backup; não substitua silenciosamente.
+
+## Consulta pública
+
+    curl -v http://127.0.0.1/consulta/
+    curl -v http://127.0.0.1/consulta/health/ready
+    docker compose --env-file .env.local-server -f compose.local-server.yaml logs --tail=300 consulta web
+
+curl -I /consulta/ retorna 405; use GET. Código inexistente em /validar retorna 404 corretamente.
+
+## Disco cheio
+
+    df -h
+    docker system df
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin du -sh /data/storage
+    sudo du -sh /var/lib/docker 2>/dev/null
+
+Transfira backups e investigue. Não remova volumes.
+
+## Permissão em runtime/storage
+
+Host não listar 0750/UID 10001 é esperado. Reaplique com ./deploy.sh; não chmod 777. Inspecione:
+
+    docker compose --env-file .env.local-server -f compose.local-server.yaml exec -T admin \
+      sh -ec 'id; du -sh /data/storage; ls -la /data/storage'
+
+## Porta 80 ocupada
+
+    sudo ss -ltnp '( sport = :80 )'
+
+Pare só o serviço conhecido. HTTP_PORT=8080 exigiria :8080 e mudanças de URL/firewall, não atende ao acesso solicitado.
+
+
+# 15. Variáveis de ambiente
+
+Tabela completa de .env.local-server.example; não há secrets reais.
+
+| Variável | Obrigatória | O que colocar/origem | Exemplo |
+| --- | --- | --- | --- |
+| APP_ENV | Sim | Perfil LAN; não mudar | local_server |
+| TZ | Não | Fuso | America/Sao_Paulo |
+| HTTP_PORT | Não (80) | Porta Nginx livre | 80 |
+| LOCAL_SERVER_URL | Sim/revisar | Origem LAN sem barra | http://192.168.2.192 |
+| ADMIN_FRONTEND_URL | Sim operacional | Derivada da origem | ${LOCAL_SERVER_URL} |
+| PUBLIC_VALIDATION_BASE_URL | Sim | Base dos QR | ${LOCAL_SERVER_URL} |
+| PUBLIC_SITE_BASE_PATH | Sim para URL pedida | Prefixo consulta | /consulta |
+| CORS_ALLOWED_ORIGINS | Sim | Origem exata do cookie | ${LOCAL_SERVER_URL} |
+| TRUSTED_PROXY_CIDRS | Sim operacional | Rede Nginx confiável | 172.29.0.0/24 |
+| FORWARDED_ALLOW_IPS | Sim | Proxy Uvicorn confiável | 172.29.0.0/24 |
+| POSTGRES_USER | Sim | Antes do bootstrap | certificados |
+| POSTGRES_DB | Sim | Antes do bootstrap | certificados |
+| DATABASE_URL_FILE | Sim | Caminho interno secret | /run/secrets/database_url |
+| DB_POOL_SIZE | Não | Pool por processo | 2 |
+| DB_MAX_OVERFLOW | Não | Extras por processo | 1 |
+| DB_POOL_TIMEOUT | Não | Espera em segundos | 30 |
+| DB_POOL_RECYCLE | Não | Reciclagem em segundos | 300 |
+| DB_POOL_PRE_PING | Não | Valida conexão | true |
+| STORAGE_PROVIDER | Sim | LAN exige local | local |
+| LOCAL_STORAGE_PATH | Sim | Caminho no container | /data/storage |
+| MAX_CERTIFICATE_FILE_SIZE_MB | Não | Limite PDF | 10 |
+| MAX_SPREADSHEET_SIZE_MB | Não | Limite .xlsx | 10 |
+| MAX_SPREADSHEET_ROWS | Não | Linhas/lote | 2000 |
+| MAX_ZIP_CERTIFICATES | Não | PDFs/ZIP | 100 |
+| MAX_ZIP_TOTAL_BYTES | Não | Bytes do ZIP | 104857600 |
+| DOWNLOAD_TEMP_DIR | Não | Temporário tmpfs | /tmp/certificados-downloads |
+| JWT_SECRET_FILE | Sim | Secret interno | /run/secrets/jwt_secret |
+| DOCUMENT_HASH_KEYRING_FILE | Sim | Keyring HMAC | /run/secrets/document_hash_keyring |
+| DOCUMENT_HASH_ACTIVE_KEY_ID | Sim | ID da keyring | v1 |
+| BATCH_PAYLOAD_KEYS_FILE | Sim | Chaves da fila | /run/secrets/batch_payload_keys |
+| BATCH_PAYLOAD_ACTIVE_KEY_ID | Sim | ID da fila | v1 |
+| AUTH_COOKIE_SECURE | Sim para HTTP | false sem HTTPS | false |
+| AUTH_COOKIE_SAMESITE | Sim operacional | Política cookie | lax |
+| JWT_EXPIRES_IN_MINUTES | Não | Sessão | 480 |
+| MINIMIZE_DOCUMENT_PLAINTEXT | Sim | Deve ser true | true |
+| ADMIN_INITIAL_USERNAME | Primeiro deploy | Login seed | admin |
+| ADMIN_INITIAL_NAME | Primeiro deploy | Nome seed | Administrador |
+| ADMIN_INITIAL_ROLE | Primeiro deploy | Perfil seed | admin |
+| ADMIN_INITIAL_PASSWORD_FILE | Primeiro deploy | Secret interno | /run/secrets/admin_initial_password |
+| BATCH_WORKER_MODE | Sim para arquitetura | Worker externo | external |
+| BATCH_WORKER_DISPATCH_MODE | Não | Residente | resident |
+| BATCH_MAX_ATTEMPTS | Não | Tentativas | 3 |
+| BATCH_LEASE_SECONDS | Não | Lease | 600 |
+| ADMIN_WORKERS | Não | Uvicorn admin | 1 |
+| CONSULTA_WORKERS | Não | Uvicorn consulta | 1 |
+| LOGIN_RATE_LIMIT_WINDOW_SECONDS | Não | Janela login | 900 |
+| LOGIN_MAX_FAILURES_PER_IP | Não | Falhas/IP | 20 |
+| LOGIN_MAX_FAILURES_PER_USER | Não | Falhas/usuário | 8 |
+| LOGIN_LOCKOUT_SECONDS | Não | Bloqueio | 900 |
+| PUBLIC_RATE_LIMIT_REQUESTS | Não | Requisições públicas | 60 |
+| PUBLIC_RATE_LIMIT_WINDOW_SECONDS | Não | Janela pública | 60 |
+| PUBLIC_NAME_RATE_LIMIT_REQUESTS | Não | Buscas por nome | 30 |
+| PUBLIC_CONFIRM_RATE_LIMIT_REQUESTS | Não | Confirmações | 8 |
+| PUBLIC_CONFIRM_RATE_LIMIT_WINDOW_SECONDS | Não | Janela confirmação | 900 |
+| LOCAL_SECRETS_DIR | Sim | Diretório host ignorado | ./secrets/local-server |
+
+Secrets Compose:
+
+| Secret | Arquivo no host | Uso |
+| --- | --- | --- |
+| postgres_password | LOCAL_SECRETS_DIR/postgres_password | db |
+| database_url | LOCAL_SECRETS_DIR/database_url | apps/migrate |
+| jwt_secret | LOCAL_SECRETS_DIR/jwt_secret | autenticação |
+| document_hash_keyring | LOCAL_SECRETS_DIR/document_hash_keyring | HMAC |
+| batch_payload_keys | LOCAL_SECRETS_DIR/batch_payload_keys | fila |
+| admin_initial_password | LOCAL_SECRETS_DIR/admin_initial_password | seed |
+
+Opcionais no código, fora do modelo: INSTITUTION_NAME, ISSUE_LOCATION, SIGNATORY_NAME, SIGNATORY_TITLE, PRIVATE_DATA_RETENTION_DAYS e AUTH_SESSION_RETENTION_DAYS. Prefira a interface Configurações para dados institucionais.
+
+
+# 16. Pendências
+
+PROBLEMA:
+O repositório remoto não reproduz o estado atual analisado.
+
+ARQUIVO:
+compose.local-server.yaml, .env.local-server.example, deploy.sh, backup.sh, scripts/bootstrap_local_server_secrets.sh, scripts/local_server_env.sh, migrations 0007-0011 e muitos outros estão não rastreados; muitos arquivos estão modificados. Branch p0-security-privacy; último commit local 12ef877113fcc8b55aa8f2f4142367a9bdb7fd41.
+
+CAUSA:
+git ls-files confirma que os arquivos centrais do deploy não pertencem ao commit. git clone obterá outra árvore.
+
+COMO CORRIGIR:
+Revisar o conjunto, adicionar só código/documentação, manter .env.local-server, secrets/, runtime/, backups e dados reais ignorados, criar commit, enviar ao remoto e validar clone limpo. Esta análise não fez commit/push.
+
+PROBLEMA:
+A auditoria versionada não certifica a árvore atual.
+
+ARQUIVO:
+docs/RELATORIO_DE_PRONTIDAO_FINAL.md
+
+CAUSA:
+O relatório declara ser histórico, cobre 13/08/2026 até migration 0008 e não certifica mudanças; a árvore atual está em 0011.
+
+COMO CORRIGIR:
+Após consolidar Git, rodar CI/auditoria e smoke de clone limpo no commit instalado.
+
+PROBLEMA:
+A distribuição Linux exata não foi informada.
+
+ARQUIVO:
+Não se aplica.
+
+CAUSA:
+O repositório Docker varia por distribuição.
+
+COMO CORRIGIR:
+cat /etc/os-release. A seção 3 vale para Ubuntu LTS; use documentação oficial se diferente.
+
+PROBLEMA:
+IP 192.168.2.192 e máscara /24 precisam ser confirmados/persistidos.
+
+ARQUIVO:
+.env.local-server e rede do host/roteador.
+
+CAUSA:
+O projeto não configura DHCP/Netplan/NetworkManager.
+
+COMO CORRIGIR:
+Confirme ip addr/route, reserve DHCP ou fixe IP e ajuste URL/UFW se necessário.
+
+PROBLEMA:
+Backup externo/restore dependem de infraestrutura manual.
+
+ARQUIVO:
+backup.sh e /mnt/backup.
+
+CAUSA:
+O script não monta NAS, agenda ou automatiza restore local.
+
+COMO CORRIGIR:
+Montar storage externo, executar backup, copiar para local separado e testar restore isolado.
+
+PROBLEMA:
+Google real não funciona no ambiente HTTP/IP atual.
+
+ARQUIVO:
+.env.production.example, compose.production.yaml e Google Cloud.
+
+CAUSA:
+OAuth Web exige domínio/HTTPS fora de localhost.
+
+COMO CORRIGIR:
+Nada no LAN; manter local. Para Drive, domínio/HTTPS, credenciais e staging de produção.
+
+Manuais após corrigir Git: senha inicial/troca; dados institucionais; porta/CIDR; mount de backup; teste funcional; reboot; acesso de outro computador; retenção/logs.
+
+
+# 17. VEREDITO FINAL
+
+EXISTEM BLOQUEIOS
+
+O deploy local está implementado e o ambiente observado está funcional: cinco serviços healthy, PostgreSQL saudável, migration 0011 head, Nginx em 80, APIs não publicadas e storage local.
+
+O bloqueio é de entrega/reprodutibilidade: git clone não recebe os arquivos centrais nem grande parte do código atual porque a árvore está fora do commit. Não faça implantação definitiva por clone até versionar/enviar o estado correto e validar clone limpo.
+
+Depois disso e de confirmar Ubuntu/CIDR/IP:
+
+    pré-requisitos -> Docker -> grupo/UFW -> clone correto em /opt/certificados
+    -> .env -> LOCAL_SERVER_URL -> bootstrap -> ./deploy.sh
+    -> health/migration/portas -> teste LAN -> backup externo
+    -> reboot e restore isolado
+
+Fontes externas:
+
+- Docker Ubuntu: https://docs.docker.com/engine/install/ubuntu/
+- Docker Compose: https://docs.docker.com/compose/install/linux/
+- Google OAuth Web: https://developers.google.com/identity/protocols/oauth2/web-server

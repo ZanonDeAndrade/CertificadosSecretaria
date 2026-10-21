@@ -69,6 +69,9 @@ test.describe("emissão em lote", () => {
     await page.setInputFiles("#spreadsheet-upload", FIXTURE);
     await expect(page.getByText("lote.xlsx")).toBeVisible();
     await page.getByRole("combobox", { name: /Tipo do certificado/ }).selectOption("listener");
+    // The insert buttons come from the API, team and event included.
+    await expect(page.getByRole("button", { name: "Inserir {{equipe}}" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Inserir {{evento}}" })).toBeVisible();
 
     await page.getByRole("button", { name: /Validar planilha/ }).click();
 
@@ -165,6 +168,20 @@ test.describe("histórico", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
+  test("download individual usa titular, evento e código no nome", async ({ page }) => {
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await expect(page.getByText("João Pedro Lima").first()).toBeVisible();
+
+    // Desktop shows an icon button per row, mobile a "Baixar" button per card.
+    const download = page
+      .getByRole("button", { name: /^Baixar( certificado de .+)?$/ })
+      .and(page.locator(":enabled"))
+      .first();
+    const [file] = await Promise.all([page.waitForEvent("download"), download.click()]);
+    expect(file.suggestedFilename()).toMatch(/^.+ - .+ - CERT-2026-\d{4}A\.pdf$/);
+  });
+
   test("seleção em lote habilita o ZIP", async ({ page }) => {
     await scenario(page, "default");
     await page.goto("/historico");
@@ -257,6 +274,27 @@ test.describe("editor de template", () => {
     // Leaving now must ask first.
     await page.getByRole("button", { name: "Voltar" }).click();
     await expect(page.getByRole("dialog")).toContainText("Sair sem salvar?");
+  });
+
+  test("o bloco Autores só é oferecido em templates da Mostra", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "editor é uma tela de desktop");
+    await scenario(page, "default");
+    await page.goto("/template");
+    await page.getByRole("button", { name: /Editar \(nova versão\)/ }).click();
+
+    // Generic template: no per-work field.
+    await expect(page.getByRole("button", { name: "Nome", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Autores", exact: true })).toHaveCount(0);
+
+    const typeSelect = page.getByLabel("Tipo", { exact: true });
+    await typeSelect.selectOption("scientific_initiation");
+    const authors = page.getByRole("button", { name: "Autores", exact: true });
+    await expect(authors).toBeVisible();
+    await authors.click();
+    await expect(page.getByText("Base fixa: Y é a base do bloco")).toBeVisible();
+
+    await typeSelect.selectOption("");
+    await expect(page.getByRole("button", { name: "Autores", exact: true })).toHaveCount(0);
   });
 
   test("ativar versão pede confirmação digitada", async ({ page }, testInfo) => {

@@ -12,7 +12,8 @@ import secrets
 from datetime import datetime
 
 from database import db
-from database.certificate_types import certificate_type_label
+from database.certificate_types import certificate_type_label, is_per_work_type
+from database.repositories import authors_from_json
 
 # Code format: CERT-<ano>-<6 chars>, e.g. CERT-2026-AB1234.
 # Alphabet excludes ambiguous characters (0/O, 1/I) so codes are easy to read,
@@ -49,4 +50,8 @@ def find_certificate(code: str) -> dict | None:
         "certificate_text": row.get("certificate_text"),
         "certificate_type": row.get("certificate_type"),
         "certificate_type_label": certificate_type_label(row.get("certificate_type")),
+        "per_work": is_per_work_type(row.get("certificate_type")),
+        "authors": authors_from_json(row.get("authors_json")),
+        "work_title": row.get("work_title"),
+        "team_name": row.get("team_name"),
     }

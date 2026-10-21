@@ -226,9 +226,7 @@ def require_production_database() -> None:
         return
     url = get_configured_database_url()
     if not url:
-        raise ConfigError(
-            "APP_ENV exige PostgreSQL. Defina DATABASE_URL ou DATABASE_URL_FILE."
-        )
+        raise ConfigError("APP_ENV exige PostgreSQL. Defina DATABASE_URL ou DATABASE_URL_FILE.")
     normalized = normalize_database_url(url)
     if not normalized.startswith("postgresql"):
         raise ConfigError(

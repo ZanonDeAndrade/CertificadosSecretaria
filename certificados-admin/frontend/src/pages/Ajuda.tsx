@@ -24,8 +24,12 @@ const TOPICS: Topic[] = [
         Abra <strong>Emitir certificados</strong>, baixe a planilha modelo e
         preencha uma linha por participante. As colunas <code>nome</code> e{" "}
         <code>carga_horaria</code> são obrigatórias; as demais podem ficar em
-        branco. Envie a planilha, confira a prévia do texto e a lista de linhas
-        com erro, e só então confirme a emissão.
+        branco. Na Mostra de Iniciação Científica sai um certificado por
+        trabalho: preencha <code>autor1</code> a <code>autor8</code> (só{" "}
+        <code>autor1</code> é obrigatório) e, se quiser,{" "}
+        <code>titulo_trabalho</code> e <code>equipe</code>. Envie a planilha,
+        confira a prévia do texto e a lista de linhas com erro, e só então
+        confirme a emissão.
       </>
     ),
   },

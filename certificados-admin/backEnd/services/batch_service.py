@@ -10,27 +10,38 @@ import re
 import socket
 import time
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any
 
+from certificados_backend.policies import Permission, is_allowed
 from certificados_backend.services import (
     audit_service,
     job_crypto,
     settings_service,
     spreadsheet,
+    template_fields,
+    template_service,
 )
 from certificados_backend.services.certificate_service import (
     CertificateBatchService,
+    _row_to_record,
     build_row_variables,
 )
 from certificados_backend.services.certificate_text import (
+    BODY_VARIABLE_LABELS,
     CertificateTextError,
+    body_template_variables,
     render_certificate_body,
     validate_body_template,
 )
-from certificados_backend.services.generator import CertificateGenerator
+from certificados_backend.services.generator import (
+    CertificateGenerator,
+    box_size,
+    measuring_draw,
+)
+from certificados_backend.services.runtime import build_certificate_service
 from certificados_backend.services.spreadsheet import (
     SpreadsheetError,
     SpreadsheetRow,
@@ -45,6 +56,11 @@ from database import db
 from database.certificate_types import certificate_type_label, parse_certificate_type
 
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
+# Pre-check of the active template's sized text boxes. Measuring every row of
+# a large batch would slow the preview down, so only the first rows are
+# checked and the response says when the check stopped early.
+MAX_LAYOUT_CHECK_ROWS = 300
+MAX_LAYOUT_WARNING_ROWS = 50
 _TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled"}
 _MISSING_DESTINATION_MESSAGE = (
     "Selecione uma pasta do Google Drive para todos os eventos antes de emitir os certificados."
@@ -128,12 +144,15 @@ async def read_upload(file: UploadFile) -> bytes:
     return content
 
 
-def _parse(content: bytes, *, data_emissao: str | None) -> spreadsheet.ValidationReport:
+def _parse(
+    content: bytes, *, data_emissao: str | None, certificate_type: str | None = None
+) -> spreadsheet.ValidationReport:
     try:
         return spreadsheet.read_and_validate(
             BytesIO(content),
             default_data_emissao=data_emissao,
             max_rows=int(settings_service.get()["max_batch_rows"]),
+            certificate_type=certificate_type,
         )
     except SpreadsheetError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -148,14 +167,188 @@ def _body(value: str | None) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@dataclass
+class _ReviewContext:
+    """The active template and the values each row resolves to, computed once."""
+
+    layout: dict[str, Any]
+    image_width: int
+    generator: CertificateGenerator
+    rows: list[tuple[SpreadsheetRow, dict[str, str]]]
+    truncated: bool
+    certificate_type: str | None
+    #: ``{{variáveis}}`` the body text uses.
+    body_variables: frozenset[str]
+
+
+def _review_context(
+    report: spreadsheet.ValidationReport,
+    *,
+    body_template: str | None,
+    certificate_type: str | None,
+) -> _ReviewContext | None:
+    """Resolve every row the way the renderer will, against the active template."""
+    if not report.valid:
+        return None
+    version = template_service.get_active_version(certificate_type)
+    if not version:
+        return None
+    layout = version.get("layout") or {}
+    # Built from the current settings, so institutional values match the PDF.
+    generator = build_certificate_service().generator
+    # The real code only exists after emission; any code has this shape.
+    placeholder_code = f"CERT-{datetime.now().year}-XXXXXX"
+    checked = report.valid[:MAX_LAYOUT_CHECK_ROWS]
+    rows: list[tuple[SpreadsheetRow, dict[str, str]]] = []
+    for row in checked:
+        body = (
+            render_certificate_body(body_template, build_row_variables(row, certificate_type))
+            if body_template is not None
+            else None
+        )
+        record = _row_to_record(row, placeholder_code, body=body, certificate_type=certificate_type)
+        rows.append((row, generator.participant_data(record)))
+    return _ReviewContext(
+        layout=layout,
+        image_width=int(layout.get("image_width") or version.get("image_width") or 0),
+        generator=generator,
+        rows=rows,
+        truncated=len(report.valid) > len(checked),
+        certificate_type=certificate_type,
+        body_variables=frozenset(body_template_variables(body_template or "")),
+    )
+
+
+def layout_warnings(context: _ReviewContext) -> list[dict[str, Any]]:
+    """Participants whose text would not fit a sized box of the active template.
+
+    Uses the very measurement the PDF uses, before anything is emitted, so the
+    secretaria can enlarge the box or shorten the text first. The certificate
+    is never clipped either way.
+    """
+    sized = [
+        element
+        for element in context.layout.get("elements") or []
+        if isinstance(element, dict)
+        and element.get("type", "text") == "text"
+        and element.get("key") not in (None, "", "qr")
+        and box_size(element, "height")
+    ]
+    if not sized:
+        return []
+
+    generator = context.generator
+    draw = measuring_draw()
+    warnings: list[dict[str, Any]] = []
+    for element in sized:
+        key = str(element.get("key"))
+        rows: list[dict[str, Any]] = []
+        applies_to_all = False
+        if key == "static":
+            text = str(element.get("staticText") or "")
+            applies_to_all = bool(text) and (
+                generator.layout_text_box(draw, context.image_width, text, element).overflow
+            )
+        else:
+            for row, data in context.rows:
+                text = data.get(key, f"[{key}]")
+                if (
+                    text
+                    and generator.layout_text_box(draw, context.image_width, text, element).overflow
+                ):
+                    rows.append({"row_number": row.row_number, "nome": row.nome})
+        if not rows and not applies_to_all:
+            continue
+        warnings.append(
+            {
+                "key": key,
+                "label": str(element.get("label") or key),
+                "height": box_size(element, "height") or 0,
+                "row_count": len(rows),
+                "rows": rows[:MAX_LAYOUT_WARNING_ROWS],
+                "applies_to_all": applies_to_all,
+                "checked_rows": len(context.rows),
+                "truncated": context.truncated,
+            }
+        )
+    return warnings
+
+
+def empty_fields(context: _ReviewContext) -> list[dict[str, Any]]:
+    """Rows for which a template field resolves to nothing: the PDF omits it.
+
+    Institutional fields are handled by :func:`template_fields.missing_settings`
+    and the name is required by the spreadsheet, so only row-level fields are
+    listed here. A warning, never a block.
+    """
+    results: list[dict[str, Any]] = []
+
+    def report_blank(key: str, label: str, rows: list[dict[str, Any]]) -> None:
+        # One entry per field: the "Evento" element and {{evento}} in the body
+        # read the same column, so the secretaria sees the rows only once.
+        if rows and not any(item["label"] == label for item in results):
+            results.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "row_count": len(rows),
+                    "rows": rows[:MAX_LAYOUT_WARNING_ROWS],
+                    "checked_rows": len(context.rows),
+                    "truncated": context.truncated,
+                }
+            )
+
+    for element in template_fields.text_elements(context.layout):
+        key = str(element.get("key"))
+        label = template_fields.ROW_FIELD_LABELS.get(key)
+        if label is None:
+            continue
+        report_blank(
+            key,
+            label,
+            [
+                {"row_number": row.row_number, "nome": row.nome}
+                for row, data in context.rows
+                if not str(data.get(key) or "").strip()
+            ],
+        )
+
+    # Variables the body text interpolates, such as an optional workload or team.
+    for variable in sorted(context.body_variables):
+        label = BODY_VARIABLE_LABELS.get(variable)
+        if label is None:
+            continue
+        report_blank(
+            variable,
+            label,
+            [
+                {"row_number": row.row_number, "nome": row.nome}
+                for row, _data in context.rows
+                if not build_row_variables(row, context.certificate_type).get(variable)
+            ],
+        )
+    return results
+
+
 def serialize_report(
     report: spreadsheet.ValidationReport,
     *,
     body_template: str | None = None,
     certificate_type: str | None = None,
+    layout_warnings: list[dict[str, Any]] | None = None,
+    missing_settings: list[dict[str, Any]] | None = None,
+    missing_settings_message: str | None = None,
+    empty_fields: list[dict[str, Any]] | None = None,
+    can_manage_settings: bool = False,
 ) -> dict:
     """Preview projection without document/e-mail or unnecessary row content."""
     return {
+        "layout_warnings": layout_warnings or [],
+        "missing_settings": missing_settings or [],
+        "missing_settings_message": missing_settings_message,
+        "empty_fields": empty_fields or [],
+        "can_manage_settings": can_manage_settings,
+        "warnings": list(report.warnings),
         "total": report.total,
         "valid_count": report.valid_count,
         "invalid_count": report.invalid_count,
@@ -169,6 +362,9 @@ def serialize_report(
                 "data_emissao": row.data_emissao,
                 "data_inicio": row.data_inicio,
                 "data_fim": row.data_fim,
+                "autores": list(row.autores),
+                "equipe": row.equipe,
+                "titulo_trabalho": row.titulo_trabalho,
             }
             for row in report.valid
         ],
@@ -193,18 +389,30 @@ async def preview(
     data_emissao: str | None,
     texto_padrao: str | None,
     certificate_type: str | None = None,
+    actor: dict | None = None,
 ) -> dict:
     content = await read_upload(file)
     body_template = _body(texto_padrao)
-    report = _parse(content, data_emissao=data_emissao)
     try:
         parsed_type = parse_certificate_type(certificate_type, required=False)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    frozen_type = parsed_type.value if parsed_type else None
+    report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
+    context = _review_context(report, body_template=body_template, certificate_type=frozen_type)
+    active = template_service.get_active_version(frozen_type)
+    missing = template_fields.missing_settings((active or {}).get("layout") or {})
     return serialize_report(
         report,
         body_template=body_template,
-        certificate_type=parsed_type.value if parsed_type else None,
+        certificate_type=frozen_type,
+        layout_warnings=layout_warnings(context) if context else [],
+        empty_fields=empty_fields(context) if context else [],
+        missing_settings=missing,
+        missing_settings_message=(
+            template_fields.missing_settings_message(missing, actor=actor) if missing else None
+        ),
+        can_manage_settings=bool(actor and is_allowed(actor, Permission.SETTINGS_MANAGE)),
     )
 
 
@@ -271,7 +479,16 @@ async def prepare_batch(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     content = await read_upload(file)
     body_template = _body(texto_padrao)
-    report = _parse(content, data_emissao=data_emissao)
+    report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
+    # A template that prints an empty setting would issue incomplete
+    # certificates; the review screen says the same, this guards the API.
+    active = template_service.get_active_version(frozen_type)
+    missing = template_fields.missing_settings((active or {}).get("layout") or {})
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=template_fields.missing_settings_message(missing, actor=actor),
+        )
     from storage_service import config as storage_config
 
     if storage_config.get_storage_provider() == "local":
@@ -494,10 +711,11 @@ def _decrypt_row(batch_id: str, item: dict) -> SpreadsheetRow:
         ),
     )
     try:
+        workload = value.get("carga_horaria")
         return SpreadsheetRow(
             row_number=int(value["row_number"]),
             nome=str(value["nome"]),
-            carga_horaria=int(value["carga_horaria"]),
+            carga_horaria=None if workload is None else int(workload),
             curso=str(value.get("curso") or ""),
             evento=str(value.get("evento") or ""),
             data_emissao=str(value.get("data_emissao") or ""),
@@ -505,6 +723,10 @@ def _decrypt_row(batch_id: str, item: dict) -> SpreadsheetRow:
             documento=str(value.get("documento") or ""),
             data_inicio=str(value.get("data_inicio") or ""),
             data_fim=str(value.get("data_fim") or ""),
+            # Jobs queued before per-work certificates carry none of these.
+            autores=tuple(str(name) for name in (value.get("autores") or []) if str(name)),
+            equipe=str(value.get("equipe") or ""),
+            titulo_trabalho=str(value.get("titulo_trabalho") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise job_crypto.PayloadCryptoError("Linha do job possui formato inválido.") from exc

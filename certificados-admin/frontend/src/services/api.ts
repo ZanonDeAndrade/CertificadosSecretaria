@@ -1,4 +1,5 @@
 import axios from "axios";
+import { filenameFromContentDisposition } from "../lib/contentDisposition";
 
 export interface ValidationResult {
   valid: boolean;
@@ -11,6 +12,11 @@ export interface ValidationResult {
   date?: string;
   certificate_type?: string | null;
   certificate_type_label?: string;
+  /** Per-work certificates belong to every author listed. */
+  per_work?: boolean;
+  authors?: string[];
+  work_title?: string | null;
+  team_name?: string | null;
 }
 
 // In production builds the API is reached at a same-origin "/api" prefix — a
@@ -108,16 +114,52 @@ export interface PreviewRow {
   nome: string;
   curso: string;
   evento: string;
-  carga_horaria: number;
+  /** Null when the type allows a blank workload (per-work certificates). */
+  carga_horaria: number | null;
   data_emissao: string;
   data_inicio: string;
   data_fim: string;
+  /** Per-work certificates: every author, the first being `nome`. */
+  autores?: string[];
+  equipe?: string;
+  titulo_trabalho?: string;
 }
 
 export interface InvalidRow {
   row_number: number;
   errors: string[];
   data: Record<string, unknown>;
+}
+
+/** A sized text box of the active template that some participants overflow. */
+export interface LayoutWarning {
+  key: string;
+  label: string;
+  height: number;
+  row_count: number;
+  rows: { row_number: number; nome: string }[];
+  /** Fixed text: it overflows for every certificate. */
+  applies_to_all: boolean;
+  checked_rows: number;
+  /** The check stopped before the last valid row. */
+  truncated: boolean;
+}
+
+/** An empty institutional setting that the active template prints. Blocks. */
+export interface MissingSetting {
+  setting: string;
+  label: string;
+  keys: string[];
+}
+
+/** A template field blank for some rows; those certificates omit it. Warns. */
+export interface EmptyField {
+  key: string;
+  label: string;
+  row_count: number;
+  rows: { row_number: number; nome: string }[];
+  checked_rows: number;
+  truncated: boolean;
 }
 
 export interface SpreadsheetPreview {
@@ -129,6 +171,13 @@ export interface SpreadsheetPreview {
   events: { key: string; label: string; count: number }[];
   /** Body text interpolated for the first valid row (preview before emission). */
   resolved_text_preview?: string | null;
+  /** File-level notes, such as author columns beyond the supported eight. */
+  warnings?: string[];
+  layout_warnings?: LayoutWarning[];
+  missing_settings?: MissingSetting[];
+  missing_settings_message?: string | null;
+  empty_fields?: EmptyField[];
+  can_manage_settings?: boolean;
 }
 
 export interface GenerationSummary {
@@ -287,12 +336,24 @@ export async function downloadCertificatesZip(
   }
 }
 
-export async function downloadCertificateFile(code: string): Promise<Blob> {
+export interface DownloadedFile {
+  blob: Blob;
+  /** Name suggested by the API (titular, evento e código), accents intact. */
+  filename: string;
+}
+
+export async function downloadCertificateFile(code: string): Promise<DownloadedFile> {
   const response = await api.get<Blob>(
     `/certificate-file/${encodeURIComponent(code)}`,
     { responseType: "blob" },
   );
-  return response.data;
+  return {
+    blob: response.data,
+    filename: filenameFromContentDisposition(
+      response.headers["content-disposition"],
+      `${code}.pdf`,
+    ),
+  };
 }
 
 export async function reissueCertificate(code: string): Promise<AdminCertificate> {
@@ -318,6 +379,10 @@ export async function validateCertificate(code: string): Promise<ValidationResul
       issue_date?: string | null;
       certificate_type?: string | null;
       certificate_type_label?: string;
+      per_work?: boolean;
+      authors?: string[];
+      work_title?: string | null;
+      team_name?: string | null;
     };
   }>(
     `${PUBLIC_API_BASE_URL.replace(/\/$/, "")}/public/verify/${encodeURIComponent(code.trim())}`,
@@ -333,6 +398,10 @@ export async function validateCertificate(code: string): Promise<ValidationResul
     issued_at: payload.certificate?.issue_date ?? undefined,
     certificate_type: payload.certificate?.certificate_type,
     certificate_type_label: payload.certificate?.certificate_type_label,
+    per_work: payload.certificate?.per_work,
+    authors: payload.certificate?.authors,
+    work_title: payload.certificate?.work_title,
+    team_name: payload.certificate?.team_name,
   };
 }
 
@@ -644,6 +713,28 @@ export async function retryEmissionBatch(batchId: string): Promise<EmissionBatch
 }
 
 export const spreadsheetTemplateUrl = `${API_BASE_URL.replace(/\/$/, "")}/certificates/spreadsheet-template`;
+
+/** Model workbook for a certificate type (per-work types get the author columns). */
+export function spreadsheetTemplateUrlFor(certificateType?: string | null): string {
+  if (!certificateType) return spreadsheetTemplateUrl;
+  return `${spreadsheetTemplateUrl}?certificate_type=${encodeURIComponent(certificateType)}`;
+}
+
+/** A variable the certificate body text accepts, such as `{{equipe}}`. */
+export interface BodyVariable {
+  name: string;
+  token: string;
+  label: string;
+}
+
+/**
+ * The body-text variables, read from the backend's own allowlist so the insert
+ * buttons can never offer a variable the validation rejects, nor miss one.
+ */
+export async function listBodyVariables(): Promise<BodyVariable[]> {
+  const response = await api.get<{ variables: BodyVariable[] }>("/certificates/body-variables");
+  return response.data.variables;
+}
 
 /**
  * Classifies a failed request so screens can show the right recovery.

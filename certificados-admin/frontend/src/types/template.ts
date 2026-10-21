@@ -12,6 +12,9 @@ export type ElementKey =
   | "texto_certificado"
   | "certificate_text"
   | "certificate_type"
+  | "equipe"
+  | "work_title"
+  | "authors"
   | "static"
   | "image"
   | "qr"
@@ -33,9 +36,45 @@ export const KEY_LABELS: Record<string, string> = {
   texto_certificado: "Corpo do certificado",
   certificate_text: "Corpo do certificado",
   certificate_type: "Tipo do certificado",
+  equipe: "Equipe",
+  work_title: "Título do trabalho",
+  authors: "Autores",
+  autor1: "Autor 1",
+  autor2: "Autor 2",
+  autor3: "Autor 3",
+  autor4: "Autor 4",
+  autor5: "Autor 5",
+  autor6: "Autor 6",
+  autor7: "Autor 7",
+  autor8: "Autor 8",
   static: "Texto fixo",
   image: "Imagem",
   qr: "QR Code",
+};
+
+/** Keys that only make sense on a template for a per-work certificate type. */
+export const PER_WORK_KEYS: ElementKey[] = [
+  "authors",
+  "autor1",
+  "autor2",
+  "autor3",
+  "autor4",
+  "autor5",
+  "autor6",
+  "autor7",
+  "autor8",
+];
+
+/**
+ * Element keys printed from the institutional settings, and which setting
+ * feeds each one. Mirrors the backend's `template_fields.SETTING_FOR_KEY`.
+ */
+export const INSTITUTIONAL_SETTING_FOR_KEY: Record<string, string> = {
+  institution_name: "institution_name",
+  issue_location: "issue_location",
+  issue_line: "issue_location",
+  signatory_name: "signatory_name",
+  signatory_title: "signatory_title",
 };
 
 export const AVAILABLE_FONTS = [
@@ -66,6 +105,18 @@ export interface TextTemplateElement extends BaseTemplateElement {
   bold: boolean;
   italic: boolean;
   staticText?: string;
+  /**
+   * Wrap width in art pixels. Absent: the body and the name wrap at the page
+   * bound, every other field is drawn on one line — the historical behaviour.
+   */
+  width?: number;
+  /** Box height in art pixels. Absent: the text's own height. The PDF never clips. */
+  height?: number;
+  /**
+   * Which edge Y positions. "bottom" keeps the base of the block in place and
+   * lets it grow upward (the authors block, which must not reach the QR code).
+   */
+  anchorY?: "top" | "bottom";
 }
 
 export interface ImageTemplateElement extends BaseTemplateElement {
@@ -118,4 +169,25 @@ export const MOCK_DATA: Record<string, string> = {
     "horária total de 12 horas. A atividade contou com palestra ministrada por " +
     "Maria Oliveira.",
   certificate_type: "Ouvinte",
+  equipe: "Equipe Alfa",
+  work_title: "Sistema de apoio à decisão para secretarias acadêmicas",
+  autor1: "Joao Silva",
+  autor2: "Maria Oliveira",
+  autor3: "Pedro Santos",
+  autor4: "Ana Costa",
+  autor5: "Lucas Pereira",
+  autor6: "Beatriz Lima",
+  autor7: "Rafael Souza",
+  autor8: "Carla Dias",
+  // Eight authors on purpose: the block is previewed at its tallest.
+  authors: [
+    "Autor 1: Joao Silva",
+    "Autor 2: Maria Oliveira",
+    "Autor 3: Pedro Santos",
+    "Autor 4: Ana Costa",
+    "Autor 5: Lucas Pereira",
+    "Autor 6: Beatriz Lima",
+    "Autor 7: Rafael Souza",
+    "Autor 8: Carla Dias",
+  ].join("\n"),
 };

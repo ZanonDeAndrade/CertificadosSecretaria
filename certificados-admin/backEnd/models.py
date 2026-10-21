@@ -22,3 +22,7 @@ class ParticipantRegistryRecord:
     certificate_text: str = ""
     data_emissao: str = ""
     certificate_type: str = ""
+    # Per-work certificates: every author in order (the first is ``nome``).
+    autores: tuple[str, ...] = ()
+    equipe: str = ""
+    titulo_trabalho: str = ""

@@ -21,6 +21,7 @@ from io import BytesIO
 from pathlib import Path
 
 from database import db
+from database.certificate_types import parse_certificate_type
 
 MAX_BACKGROUND_BYTES = 10 * 1024 * 1024  # 10 MB
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -158,6 +159,7 @@ def serialize_version(version: dict, *, include_layout: bool = True) -> dict:
         "version_number": version["version_number"],
         "name": version["name"],
         "is_active": bool(version["is_active"]),
+        "certificate_type": version.get("certificate_type"),
         "image_width": version["image_width"],
         "image_height": version["image_height"],
         "background_url": background_serving_path(version["id"]),
@@ -182,15 +184,33 @@ def get_version(version_id: int) -> dict | None:
     return serialize_version(version) if version else None
 
 
-def get_active_version() -> dict | None:
-    version = db.get_active_template_version()
+def get_active_version(certificate_type: str | None = None) -> dict | None:
+    """The active version for a batch type, falling back to the generic one."""
+    version = db.get_active_template_version(certificate_type) if certificate_type else None
+    if not version:
+        # No version dedicated to this type: the generic one applies.
+        version = db.get_active_template_version(None)
     return serialize_version(version) if version else None
 
 
-def create_version(*, name: str | None, layout: dict, created_by: int | None = None) -> dict:
-    """Create a new immutable version. NOT activated (activation is explicit)."""
+def create_version(
+    *,
+    name: str | None,
+    layout: dict,
+    created_by: int | None = None,
+    certificate_type: str | None = None,
+) -> dict:
+    """Create a new immutable version. NOT activated (activation is explicit).
+
+    ``certificate_type`` dedicates the version to batches of that type; ``None``
+    keeps it generic (used by every type without a dedicated active version).
+    """
     if not isinstance(layout, dict):
         raise TemplateError("Layout inválido.")
+    try:
+        parsed_type = parse_certificate_type(certificate_type, required=False)
+    except ValueError as exc:
+        raise TemplateError(str(exc)) from exc
     _enforce_layout_limits(layout)
     content, mime = _resolve_background(str(layout.get("background") or ""))
     width = int(layout.get("image_width") or 0)
@@ -210,6 +230,7 @@ def create_version(*, name: str | None, layout: dict, created_by: int | None = N
         background_image=content,
         background_mime_type=mime,
         created_by=created_by,
+        certificate_type=parsed_type.value if parsed_type else None,
     )
     persisted = db.get_template_version(created["id"])
     if persisted is None:

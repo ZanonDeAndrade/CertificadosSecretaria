@@ -75,3 +75,13 @@ test("perfil sem permissão de escrita recebe formulário somente leitura", asyn
   expect(screen.queryByRole("button", { name: "Salvar configurações" })).toBeNull();
   expect(screen.getByText(/disponível somente para leitura/)).not.toBeNull();
 });
+
+test("o local de emissão é apresentado como a cidade que sai no certificado", async () => {
+  renderWithProviders(<Configuracoes />, { role: "admin" });
+
+  const field = (await screen.findByLabelText(
+    /Cidade \(local de emissão\)/,
+  )) as HTMLInputElement;
+  await waitFor(() => expect(field.value).toBe(SETTINGS.issue_location));
+  expect(screen.getByText(/Sai como “Cidade, data\.” nos certificados/)).toBeTruthy();
+});

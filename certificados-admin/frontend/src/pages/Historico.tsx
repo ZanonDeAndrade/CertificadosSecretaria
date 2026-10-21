@@ -294,8 +294,8 @@ export default function Historico() {
   const handleSingleDownload = async (cert: AdminCertificate) => {
     setDownloadStatus("");
     try {
-      const blob = await downloadCertificateFile(cert.unique_code);
-      saveBlob(blob, `${cert.participant_name.replace(/[^\p{L}\p{N}._-]+/gu, "_")}.pdf`);
+      const { blob, filename } = await downloadCertificateFile(cert.unique_code);
+      saveBlob(blob, filename);
     } catch (requestError) {
       setDownloadStatus(
         failureMessage(requestError, "Não foi possível baixar o certificado."),
