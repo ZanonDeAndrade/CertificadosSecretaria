@@ -5,13 +5,19 @@
 {$PUBLIC_DOMAIN} {
 	tls internal
 	encode zstd gzip
+	log {
+		output discard
+	}
 	header {
 		-Server
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
-	reverse_proxy web:80 {
+	reverse_proxy web:8080 {
 		health_uri /health/ready
 		health_interval 30s
 	}
@@ -20,13 +26,19 @@
 {$ADMIN_DOMAIN} {
 	tls internal
 	encode zstd gzip
+	log {
+		output discard
+	}
 	header {
 		-Server
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://apis.google.com https://www.gstatic.com; connect-src 'self' https://accounts.google.com https://www.googleapis.com; frame-src https://accounts.google.com https://docs.google.com https://drive.google.com"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
-	reverse_proxy web:8080 {
+	reverse_proxy web:8081 {
 		health_uri /api/health/ready
 		health_interval 30s
 	}

@@ -6,10 +6,11 @@
 
 # Segredos — NUNCA enviar
 secrets/
-.env
-.env.production
+.env*
+**/.env*
 *service-account*.json
 *service_account*.json
+*serviceaccount*.json
 client_secret*.json
 *oauth*token*.json
 token.json
@@ -18,10 +19,15 @@ credentials*.json
 # Frontend (buildado à parte: Vercel / Dockerfile.web)
 certificados-admin/frontend/node_modules/
 certificados-admin/frontend/dist/
+**/test-results/
+**/playwright-report/
+**/blob-report/
 
 # Caches / venv
 **/__pycache__/
 **/*.pyc
+**/*.pyo
+**/*.tsbuildinfo
 .venv/
 venv/
 .pytest_cache/
@@ -37,3 +43,17 @@ storage/pdfs/
 *.pdf
 *.xlsx
 *.log
+*.sqlite
+*.sqlite3
+*.db-journal
+*.xls
+*.csv
+* (2)*
+.idea/
+.vscode/
+.agents/
+.codex/
+.claude/
+backups/
+*.zip
+*.tar*

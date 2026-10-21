@@ -3,7 +3,10 @@
 These run entirely on SQLite. The PostgreSQL-specific behaviour is exercised by
 ``test_integration_postgres.py`` (skipped unless ``TEST_DATABASE_URL`` is set).
 """
+
 from __future__ import annotations
+
+import hashlib
 
 import pytest
 
@@ -65,9 +68,7 @@ def test_database_url_can_be_loaded_from_secret_file(monkeypatch, tmp_path):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("DATABASE_URL_FILE", str(secret))
 
-    assert db_config.get_database_url() == (
-        "postgresql+psycopg://u:p@h/db?sslmode=require"
-    )
+    assert db_config.get_database_url() == ("postgresql+psycopg://u:p@h/db?sslmode=require")
 
 
 def test_direct_database_url_wins_over_secret_file(monkeypatch, tmp_path):
@@ -169,6 +170,7 @@ def test_audit_log_repository_insert(session):
     session.commit()
     # Smoke: a row exists.
     from sqlalchemy import func, select
+
     from database.models import AuditLog
 
     n = session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
@@ -213,12 +215,36 @@ def test_require_production_database_rejects_sqlite(monkeypatch):
 
 def test_require_production_database_accepts_postgres(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db?sslmode=verify-full")
     db_config.require_production_database()  # must not raise
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://u:p@h/db",
+        "postgresql://u:p@h/db?sslmode=disable",
+        "postgresql://u:p@h/db?sslmode=require",
+        "postgresql://u:p@h/db?sslmode=verify-ca",
+    ],
+)
+def test_require_production_database_rejects_unverified_tls(monkeypatch, url):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(db_config.ConfigError, match="verify-full"):
+        db_config.require_production_database()
+
+
+@pytest.mark.parametrize("value", ["*", "0.0.0.0/0", "::/0", "not-an-ip"])
+def test_production_rejects_untrusted_proxy_configuration(monkeypatch, value):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", value)
+    with pytest.raises(db_config.ConfigError):
+        db_config.validate_forwarded_allow_ips()
+
+
 def test_auth_requires_jwt_secret_in_production(monkeypatch):
-    import auth
+    from certificados_backend import auth
 
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("JWT_SECRET", raising=False)
@@ -229,9 +255,8 @@ def test_auth_requires_jwt_secret_in_production(monkeypatch):
     with pytest.raises(RuntimeError):
         auth.require_production_secret()
 
-    monkeypatch.setenv(
-        "JWT_SECRET", "0123456789abcdef0123456789abcdef0123456789abcdef"
-    )
+    fixture_material = hashlib.sha256(b"academic-test-fixture").hexdigest()
+    monkeypatch.setenv("JWT_SECRET", fixture_material)
     auth.require_production_secret()  # ok
 
 

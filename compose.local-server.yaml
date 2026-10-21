@@ -1,0 +1,176 @@
+name: certificados-local
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: runtime
+  env_file: .env.local-server
+  networks: [app]
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  pids_limit: 192
+  cpus: 0.50
+  mem_limit: 512m
+  restart: unless-stopped
+  secrets:
+    - database_url
+    - jwt_secret
+    - document_hash_keyring
+    - batch_payload_keys
+    - admin_initial_password
+
+services:
+  db:
+    image: postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=40"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [app]
+    secrets: [postgres_password]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    # A imagem oficial precisa fazer chown/setuid na primeira inicialização do
+    # volume. O banco permanece protegido pela ausência de portas publicadas.
+    pids_limit: 128
+    cpus: 0.50
+    mem_limit: 512m
+
+  # Executado explicitamente por deploy.sh; não inicia junto com a aplicação.
+  migrate:
+    <<: *app
+    environment:
+      APP_TARGET: migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  admin:
+    <<: *app
+    environment:
+      APP_TARGET: admin
+      PORT: 8000
+      WEB_CONCURRENCY: ${ADMIN_WORKERS:-1}
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+    volumes:
+      - ./runtime/storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  consulta:
+    <<: *app
+    environment:
+      APP_TARGET: consulta
+      PORT: 8001
+      WEB_CONCURRENCY: ${CONSULTA_WORKERS:-1}
+      GOOGLE_DRIVE_ACCESS_MODE: read_only
+    volumes:
+      - ./runtime/storage:/data/storage:ro
+    mem_limit: 384m
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *app
+    environment:
+      APP_TARGET: worker
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      BATCH_WORKER_MODE: external
+    command: ["--max-jobs", "1000", "--poll-seconds", "2"]
+    volumes:
+      - ./runtime/storage:/data/storage
+    mem_limit: 512m
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from database import db; db.check_connection()"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        VITE_API_BASE_URL: /api
+        NGINX_CONFIG: deploy/nginx.local-server.conf
+        NGINX_MAIN_CONFIG: deploy/nginx.local-server.main.conf
+    networks: [app]
+    ports:
+      - "${HTTP_PORT:-80}:8080"
+    depends_on:
+      admin:
+        condition: service_healthy
+      consulta:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 96
+    cpus: 0.25
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  postgres_password:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/postgres_password
+  database_url:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/database_url
+  jwt_secret:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/jwt_secret
+  document_hash_keyring:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/document_hash_keyring
+  batch_payload_keys:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/batch_payload_keys
+  admin_initial_password:
+    file: ${LOCAL_SECRETS_DIR:-./secrets/local-server}/admin_initial_password
+
+volumes:
+  postgres_data:
+
+networks:
+  app:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

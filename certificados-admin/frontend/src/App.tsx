@@ -1,162 +1,197 @@
-import { lazy, Suspense, useEffect, useState } from "react";
-import ValidateCertificate from "./components/ValidateCertificate";
+/**
+ * Route table.
+ *
+ * Every screen has a real URL, so refreshing the page or pasting a link keeps
+ * the operator on the same screen — the tabbed single-route version lost both.
+ * Route paths are in Portuguese to match the interface language and what the
+ * secretariat would read in the address bar.
+ *
+ * The router itself is supplied by main.tsx (BrowserRouter) or by tests
+ * (MemoryRouter), so this component stays router-agnostic and testable.
+ */
+import { lazy, Suspense, useEffect } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import AppShell, { APP_NAME } from "./app/AppShell";
+import { AuthProvider, useAuth } from "./app/AuthContext";
+import {
+  RequireAuth,
+  RequirePasswordChanged,
+  RequirePermission,
+} from "./app/guards";
+import LazyLoadBoundary from "./components/LazyLoadBoundary";
 import Login from "./components/Login";
+import Dashboard from "./pages/Dashboard";
 import EmitirCertificados from "./pages/EmitirCertificados";
 import Historico from "./pages/Historico";
-import LazyLoadBoundary from "./components/LazyLoadBoundary";
-import { AdminUser, getMe, logout, SESSION_EXPIRED_EVENT } from "./services/api";
+import ValidateCertificate from "./components/ValidateCertificate";
+import Usuarios from "./pages/Usuarios";
+import Auditoria from "./pages/Auditoria";
+import Ajuda from "./pages/Ajuda";
+import Perfil from "./pages/Perfil";
+import NaoEncontrado from "./pages/NaoEncontrado";
+import { NAV_ITEMS } from "./app/navigation";
+import Panel from "./ui/Panel";
+import { InstitutionProvider } from "./app/InstitutionContext";
+import AlterarSenha from "./pages/AlterarSenha";
+import Configuracoes from "./pages/Configuracoes";
 
 const TemplateEditor = lazy(() => import("./pages/TemplateEditor"));
 
-type Tab = "emitir" | "historico" | "validate" | "editor";
-
-function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("emitir");
-  const [user, setUser] = useState<AdminUser | null>(null);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [sessionNotice, setSessionNotice] = useState("");
-
+/** Keeps the browser tab title in step with the current route. */
+function useDocumentTitle() {
+  const { pathname } = useLocation();
   useEffect(() => {
-    document.title = "Certificados";
-  }, []);
+    const item = NAV_ITEMS.find((entry) => pathname.startsWith(entry.to));
+    document.title = item ? `${item.label} · ${APP_NAME}` : APP_NAME;
+  }, [pathname]);
+}
 
-  useEffect(() => {
-    const handleExpired = (event: Event) => {
-      const detail = (event as CustomEvent<string>).detail;
-      setSessionNotice(detail || "Sua sessão expirou. Entre novamente.");
-      setUser(null);
-    };
-    window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
-  }, []);
+function SignInRoute() {
+  const { user, notice, signIn, ready } = useAuth();
+  const location = useLocation();
+  const from = (location.state as { from?: string } | null)?.from;
 
-  useEffect(() => {
-    getMe()
-      .then(setUser)
-      .catch(() => setUser(null))
-      .finally(() => setAuthChecked(true));
-  }, []);
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-    } finally {
-      setUser(null);
-    }
-  };
-
-  if (!authChecked) {
+  if (ready && user) {
+    const home = user.permissions.includes("dashboard.read") ? "/painel" : "/historico";
     return (
-      <main className="flex min-h-screen items-center justify-center text-sm text-slate-500">
-        Carregando…
-      </main>
-    );
-  }
-
-  if (!user) {
-    return (
-      <Login
-        notice={sessionNotice}
-        onLoggedIn={(loggedUser) => {
-          setSessionNotice("");
-          setUser(loggedUser);
-        }}
+      <Navigate
+        to={user.must_change_password ? "/trocar-senha" : from ?? home}
+        replace
       />
     );
   }
+  return <Login notice={notice} onLoggedIn={signIn} />;
+}
 
+function HomeRoute() {
+  const { can } = useAuth();
+  return <Navigate to={can("dashboard.read") ? "/painel" : "/historico"} replace />;
+}
+
+function EditorFallback() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-12 md:px-10 lg:py-20">
-      <div className="rounded-[2.5rem] border border-white/60 bg-white/45 p-6 shadow-[0_30px_120px_rgba(15,23,42,0.08)] backdrop-blur md:p-10">
-        <header className="mb-8 flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-sky-700">
-              Fluxo hibrido
-            </p>
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-slate-500">{user.username}</span>
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-100"
-              >
-                Sair
-              </button>
-            </div>
-          </div>
-          <h1 className="text-4xl font-semibold tracking-tight text-slate-950 md:text-5xl">
-            Certificados
-          </h1>
-
-          {/* Tab bar */}
-          <div role="tablist" aria-label="Áreas administrativas" className="mt-2 flex gap-1 rounded-2xl border border-slate-200/80 bg-slate-100/60 p-1 w-fit">
-            <TabButton
-              label="Emitir certificados"
-              active={activeTab === "emitir"}
-              onClick={() => setActiveTab("emitir")}
-            />
-            <TabButton
-              label="Histórico"
-              active={activeTab === "historico"}
-              onClick={() => setActiveTab("historico")}
-            />
-            <TabButton
-              label="Validar certificado"
-              active={activeTab === "validate"}
-              onClick={() => setActiveTab("validate")}
-            />
-            <TabButton
-              label="Template global"
-              active={activeTab === "editor"}
-              onClick={() => setActiveTab("editor")}
-            />
-          </div>
-        </header>
-
-        {activeTab === "emitir" && <EmitirCertificados />}
-        {activeTab === "historico" && <Historico />}
-        {activeTab === "validate" && <ValidateCertificate />}
-        {activeTab === "editor" && (
-          <LazyLoadBoundary>
-            <Suspense
-              fallback={
-                <section role="status" aria-live="polite" className="rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-                  Carregando editor visual…
-                </section>
-              }
-            >
-              <TemplateEditor />
-            </Suspense>
-          </LazyLoadBoundary>
-        )}
+    <Panel>
+      <div
+        role="status"
+        aria-live="polite"
+        className="px-5 py-10 text-center text-[length:var(--text-sm)] text-[color:var(--ink-muted)]"
+      >
+        Carregando o editor de template…
       </div>
-    </main>
+    </Panel>
   );
 }
 
-interface TabButtonProps {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}
-
-function TabButton({ label, active, onClick }: TabButtonProps) {
+function AppRoutes() {
+  useDocumentTitle();
   return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={[
-        "rounded-xl px-4 py-2 text-sm font-medium transition",
-        active
-          ? "bg-white text-slate-900 shadow-sm"
-          : "text-slate-500 hover:text-slate-700",
-      ].join(" ")}
-    >
-      {label}
-    </button>
+    <Routes>
+      <Route path="/entrar" element={<SignInRoute />} />
+      <Route
+        path="/trocar-senha"
+        element={
+          <RequireAuth>
+            <AlterarSenha />
+          </RequireAuth>
+        }
+      />
+
+      <Route
+        path="/*"
+        element={
+          <RequireAuth>
+            <RequirePasswordChanged>
+              <AppShell>
+              <Routes>
+                <Route path="/" element={<HomeRoute />} />
+                <Route
+                  path="/painel"
+                  element={
+                    <RequirePermission permission="dashboard.read">
+                      <Dashboard />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route
+                  path="/emitir"
+                  element={
+                    <RequirePermission permission="certificates.issue">
+                      <EmitirCertificados />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route
+                  path="/historico"
+                  element={
+                    <RequirePermission permission="certificates.read">
+                      <Historico />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route path="/validar" element={<ValidateCertificate />} />
+
+                <Route
+                  path="/template"
+                  element={
+                    <RequirePermission permission="templates.read">
+                      <LazyLoadBoundary>
+                        <Suspense fallback={<EditorFallback />}>
+                          <TemplateEditor />
+                        </Suspense>
+                      </LazyLoadBoundary>
+                    </RequirePermission>
+                  }
+                />
+
+                <Route
+                  path="/usuarios"
+                  element={
+                    <RequirePermission permission="users.manage">
+                      <Usuarios />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route
+                  path="/auditoria"
+                  element={
+                    <RequirePermission permission="audit.read">
+                      <Auditoria />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route
+                  path="/configuracoes"
+                  element={
+                    <RequirePermission permission="settings.read">
+                      <Configuracoes />
+                    </RequirePermission>
+                  }
+                />
+
+                <Route path="/ajuda" element={<Ajuda />} />
+                <Route path="/perfil" element={<Perfil />} />
+                <Route path="*" element={<NaoEncontrado />} />
+              </Routes>
+              </AppShell>
+            </RequirePasswordChanged>
+          </RequireAuth>
+        }
+      />
+    </Routes>
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <InstitutionProvider>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </InstitutionProvider>
+  );
+}

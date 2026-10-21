@@ -1,0 +1,38 @@
+{
+  "displayName": "Certificados | incidente de integridade",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Um PDF falhou na verificacao de integridade e foi bloqueado. Execute a verificacao e o procedimento de recuperacao.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [{
+    "displayName": "Incidente em servico HTTP",
+    "conditionThreshold": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_integrity_incidents\" AND resource.type=\"cloud_run_revision\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0,
+      "duration": "0s",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_SUM",
+        "crossSeriesReducer": "REDUCE_SUM"
+      }],
+      "trigger": {"count": 1}
+    }
+  }, {
+    "displayName": "Incidente em job",
+    "conditionThreshold": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_integrity_incidents\" AND resource.type=\"cloud_run_job\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0,
+      "duration": "0s",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_SUM",
+        "crossSeriesReducer": "REDUCE_SUM"
+      }],
+      "trigger": {"count": 1}
+    }
+  }]
+}

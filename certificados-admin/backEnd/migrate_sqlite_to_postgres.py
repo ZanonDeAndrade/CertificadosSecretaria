@@ -4,22 +4,16 @@ The PostgreSQL schema must already be at Alembic head. All rows are copied in a
 single target transaction, preserving primary keys and foreign-key references.
 The command refuses a non-empty target to avoid accidental duplication.
 """
+
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from sqlalchemy import create_engine, func, inspect, select, text
 
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "database" / "models.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
-
-from database import config  # noqa: E402
-from database.models import Base  # noqa: E402
+from database import config
+from database.models import Base
 
 TABLE_ORDER = (
     "admin_users",
@@ -34,7 +28,11 @@ TABLE_ORDER = (
 
 def _counts(connection) -> dict[str, int]:  # noqa: ANN001
     return {
-        name: int(connection.execute(select(func.count()).select_from(Base.metadata.tables[name])).scalar_one())
+        name: int(
+            connection.execute(
+                select(func.count()).select_from(Base.metadata.tables[name])
+            ).scalar_one()
+        )
         for name in TABLE_ORDER
     }
 

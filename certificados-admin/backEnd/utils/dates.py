@@ -3,6 +3,7 @@
 Used by both the spreadsheet validator and the certificate service so that
 month names are spelled consistently and **with accents** (e.g. "março").
 """
+
 from __future__ import annotations
 
 import re
@@ -10,15 +11,23 @@ from datetime import date, datetime
 
 MONTHS = (
     "",
-    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
-    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+    "janeiro",
+    "fevereiro",
+    "março",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
 )
 
 # Matches an already-"por extenso" date, e.g. "24 de março de 2026" or
 # "20 a 25 de outubro de 2025" (month letters may or may not carry accents).
-_EXTENSO_RE = re.compile(
-    r"\d{1,2}( a \d{1,2})? de [a-zà-ÿç]+ de \d{4}", re.IGNORECASE
-)
+_EXTENSO_RE = re.compile(r"\d{1,2}( a \d{1,2})? de [a-zà-ÿç]+ de \d{4}", re.IGNORECASE)
 _INTERVAL_RE = re.compile(
     r"(\d{1,2})\s*(?:a|-|ate|até)\s*(\d{1,2})[/-](\d{1,2})[/-](\d{4})", re.IGNORECASE
 )
@@ -34,9 +43,7 @@ def format_extenso(value: date) -> str:
 
 
 def _ascii_lower(text: str) -> str:
-    return (
-        unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
-    )
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
 
 
 _MONTH_INDEX = {_ascii_lower(name): i for i, name in enumerate(MONTHS) if name}

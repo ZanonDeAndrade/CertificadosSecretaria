@@ -3,9 +3,15 @@ export type ElementKey =
   | "event"
   | "course"
   | "date"
+  | "institution_name"
+  | "issue_location"
+  | "issue_line"
+  | "signatory_name"
+  | "signatory_title"
   | "validation_code"
   | "texto_certificado"
   | "certificate_text"
+  | "certificate_type"
   | "static"
   | "image"
   | "qr"
@@ -18,9 +24,15 @@ export const KEY_LABELS: Record<string, string> = {
   event: "Evento",
   course: "Curso",
   date: "Data de emissao",
+  institution_name: "Nome da instituição",
+  issue_location: "Local de emissão",
+  issue_line: "Local e data de emissão",
+  signatory_name: "Nome do assinante",
+  signatory_title: "Cargo do assinante",
   validation_code: "Codigo de validacao",
   texto_certificado: "Corpo do certificado",
   certificate_text: "Corpo do certificado",
+  certificate_type: "Tipo do certificado",
   static: "Texto fixo",
   image: "Imagem",
   qr: "QR Code",
@@ -89,15 +101,21 @@ export const MOCK_DATA: Record<string, string> = {
   event: "Workshop de Inteligencia Artificial",
   course: "Sistemas de Informação",
   date: "27 de abril de 2026",
+  institution_name: "Instituição de Ensino",
+  issue_location: "São Paulo",
+  issue_line: "São Paulo, 27 de abril de 2026.",
+  signatory_name: "Helena Martins",
+  signatory_title: "Secretária Acadêmica",
   validation_code: "a3f9c1e8b2d4f6a1",
   texto_certificado:
     "participou da Semana de Inovação, promovida pelo Curso de Sistemas de " +
-    "Informação da Faculdade, realizada de 10 a 12 de junho de 2026, com carga " +
+    "Informação, realizada de 10 a 12 de junho de 2026, com carga " +
     "horária total de 12 horas. A atividade contou com palestra ministrada por " +
     "Maria Oliveira.",
   certificate_text:
     "participou da Semana de Inovação, promovida pelo Curso de Sistemas de " +
-    "Informação da Faculdade, realizada de 10 a 12 de junho de 2026, com carga " +
+    "Informação, realizada de 10 a 12 de junho de 2026, com carga " +
     "horária total de 12 horas. A atividade contou com palestra ministrada por " +
     "Maria Oliveira.",
+  certificate_type: "Ouvinte",
 };

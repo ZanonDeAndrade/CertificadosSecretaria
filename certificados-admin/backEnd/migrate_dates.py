@@ -9,26 +9,17 @@ Usage:
     python migrate_dates.py --dry-run     # report only, change nothing
     python migrate_dates.py               # convert in place
 """
+
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
-_BACKEND_DIR = Path(__file__).resolve().parent
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
-for _ancestor in _BACKEND_DIR.parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
+from certificados_backend.utils.dates import to_iso
+from sqlalchemy import select
 
-from sqlalchemy import select  # noqa: E402
-
-from database import db, engine  # noqa: E402
-from database.models import Certificate  # noqa: E402
-from utils.dates import to_iso  # noqa: E402
+from database import db, engine
+from database.models import Certificate
 
 
 def run_migration(dry_run: bool = False) -> dict:

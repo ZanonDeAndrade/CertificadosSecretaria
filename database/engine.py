@@ -9,6 +9,7 @@ A single engine is cached per resolved URL, so:
 ``session_scope()`` is the unit of work: it commits on success, rolls back on
 error, and always closes the session — giving repositories real transactions.
 """
+
 from __future__ import annotations
 
 from contextlib import contextmanager

@@ -1,0 +1,38 @@
+{
+  "displayName": "Certificados | falha operacional",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Falha em emissao, reconciliacao, backup ou restore drill. Correlacione pelo job/request ID; os logs nao contem PII.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [{
+    "displayName": "Ao menos uma falha de job em 5 minutos",
+    "conditionThreshold": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_operation_failures\" AND resource.type=\"cloud_run_job\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0,
+      "duration": "0s",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_SUM",
+        "crossSeriesReducer": "REDUCE_SUM"
+      }],
+      "trigger": {"count": 1}
+    }
+  }, {
+    "displayName": "Falha ao acionar worker pela API",
+    "conditionThreshold": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_operation_failures\" AND resource.type=\"cloud_run_revision\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0,
+      "duration": "0s",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_SUM",
+        "crossSeriesReducer": "REDUCE_SUM"
+      }],
+      "trigger": {"count": 1}
+    }
+  }]
+}

@@ -1,21 +1,19 @@
 """Tests for structured generation: idempotency, metadata, and QR code."""
+
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
+from certificados_backend.services.certificate_service import (
+    CertificateBatchConfig,
+    CertificateBatchService,
+)
+from certificados_backend.services.spreadsheet import SpreadsheetRow
 
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from services.certificate_service import CertificateBatchConfig, CertificateBatchService
-from services.spreadsheet import SpreadsheetRow
 from storage_service.local import LocalStorage
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 PDF_BYTES = b"%PDF-1.4\nfake\n%%EOF"
 
 
@@ -82,6 +80,7 @@ def test_generation_persists_structured_metadata(monkeypatch, tmp_path):
     assert row["participant_email"] == "ana@x.com"
     assert row["participant_document"] is None
     assert row["participant_document_hash"]
+    assert row["participant_document_hash_key_id"] == "v1"
     assert row["participant_name_normalized"] == "ana souza"
     assert row["issued_by"] == issuer_id
     assert row["business_key"]
@@ -159,7 +158,7 @@ def test_production_requires_explicit_https_validation_url(monkeypatch):
 
 
 def test_make_qr_image_is_not_blank():
-    from services.generator import make_qr_image
+    from certificados_backend.services.generator import make_qr_image
 
     img = make_qr_image("https://cert.example.edu/validar/CERT-2026-AB1234", 200)
     assert img.size == (200, 200)
@@ -172,7 +171,10 @@ def test_make_qr_image_is_not_blank():
 def test_real_generator_embeds_qr(tmp_path, monkeypatch):
     """Integration: the real generator produces a valid PDF with a QR url."""
     _point_db(monkeypatch, tmp_path)
-    from services.generator import CertificateGenerator, CertificateGeneratorConfig
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
 
     be = _BACKEND_DIR
     gen = CertificateGenerator(
@@ -184,7 +186,7 @@ def test_real_generator_embeds_qr(tmp_path, monkeypatch):
         )
     )
     record = _row()
-    from services.certificate_service import _row_to_record
+    from certificados_backend.services.certificate_service import _row_to_record
 
     rec = _row_to_record(record, "CERT-2026-QR0001")
     with_qr = gen.render_pdf_bytes_default(
@@ -217,11 +219,7 @@ def _decode_clean_qr(image) -> str:
     def finder_matches(matrix, left, top):
         for row in range(7):
             for col in range(7):
-                expected = (
-                    row in {0, 6}
-                    or col in {0, 6}
-                    or (2 <= row <= 4 and 2 <= col <= 4)
-                )
+                expected = row in {0, 6} or col in {0, 6} or (2 <= row <= 4 and 2 <= col <= 4)
                 if matrix[top + row][left + col] != expected:
                     return False
         return True
@@ -317,8 +315,7 @@ def _decode_clean_qr(image) -> str:
         if start + length * 8 > len(data_bits):
             continue
         payload = bytes(
-            int(data_bits[index : index + 8], 2)
-            for index in range(start, start + length * 8, 8)
+            int(data_bits[index : index + 8], 2) for index in range(start, start + length * 8, 8)
         )
         try:
             return payload.decode("utf-8")
@@ -331,13 +328,14 @@ def _decode_clean_qr(image) -> str:
 def test_real_certificate_qr_is_decodable(tmp_path, monkeypatch):
     """Contract: a real rendered certificate contains the canonical QR URL."""
     monkeypatch.setenv("PUBLIC_VALIDATION_BASE_URL", "https://cert.example.edu///")
-    from services.certificate_service import _row_to_record
-    from services.generator import (
-        CertificateGenerator,
-        CertificateGeneratorConfig,
+    from certificados_backend.services.certificate_service import _row_to_record
+    from certificados_backend.services.generator import (
         REGISTRY_BOTTOM_Y_RATIO,
         SIDE_MARGIN_RATIO,
+        CertificateGenerator,
+        CertificateGeneratorConfig,
     )
+
     from storage_service import config as storage_config
 
     generator = CertificateGenerator(
@@ -350,9 +348,7 @@ def test_real_certificate_qr_is_decodable(tmp_path, monkeypatch):
     )
     code = "CERT-2026-QR0001"
     expected_url = storage_config.build_public_validation_url(code)
-    rendered = generator._compose_default_image(
-        _row_to_record(_row(), code), qr_url=expected_url
-    )
+    rendered = generator._compose_default_image(_row_to_record(_row(), code), qr_url=expected_url)
     width, height = rendered.size
     qr_size = max(int(height * 0.12), 96)
     qr_x = int(width * SIDE_MARGIN_RATIO)

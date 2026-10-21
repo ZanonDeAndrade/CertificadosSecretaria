@@ -8,22 +8,16 @@ versions are left untouched.
 Usage:
     python seed_template.py
 """
+
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 _BACKEND_DIR = Path(__file__).resolve().parent
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
-for _ancestor in _BACKEND_DIR.parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
 
-from database import db  # noqa: E402
-from services import template_service  # noqa: E402
+from certificados_backend.services import template_service
+
+from database import db
 
 DEFAULT_TEMPLATE = _BACKEND_DIR / "templates" / "certificado_base.png"
 
@@ -35,7 +29,7 @@ def main() -> int:
     after = db.count_template_versions()
     active = db.get_active_template_version()
 
-    if before == 0 and after > 0:
+    if before == 0 and after > 0 and active is not None:
         print(f"Template global padrao criado e ativado (v{active['version_number']}).")
     else:
         label = f"v{active['version_number']}" if active else "nenhuma"

@@ -1,0 +1,28 @@
+{
+  "audit_date": "2026-08-13",
+  "audited_commit": "08b776ad6488b2b2728ecb18001cac9afacd2203",
+  "data_classification": "synthetic_only",
+  "deployment_performed": false,
+  "result": "academic_demo_ready_production_not_ready",
+  "gates": {
+    "git_clean_fsck": "passed",
+    "secret_scanners": {"status": "passed", "findings": 0},
+    "clean_python_install": {"status": "passed", "packages": 89},
+    "clean_frontend_install": {"status": "passed", "packages": 233},
+    "lint_format_typecheck": "passed",
+    "backend": {"passed": 271, "skipped_postgres_in_unit_run": 10, "failed": 0},
+    "backend_coverage_percent": 73.83,
+    "postgres_conditional": {"passed": 10, "failed": 0},
+    "frontend": {"passed": 35, "failed": 0},
+    "e2e": {"passed": 94, "conditional_skips": 4, "failed": 0},
+    "accessibility": {"passed": 51, "conditional_skips": 1, "axe_violations": 0},
+    "sqlite_migrations": "passed",
+    "postgres_migrations": "passed",
+    "dependency_audits": "passed_no_known_vulnerabilities",
+    "container_high_critical_findings": 0,
+    "config_high_critical_findings": 0,
+    "backup_restore": "passed",
+    "local_smoke": "passed",
+    "negative_access": "passed"
+  }
+}

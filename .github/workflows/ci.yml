@@ -8,81 +8,387 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHON_VERSION: 3.12.13
+  NODE_VERSION: 20.20.2
+  UV_VERSION: 0.12.3
+  CERTIFICADOS_DISABLE_DOTENV: "1"
+  PYTHONHASHSEED: "0"
+
 jobs:
-  backend:
-    name: Backend (lint, typecheck, tests, audit)
-    runs-on: ubuntu-latest
+  python-quality:
+    name: Python 3.12 / lint, types, migrations, tests, audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
 
-      - name: Install dependencies
+      - name: Install locked development environment
         run: |
-          python -m pip install --upgrade pip
-          pip install -r certificados-admin/backEnd/requirements.txt
-          pip install -r certificados-consulta/requirements.txt
-          pip install ruff pip-audit pytest
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --frozen --group dev
+          python --version | grep -F "Python ${PYTHON_VERSION}"
 
-      - name: Lint (ruff)
-        run: ruff check .
+      - name: Lock and export drift
+        run: |
+          uv lock --check
+          uv export --frozen --no-dev --no-emit-project --format requirements.txt --output-file /tmp/runtime.txt >/dev/null
+          uv export --frozen --group dev --no-emit-project --format requirements.txt --output-file /tmp/dev.txt >/dev/null
+          uv export --frozen --group ops --no-dev --no-emit-project --format requirements.txt --output-file /tmp/ops.txt >/dev/null
+          # uv records the chosen output filename in line 2; compare the
+          # dependency graph and hashes, not that non-semantic comment.
+          cmp <(tail -n +3 requirements/runtime.txt) <(tail -n +3 /tmp/runtime.txt)
+          cmp <(tail -n +3 requirements/dev.txt) <(tail -n +3 /tmp/dev.txt)
+          cmp <(tail -n +3 requirements/ops.txt) <(tail -n +3 /tmp/ops.txt)
 
-      - name: Typecheck / syntax (compileall)
-        run: python -m compileall -q certificados-admin/backEnd certificados-consulta database storage_service observability
+      - name: Ruff
+        run: |
+          uv run ruff check certificados-admin/backEnd certificados_consulta database observability storage_service scripts
+          uv run ruff format --check certificados-admin/backEnd certificados_consulta database observability storage_service scripts
 
-      - name: Alembic migrations apply + no drift (SQLite)
+      - name: Python typecheck
+        run: uv run mypy certificados-admin/backEnd certificados_consulta database observability storage_service scripts
+
+      - name: Compile all importable packages
+        run: uv run python -m compileall -q certificados-admin/backEnd certificados_consulta database observability storage_service scripts
+
+      - name: Reproducible installable wheel
         env:
-          DATABASE_URL: "sqlite:///./ci_check.db"
+          SOURCE_DATE_EPOCH: "1767225600"
         run: |
-          python -m alembic upgrade head
-          python -m alembic check
-          rm -f ci_check.db
+          uv build --wheel --out-dir /tmp/build-one
+          uv build --wheel --out-dir /tmp/build-two
+          cmp /tmp/build-one/*.whl /tmp/build-two/*.whl
 
-      - name: Tests
-        working-directory: certificados-admin/backEnd
-        run: python -m pytest tests -p no:randomly -q
-
-      - name: Dependency audit (pip-audit, non-blocking)
-        continue-on-error: true
+      - name: Alembic upgrade, downgrade compatibility and drift (SQLite)
+        env:
+          APP_ENV: test
+          DATABASE_URL: sqlite:////tmp/certificados-ci.sqlite
         run: |
-          pip-audit -r certificados-admin/backEnd/requirements.txt
-          pip-audit -r certificados-consulta/requirements.txt
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run alembic downgrade 0007
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Backend and public tests with critical coverage
+        env:
+          APP_ENV: test
+        run: >-
+          uv run pytest
+          --cov=certificados_backend
+          --cov=certificados_consulta
+          --cov=database
+          --cov=storage_service
+          --cov=observability
+          --cov-report=xml:artifacts/coverage.xml
+          --cov-report=term-missing
+          --junitxml=artifacts/backend-junit.xml
+          --durations=20
+          -q
+
+      - name: Python dependency audit (all development dependencies)
+        run: |
+          uv run pip-audit --requirement requirements/dev.txt --disable-pip
+          uv run pip-audit --requirement requirements/ops.txt --disable-pip
+
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: backend-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+  postgres:
+    name: PostgreSQL 16 / migrations, concurrency, integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_USER: certificados_ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: certificados_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U certificados_ci -d certificados_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://certificados_ci:ci-only-password@localhost:5432/certificados_ci?sslmode=disable
+      TEST_DATABASE_URL: postgresql+psycopg://certificados_ci:ci-only-password@localhost:5432/certificados_ci?sslmode=disable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install locked environment
+        run: |
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --frozen --group dev
+      - name: Wait for final PostgreSQL startup
+        run: |
+          for attempt in $(seq 1 30); do
+            if uv run python -c 'import os; from sqlalchemy import create_engine; engine=create_engine(os.environ["DATABASE_URL"]); connection=engine.connect(); connection.close(); engine.dispose()'; then
+              exit 0
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+      - name: PostgreSQL migration and model drift
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run alembic downgrade 0007
+          uv run alembic upgrade head
+          uv run alembic check
+      - name: PostgreSQL integration and multi-worker contracts
+        run: >-
+          uv run pytest
+          certificados-admin/backEnd/tests/test_integration_postgres.py
+          certificados-admin/backEnd/tests/test_durable_jobs.py
+          certificados-admin/backEnd/tests/test_template_concurrency.py
+          --junitxml=postgres-junit.xml
+          -q
+      - name: Upload PostgreSQL evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: postgres-evidence
+          path: postgres-junit.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   frontend:
-    name: Frontend (typecheck, build, audit)
-    runs-on: ubuntu-latest
+    name: Node 20 / npm ci, types, tests, build, audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: certificados-admin/frontend
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: certificados-admin/frontend/package-lock.json
-
-      - name: Install
-        run: npm ci
-
-      - name: Typecheck + build (tsc -b && vite build)
+      - name: Clean deterministic install
+        run: |
+          node --version | grep -F "v${NODE_VERSION}"
+          npm --version | grep -F "10.8.2"
+          npm ci --no-audit --no-fund
+          npm ls --all >/dev/null
+      - name: Frontend typecheck
+        run: npm run typecheck
+      - name: Frontend tests
+        run: npm test -- --reporter=default --reporter=junit --outputFile.junit=frontend-junit.xml
+      - name: Production build
         run: npm run build
+      - name: Dependency audit policy (high and critical block)
+        run: npm audit --audit-level=high
+      - name: Upload frontend evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-evidence
+          path: |
+            certificados-admin/frontend/frontend-junit.xml
+            certificados-admin/frontend/dist/
+          if-no-files-found: warn
+          retention-days: 30
 
-      - name: Dependency audit (npm, non-blocking)
-        continue-on-error: true
-        run: npm audit --omit=dev
+  e2e:
+    name: Critical E2E / admin, secretaria, auditor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: certificados-admin/frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: certificados-admin/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Install pinned Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Run critical profile flows
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: e2e-junit.xml
+        run: npx playwright test --reporter=line,junit
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-evidence
+          path: |
+            certificados-admin/frontend/e2e-junit.xml
+            certificados-admin/frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   secrets:
-    name: Secret detection (gitleaks)
-    runs-on: ubuntu-latest
+    name: Secret and release scanners
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+      - name: Gitleaks (working tree and history)
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Redacted repository and history scanner
+        run: python -m scripts.security_scan --repository --permissions --history
+      - name: Data-free release artifact contract
+        run: |
+          python -m scripts.export_release /tmp/certificados-release.zip
+          python -m scripts.security_scan --artifact /tmp/certificados-release.zip
+
+  containers:
+    name: Images / hardening, CVEs, SBOM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build runtime image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: certificados-app:ci
+          provenance: mode=max
+      - name: Build operations image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: operations
+          load: true
+          tags: certificados-ops:ci
+          provenance: mode=max
+      - name: Build frontend image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          load: true
+          tags: certificados-web:ci
+          provenance: mode=max
+      - name: Runtime hardening smoke test
+        run: |
+          test "$(docker image inspect certificados-app:ci --format '{{.Config.User}}')" = "10001:10001"
+          test "$(docker image inspect certificados-ops:ci --format '{{.Config.User}}')" = "postgres"
+          test "$(docker image inspect certificados-web:ci --format '{{.Config.User}}')" = "101:101"
+          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --entrypoint python certificados-app:ci -c "import certificados_backend, certificados_consulta, database"
+          docker image inspect certificados-app:ci certificados-ops:ci certificados-web:ci > container-build-evidence.json
+      - name: Scan runtime image (HIGH/CRITICAL block)
+        if: always()
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: certificados-app:ci
+          format: json
+          output: trivy-runtime.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Scan operations image (HIGH/CRITICAL block)
+        if: always()
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: certificados-ops:ci
+          format: json
+          output: trivy-operations.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Scan frontend image (HIGH/CRITICAL block)
+        if: always()
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: certificados-web:ci
+          format: json
+          output: trivy-web.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Scan infrastructure configuration (HIGH/CRITICAL block)
+        if: always()
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: config
+          scan-ref: .
+          format: json
+          output: trivy-config.json
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - name: Runtime image SBOM
+        if: always()
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: certificados-app:ci
+          format: spdx-json
+          output-file: sbom-runtime.spdx.json
+          upload-artifact: false
+      - name: Operations image SBOM
+        if: always()
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: certificados-ops:ci
+          format: spdx-json
+          output-file: sbom-operations.spdx.json
+          upload-artifact: false
+      - name: Frontend image SBOM
+        if: always()
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: certificados-web:ci
+          format: spdx-json
+          output-file: sbom-web.spdx.json
+          upload-artifact: false
+      - name: Upload immutable scan and SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-sbom-and-scan-evidence
+          path: |
+            container-build-evidence.json
+            trivy-*.json
+            sbom-*.spdx.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  required-gate:
+    name: Required CI gate
+    if: always()
+    needs: [python-quality, postgres, frontend, e2e, secrets, containers]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every mandatory stage
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            test "$result" = success
+          done

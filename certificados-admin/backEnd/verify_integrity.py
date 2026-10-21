@@ -7,27 +7,20 @@ Usage:
 
 Schedule it (cron) to catch tampering/corruption of the stored PDFs.
 """
+
 from __future__ import annotations
 
 import argparse
-import logging
+import json
 import sys
-from pathlib import Path
 
-_BACKEND_DIR = Path(__file__).resolve().parent
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
-for _ancestor in _BACKEND_DIR.parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
+from certificados_backend.services.integrity import run_integrity_check
 
-from services.integrity import run_integrity_check  # noqa: E402
+import observability
 
 
-def main(argv: list[str]) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+def main(argv: list[str] | None = None) -> int:
+    observability.configure_logging()
     parser = argparse.ArgumentParser(description="Verifica a integridade dos certificados.")
     parser.add_argument("--dry-run", action="store_true", help="Simula sem bloquear nada.")
     parser.add_argument("--limit", type=int, default=None, help="Máximo de certificados.")
@@ -35,13 +28,7 @@ def main(argv: list[str]) -> int:
 
     report = run_integrity_check(limit=args.limit, dry_run=args.dry_run)
 
-    print("\n-------- Verificacao de integridade --------")
-    print(f"  Modo:        {'DRY-RUN' if args.dry_run else 'EXECUCAO'}")
-    print(f"  Verificados: {report['checked']} / {report['total']}")
-    print(f"  OK:          {report['ok']}")
-    print(f"  Bloqueados:  {report['blocked']}")
-    print(f"  Erros:       {report['errors']}")
-    print("--------------------------------------------")
+    print(json.dumps({"event": "integrity_check_completed", **report}, sort_keys=True))
     return 1 if report["blocked"] else 0
 
 

@@ -1,0 +1,14 @@
+{
+  "data_classification": "synthetic_only",
+  "duration_seconds_observed_not_an_rto": 0.315,
+  "pdfs_restored": 1,
+  "pdfs_verified": 1,
+  "row_counts": {
+    "admin_users": 1,
+    "audit_log": 4,
+    "certificates": 1,
+    "emission_batches": 1
+  },
+  "schema_revision": "0008",
+  "status": "passed"
+}

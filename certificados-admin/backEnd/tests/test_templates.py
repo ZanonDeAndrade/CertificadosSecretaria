@@ -1,29 +1,24 @@
 """Tests for the single global template: versioning, activation, event×course,
 faithful reissue, reissue rollback, and absence of Drive orphans."""
+
 from __future__ import annotations
 
 import base64
-import sys
 from io import BytesIO
 from pathlib import Path
 
 import pytest
-
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from models import ParticipantRegistryRecord  # noqa: E402
-from services import template_service  # noqa: E402
-from services.certificate_service import (  # noqa: E402
+from certificados_backend.models import ParticipantRegistryRecord
+from certificados_backend.services import template_service
+from certificados_backend.services.certificate_service import (
     CertificateBatchConfig,
     CertificateBatchService,
 )
-from services.spreadsheet import SpreadsheetRow  # noqa: E402
-from storage_service.base import CertificateStorage, StoredFile, sha256_hex, utc_now_iso  # noqa: E402
+from certificados_backend.services.spreadsheet import SpreadsheetRow
 
+from storage_service.base import CertificateStorage, StoredFile, sha256_hex, utc_now_iso
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 PDF_BYTES = b"%PDF-1.4\ntpl\n%%EOF"
 
 
@@ -135,8 +130,12 @@ def _row():
 
 def test_create_version_increments_and_is_immutable(monkeypatch, tmp_path):
     _point_db(monkeypatch, tmp_path)
-    v1 = template_service.create_version(name="A", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}]))
-    v2 = template_service.create_version(name="B", layout=_layout([{"type": "text", "key": "date", "x": 2, "y": 2}]))
+    v1 = template_service.create_version(
+        name="A", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}])
+    )
+    v2 = template_service.create_version(
+        name="B", layout=_layout([{"type": "text", "key": "date", "x": 2, "y": 2}])
+    )
 
     assert v1["version_number"] == 1
     assert v2["version_number"] == 2
@@ -149,8 +148,12 @@ def test_create_version_increments_and_is_immutable(monkeypatch, tmp_path):
 
 def test_only_one_active_and_activation_is_explicit(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
-    v1 = template_service.create_version(name="A", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}]))
-    v2 = template_service.create_version(name="B", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}]))
+    v1 = template_service.create_version(
+        name="A", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}])
+    )
+    v2 = template_service.create_version(
+        name="B", layout=_layout([{"type": "text", "key": "name", "x": 1, "y": 1}])
+    )
 
     assert template_service.get_active_version() is None  # nothing active until asked
 
@@ -173,7 +176,10 @@ def test_activate_unknown_version_returns_false(monkeypatch, tmp_path):
 
 
 def test_event_and_course_are_distinct():
-    from services.generator import CertificateGenerator, CertificateGeneratorConfig
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
 
     gen = CertificateGenerator(
         CertificateGeneratorConfig(
@@ -184,17 +190,66 @@ def test_event_and_course_are_distinct():
         )
     )
     record = ParticipantRegistryRecord(
-        nome="Ana", email="", curso="Direito", evento="Semana Jurídica",
-        livro=0, folha=0, linha=0, validation_code="CERT-2026-AAAAAA",
+        nome="Ana",
+        email="",
+        curso="Direito",
+        evento="Semana Jurídica",
+        livro=0,
+        folha=0,
+        linha=0,
+        validation_code="CERT-2026-AAAAAA",
+        certificate_type="Palestrante",
     )
     data = gen._participant_data(record)
     assert data["event"] == "Semana Jurídica"  # NOT the course
     assert data["course"] == "Direito"
+    assert data["certificate_type"] == "Palestrante"
+
+
+def test_visual_template_receives_snapshot_backed_institutional_fields():
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
+
+    gen = CertificateGenerator(
+        CertificateGeneratorConfig(
+            template_path=_BACKEND_DIR / "templates" / "certificado_base.png",
+            regular_font_path=_BACKEND_DIR / "fonts" / "times.ttf",
+            bold_font_path=_BACKEND_DIR / "fonts" / "timesbd.ttf",
+            output_dir=_BACKEND_DIR / "output",
+            institution_name="Instituição Teste",
+            issue_location="Cidade Teste",
+            signatory_name="Helena Martins",
+            signatory_title="Secretária Acadêmica",
+        )
+    )
+    record = ParticipantRegistryRecord(
+        nome="Ana",
+        email="",
+        curso="Direito",
+        evento="Semana Jurídica",
+        data_emissao="10 de junho de 2026",
+        livro=0,
+        folha=0,
+        linha=0,
+        validation_code="CERT-2026-INST01",
+    )
+
+    data = gen._participant_data(record)
+
+    assert data["institution_name"] == "Instituição Teste"
+    assert data["issue_location"] == "Cidade Teste"
+    assert data["issue_line"] == "Cidade Teste, 10 de junho de 2026."
+    assert data["signatory_name"] == "Helena Martins"
+    assert data["signatory_title"] == "Secretária Acadêmica"
 
 
 def test_generation_persists_distinct_event_and_course(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
-    template_service.create_version(name="A", layout=_layout([{"type": "text", "key": "event", "x": 1, "y": 1}]))
+    template_service.create_version(
+        name="A", layout=_layout([{"type": "text", "key": "event", "x": 1, "y": 1}])
+    )
     template_service.activate_version(1)
     service = _service(tmp_path, storage=RecordingDriveStorage())
 
@@ -210,7 +265,9 @@ def test_generation_persists_distinct_event_and_course(monkeypatch, tmp_path):
 
 
 def _generate_one(db, service):
-    template_service.create_version(name="v1", layout=_layout([{"type": "text", "key": "name", "x": 10, "y": 10}]))
+    template_service.create_version(
+        name="v1", layout=_layout([{"type": "text", "key": "name", "x": 10, "y": 10}])
+    )
     template_service.activate_version(1)
     summary = service.generate_certificates([_row()])
     return db.get_by_code(summary.generated[0]["code"])
@@ -226,7 +283,13 @@ def test_reissue_uses_original_version_not_active(monkeypatch, tmp_path):
 
     # A NEW active version with a clearly different layout.
     v2 = template_service.create_version(
-        name="v2", layout=_layout([{"type": "text", "key": "date", "x": 9, "y": 9}, {"type": "text", "key": "name", "x": 1, "y": 1}])
+        name="v2",
+        layout=_layout(
+            [
+                {"type": "text", "key": "date", "x": 9, "y": 9},
+                {"type": "text", "key": "name", "x": 1, "y": 1},
+            ]
+        ),
     )
     template_service.activate_version(v2["id"])
     assert template_service.get_active_version()["id"] == v2["id"]

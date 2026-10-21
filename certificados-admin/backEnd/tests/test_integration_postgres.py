@@ -12,9 +12,11 @@ database, e.g.::
 The tables are created and dropped around each run, so the target database must
 be safe to mutate.
 """
+
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 import pytest
 
@@ -123,3 +125,28 @@ def test_pg_business_key_uniqueness_is_enforced(pg_session):
 
     _rows, total = repo.list()
     assert total == 1
+
+
+def test_pg_public_rate_limit_is_atomic_across_sessions(pg_session):
+    """Concurrent workers serialize increments on the shared PostgreSQL row."""
+
+    from sqlalchemy.orm import sessionmaker
+
+    from database.repositories import PublicRateLimitRepository
+
+    factory = sessionmaker(bind=pg_session.get_bind(), expire_on_commit=False, future=True)
+    now = datetime.now(timezone.utc)
+    first = factory()
+    second = factory()
+    try:
+        assert PublicRateLimitRepository(first).consume(
+            "atomic-test-bucket", now=now, window_seconds=60, limit=1
+        )[0]
+        first.commit()
+        assert not PublicRateLimitRepository(second).consume(
+            "atomic-test-bucket", now=now, window_seconds=60, limit=1
+        )[0]
+        second.commit()
+    finally:
+        first.close()
+        second.close()

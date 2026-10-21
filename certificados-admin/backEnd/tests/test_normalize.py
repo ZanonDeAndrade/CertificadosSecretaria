@@ -1,20 +1,13 @@
 """Tests for certificate_service normalisation helpers and text utilities."""
+
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# Ensure backEnd/ is on the path so bare imports resolve.
-_BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
-if _BACKEND_DIR not in sys.path:
-    sys.path.insert(0, _BACKEND_DIR)
-
-from services.certificate_service import _normalize_date_text
-
+from certificados_backend.services.certificate_service import _normalize_date_text
 
 # ---------------------------------------------------------------------------
 # _normalize_date_text
 # ---------------------------------------------------------------------------
+
 
 class TestNormalizeDateText:
     def test_passthrough_for_already_extenso(self):

@@ -1,3 +1,12 @@
+/**
+ * Properties panel for the selected element.
+ *
+ * Organised into labelled groups (Conteúdo · Posição · Tipografia · Aparência)
+ * instead of one long column of controls, so an operator can find "font size"
+ * without reading every field. Numeric inputs are real number inputs with
+ * units stated in the label, and position is editable by keyboard — dragging on
+ * the canvas cannot be the only way to place an element.
+ */
 import {
   AVAILABLE_FONTS,
   ElementKey,
@@ -8,14 +17,23 @@ import {
   TextTemplateElement,
 } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
+import Button from "../../ui/Button";
+import Icon from "../../ui/Icon";
+import { cn } from "../../ui/cn";
 
 const VARIABLE_KEYS: ElementKey[] = [
   "name",
   "event",
+  "course",
   "date",
+  "institution_name",
+  "issue_location",
+  "issue_line",
+  "signatory_name",
+  "signatory_title",
   "validation_code",
   "texto_certificado",
-  "certificate_text",
+  "certificate_type",
   "static",
 ];
 
@@ -35,305 +53,369 @@ function isImageElement(element: TemplateElement): element is ImageTemplateEleme
   return element.type === "image";
 }
 
-function PropertiesPanel({
+export default function PropertiesPanel({
   elements,
   selectedId,
   onUpdate,
   onDelete,
   onDuplicate,
 }: PropertiesPanelProps) {
-  const el = elements.find((e) => e.id === selectedId) ?? null;
+  const element = elements.find((entry) => entry.id === selectedId) ?? null;
 
-  if (!el) {
+  if (!element) {
     return (
-      <aside className="flex w-60 shrink-0 flex-col border-l border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-            Propriedades
+      <div className="flex h-full flex-col bg-[var(--surface)]">
+        <PanelTitle />
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-8 text-center">
+          <Icon name="template" size={22} className="text-[color:var(--neutral-400)]" />
+          <p className="text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
+            Selecione um elemento no canvas ou na lista à esquerda para editar
+            suas propriedades.
           </p>
         </div>
-        <p className="px-4 py-5 text-xs text-slate-400">
-          Selecione um elemento no canvas ou na lista a esquerda.
-        </p>
-      </aside>
+      </div>
     );
   }
 
-  const upd = (changes: Partial<TemplateElement>) => onUpdate(el.id, changes);
+  const update = (changes: Partial<TemplateElement>) => onUpdate(element.id, changes);
+
+  const title = isImageElement(element)
+    ? element.label || KEY_LABELS.image
+    : element.key === "static"
+      ? "Texto fixo"
+      : (KEY_LABELS[element.key] ?? element.key);
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col overflow-y-auto border-l border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-4 py-3">
-        <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-          Propriedades
+    <div className="flex h-full flex-col overflow-y-auto bg-[var(--surface)]">
+      <PanelTitle />
+
+      <div className="border-b border-[color:var(--line)] px-4 py-2.5">
+        <p className="flex items-center gap-2 text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]">
+          <Icon
+            name={isImageElement(element) ? "image" : "text"}
+            size={15}
+            className="text-[color:var(--ink-muted)]"
+          />
+          <span className="min-w-0 truncate">{title}</span>
         </p>
       </div>
 
-      <div className="flex flex-col gap-4 p-4">
-        {isTextElement(el) && (
-          <>
-            <Field label="Campo">
+      {isTextElement(element) && (
+        <>
+          <Group title="Conteúdo">
+            <Row label="Campo">
               <select
-                value={el.key}
-                onChange={(e) =>
-                  upd({
-                    key: e.target.value as ElementKey,
-                    label: KEY_LABELS[e.target.value] ?? e.target.value,
-                  })
+                value={element.key}
+                onChange={(event) =>
+                  update({
+                    key: event.target.value as ElementKey,
+                    label: KEY_LABELS[event.target.value] ?? event.target.value,
+                  } as Partial<TemplateElement>)
                 }
-                className={selectCls}
+                className={CONTROL}
               >
-                {VARIABLE_KEYS.map((k) => (
-                  <option key={k} value={k}>
-                    {KEY_LABELS[k] ?? k}
+                {VARIABLE_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {KEY_LABELS[key] ?? key}
                   </option>
                 ))}
               </select>
-            </Field>
+            </Row>
 
-            {el.key === "static" && (
-              <Field label="Texto">
-                <input
-                  type="text"
-                  value={el.staticText ?? ""}
-                  onChange={(e) => upd({ staticText: e.target.value })}
-                  className={inputCls}
-                  placeholder="Digite o texto fixo..."
+            {element.key === "static" && (
+              <Row label="Texto fixo">
+                <textarea
+                  value={element.staticText ?? ""}
+                  rows={3}
+                  onChange={(event) =>
+                    update({ staticText: event.target.value } as Partial<TemplateElement>)
+                  }
+                  className={cn(CONTROL, "h-auto resize-y py-1.5")}
                 />
-              </Field>
+              </Row>
             )}
+          </Group>
 
-            <Field label="Fonte">
+          <Group title="Posição">
+            <div className="grid grid-cols-2 gap-2">
+              <Row label="X (px)">
+                <input
+                  type="number"
+                  value={Math.round(element.x)}
+                  onChange={(event) =>
+                    update({ x: Number(event.target.value) } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+              <Row label="Y (px)">
+                <input
+                  type="number"
+                  value={Math.round(element.y)}
+                  onChange={(event) =>
+                    update({ y: Number(event.target.value) } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+            </div>
+            <p className="text-[length:var(--text-2xs)] text-[color:var(--ink-subtle)]">
+              Coordenadas em pixels da arte original. Também é possível usar as
+              setas do teclado com o elemento selecionado.
+            </p>
+          </Group>
+
+          <Group title="Tipografia">
+            <Row label="Fonte">
               <select
-                value={el.fontFamily}
-                onChange={(e) => upd({ fontFamily: e.target.value })}
-                className={selectCls}
+                value={element.fontFamily}
+                onChange={(event) =>
+                  update({ fontFamily: event.target.value } as Partial<TemplateElement>)
+                }
+                className={CONTROL}
               >
                 {AVAILABLE_FONTS.map((font) => (
-                  <option key={font} value={font} style={{ fontFamily: font }}>
+                  <option key={font} value={font}>
                     {font}
                   </option>
                 ))}
               </select>
-            </Field>
+            </Row>
 
-            <Field label="Tamanho (px)">
-              <input
-                type="number"
-                min={6}
-                max={400}
-                value={el.fontSize}
-                onChange={(e) =>
-                  upd({ fontSize: Math.max(6, Number(e.target.value)) })
-                }
-                className={inputCls}
-              />
-            </Field>
-
-            <Field label="Cor">
-              <div className="flex items-center gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Row label="Tamanho (px)">
                 <input
-                  type="color"
-                  value={el.color}
-                  onChange={(e) => upd({ color: e.target.value })}
-                  className="h-8 w-10 cursor-pointer rounded border border-slate-200 p-0.5"
+                  type="number"
+                  min={6}
+                  max={200}
+                  value={Math.round(element.fontSize)}
+                  onChange={(event) =>
+                    update({
+                      fontSize: Math.max(6, Number(event.target.value)),
+                    } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
                 />
-                <input
-                  type="text"
-                  value={el.color}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    if (/^#[0-9a-fA-F]{0,6}$/.test(value)) upd({ color: value });
-                  }}
-                  className={`${inputCls} font-mono`}
-                  maxLength={7}
-                />
-              </div>
-            </Field>
+              </Row>
+              <Row label="Cor">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="color"
+                    value={element.color}
+                    onChange={(event) =>
+                      update({ color: event.target.value } as Partial<TemplateElement>)
+                    }
+                    aria-label="Cor do texto"
+                    className="h-8 w-9 shrink-0 cursor-pointer rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] p-0.5"
+                  />
+                  <input
+                    type="text"
+                    value={element.color}
+                    onChange={(event) =>
+                      update({ color: event.target.value } as Partial<TemplateElement>)
+                    }
+                    aria-label="Cor do texto em hexadecimal"
+                    className={cn(CONTROL, "font-[family-name:var(--font-mono)]")}
+                  />
+                </div>
+              </Row>
+            </div>
 
-            <Field label="Alinhamento">
-              <div className="flex gap-1">
+            <Row label="Alinhamento">
+              <div role="group" aria-label="Alinhamento do texto" className="flex gap-1">
                 {(["left", "center", "right"] as TextAlign[]).map((align) => (
                   <button
                     key={align}
                     type="button"
-                    onClick={() => upd({ align })}
-                    className={[
-                      "flex-1 rounded-lg border py-1.5 text-sm transition",
-                      el.align === align
-                        ? "border-sky-500 bg-sky-50 font-bold text-sky-700"
-                        : "border-slate-200 text-slate-500 hover:border-slate-400",
-                    ].join(" ")}
+                    aria-pressed={element.align === align}
+                    onClick={() => update({ align } as Partial<TemplateElement>)}
+                    className={cn(
+                      "h-8 flex-1 rounded-[var(--radius)] border text-[length:var(--text-xs)] font-medium",
+                      element.align === align
+                        ? "border-[color:var(--brand-500)] bg-[var(--brand-50)] text-[color:var(--brand-800)]"
+                        : "border-[color:var(--line-strong)] bg-[var(--surface)] text-[color:var(--ink-muted)] hover:text-[color:var(--ink)]",
+                    )}
                   >
-                    {align.toUpperCase()}
+                    {align === "left"
+                      ? "Esquerda"
+                      : align === "center"
+                        ? "Centro"
+                        : "Direita"}
                   </button>
                 ))}
               </div>
-            </Field>
+            </Row>
 
-            <Field label="Estilo">
-              <div className="flex gap-2">
-                <ToggleButton
-                  label="N"
-                  title="Negrito"
-                  active={el.bold}
-                  onClick={() => upd({ bold: !el.bold })}
-                  boldDisplay
-                />
-                <ToggleButton
-                  label="I"
-                  title="Italico"
-                  active={el.italic}
-                  onClick={() => upd({ italic: !el.italic })}
-                  italicDisplay
-                />
+            <Row label="Estilo">
+              <div role="group" aria-label="Estilo do texto" className="flex gap-1">
+                <button
+                  type="button"
+                  aria-pressed={element.bold}
+                  onClick={() => update({ bold: !element.bold } as Partial<TemplateElement>)}
+                  className={cn(
+                    "h-8 flex-1 rounded-[var(--radius)] border text-[length:var(--text-xs)] font-bold",
+                    element.bold
+                      ? "border-[color:var(--brand-500)] bg-[var(--brand-50)] text-[color:var(--brand-800)]"
+                      : "border-[color:var(--line-strong)] bg-[var(--surface)] text-[color:var(--ink-muted)]",
+                  )}
+                >
+                  Negrito
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={element.italic}
+                  onClick={() =>
+                    update({ italic: !element.italic } as Partial<TemplateElement>)
+                  }
+                  className={cn(
+                    "h-8 flex-1 rounded-[var(--radius)] border text-[length:var(--text-xs)] italic",
+                    element.italic
+                      ? "border-[color:var(--brand-500)] bg-[var(--brand-50)] text-[color:var(--brand-800)]"
+                      : "border-[color:var(--line-strong)] bg-[var(--surface)] text-[color:var(--ink-muted)]",
+                  )}
+                >
+                  Itálico
+                </button>
               </div>
-            </Field>
-          </>
-        )}
+            </Row>
+          </Group>
+        </>
+      )}
 
-        {isImageElement(el) && (
-          <>
-            <Field label="Legenda">
-              <input
-                type="text"
-                value={el.label}
-                onChange={(e) => upd({ label: e.target.value })}
-                className={inputCls}
-              />
-            </Field>
+      {isImageElement(element) && (
+        <>
+          <Group title="Posição">
+            <div className="grid grid-cols-2 gap-2">
+              <Row label="X (px)">
+                <input
+                  type="number"
+                  value={Math.round(element.x)}
+                  onChange={(event) =>
+                    update({ x: Number(event.target.value) } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+              <Row label="Y (px)">
+                <input
+                  type="number"
+                  value={Math.round(element.y)}
+                  onChange={(event) =>
+                    update({ y: Number(event.target.value) } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+            </div>
+          </Group>
 
-            <Field label="Largura (px)">
-              <input
-                type="number"
-                min={1}
-                value={el.width}
-                onChange={(e) => upd({ width: Math.max(1, Number(e.target.value)) })}
-                className={inputCls}
-              />
-            </Field>
+          <Group title="Tamanho">
+            <div className="grid grid-cols-2 gap-2">
+              <Row label="Largura (px)">
+                <input
+                  type="number"
+                  min={1}
+                  value={Math.round(element.width)}
+                  onChange={(event) =>
+                    update({
+                      width: Math.max(1, Number(event.target.value)),
+                    } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+              <Row label="Altura (px)">
+                <input
+                  type="number"
+                  min={1}
+                  value={Math.round(element.height)}
+                  onChange={(event) =>
+                    update({
+                      height: Math.max(1, Number(event.target.value)),
+                    } as Partial<TemplateElement>)
+                  }
+                  className={CONTROL}
+                />
+              </Row>
+            </div>
+          </Group>
 
-            <Field label="Altura (px)">
-              <input
-                type="number"
-                min={1}
-                value={el.height}
-                onChange={(e) => upd({ height: Math.max(1, Number(e.target.value)) })}
-                className={inputCls}
-              />
-            </Field>
-
-            <Field label="Opacidade">
+          <Group title="Aparência">
+            <Row label={`Opacidade — ${Math.round((element.opacity ?? 1) * 100)}%`}>
               <input
                 type="range"
                 min={0}
-                max={1}
-                step={0.05}
-                value={el.opacity ?? 1}
-                onChange={(e) => upd({ opacity: Number(e.target.value) })}
-                className="w-full"
+                max={100}
+                value={Math.round((element.opacity ?? 1) * 100)}
+                onChange={(event) =>
+                  update({
+                    opacity: Number(event.target.value) / 100,
+                  } as Partial<TemplateElement>)
+                }
+                className="w-full accent-[var(--brand-700)]"
               />
-            </Field>
-          </>
-        )}
+            </Row>
+          </Group>
+        </>
+      )}
 
-        <Field label="Posicao (px)">
-          <div className="flex gap-2">
-            <div className="flex flex-1 flex-col gap-0.5">
-              <span className="text-xs text-slate-400">X</span>
-              <input
-                type="number"
-                value={el.x}
-                onChange={(e) => upd({ x: Number(e.target.value) })}
-                className={inputCls}
-              />
-            </div>
-            <div className="flex flex-1 flex-col gap-0.5">
-              <span className="text-xs text-slate-400">Y</span>
-              <input
-                type="number"
-                value={el.y}
-                onChange={(e) => upd({ y: Number(e.target.value) })}
-                className={inputCls}
-              />
-            </div>
-          </div>
-        </Field>
-
-        <div className="flex gap-2 pt-2">
-          <button
-            type="button"
-            onClick={() => onDuplicate(el.id)}
-            className="flex-1 rounded-full border border-slate-300 py-2 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-          >
-            Duplicar
-          </button>
-          <button
-            type="button"
-            onClick={() => onDelete(el.id)}
-            className="flex-1 rounded-full bg-rose-600 py-2 text-xs font-semibold text-white transition hover:bg-rose-500"
-          >
-            Excluir
-          </button>
-        </div>
+      <div className="mt-auto flex gap-2 border-t border-[color:var(--line)] p-3">
+        <Button
+          size="sm"
+          variant="secondary"
+          icon="duplicate"
+          onClick={() => onDuplicate(element.id)}
+          className="flex-1"
+        >
+          Duplicar
+        </Button>
+        <Button
+          size="sm"
+          variant="danger-quiet"
+          icon="trash"
+          onClick={() => onDelete(element.id)}
+          className="flex-1"
+        >
+          Excluir
+        </Button>
       </div>
-    </aside>
-  );
-}
-
-const inputCls =
-  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-400";
-
-const selectCls =
-  "w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-400";
-
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="text-xs font-medium text-slate-500">{label}</label>
-      {children}
     </div>
   );
 }
 
-function ToggleButton({
-  label,
-  title,
-  active,
-  onClick,
-  boldDisplay,
-  italicDisplay,
-}: {
-  label: string;
-  title: string;
-  active: boolean;
-  onClick: () => void;
-  boldDisplay?: boolean;
-  italicDisplay?: boolean;
-}) {
+const CONTROL = cn(
+  "h-8 w-full rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2",
+  "text-[length:var(--text-xs)] text-[color:var(--ink)]",
+);
+
+function PanelTitle() {
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      className={[
-        "flex-1 rounded-lg border py-1.5 text-sm transition",
-        active
-          ? "border-sky-500 bg-sky-50 text-sky-700"
-          : "border-slate-200 text-slate-500 hover:border-slate-400",
-        boldDisplay ? "font-bold" : "",
-        italicDisplay ? "italic" : "",
-      ].join(" ")}
-    >
-      {label}
-    </button>
+    <div className="border-b border-[color:var(--line)] px-4 py-2.5">
+      <h2 className="text-[length:var(--text-xs)] font-semibold uppercase tracking-[0.06em] text-[color:var(--ink-muted)]">
+        Propriedades
+      </h2>
+    </div>
   );
 }
 
-export default PropertiesPanel;
+function Group({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="border-b border-[color:var(--line)] px-4 py-3">
+      <h3 className="mb-2 text-[length:var(--text-2xs)] font-semibold uppercase tracking-[0.06em] text-[color:var(--ink-subtle)]">
+        {title}
+      </h3>
+      <div className="flex flex-col gap-2.5">{children}</div>
+    </section>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[length:var(--text-xs)] font-medium text-[color:var(--ink-muted)]">
+        {label}
+      </span>
+      {children}
+    </label>
+  );
+}

@@ -1,0 +1,10 @@
+{
+  "name": "certificados_integrity_incidents",
+  "description": "Incidentes de integridade detectados, sem dados do certificado.",
+  "filter": "jsonPayload.logger=\"certificados.metrics\" AND jsonPayload.metric=\"integrity_incidents_total\" AND jsonPayload.metric_kind=\"counter_delta\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "INT64",
+    "unit": "1"
+  }
+}

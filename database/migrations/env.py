@@ -6,20 +6,13 @@ SQLite. Batch mode is enabled for SQLite so ALTER operations work there too.
 """
 from __future__ import annotations
 
-import sys
 from logging.config import fileConfig
-from pathlib import Path
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Make the shared `database` package importable (repo root is two levels up).
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from database import config as db_config  # noqa: E402
-from database.models import Base  # noqa: E402
+from database import config as db_config
+from database.models import Base
 
 cfg = context.config
 if cfg.config_file_name is not None:
@@ -34,6 +27,18 @@ cfg.set_main_option("sqlalchemy.url", _URL)
 _IS_SQLITE = db_config.is_sqlite_url(_URL)
 
 
+def include_object(obj, name, type_, reflected, compare_to):
+    """Keep the PostgreSQL-only trigram index out of autogenerate drift.
+
+    The index is created explicitly by migration 0004 and intentionally is not
+    part of portable ORM metadata, because SQLite cannot represent GIN/trgm.
+    """
+
+    if type_ == "index" and name == "idx_certificates_name_normalized_trgm":
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=_URL,
@@ -41,6 +46,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         compare_type=True,
         render_as_batch=_IS_SQLITE,
+        include_object=include_object,
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
@@ -59,6 +65,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
             render_as_batch=_IS_SQLITE,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

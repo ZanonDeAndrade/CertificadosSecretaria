@@ -1,0 +1,219 @@
+/* ============================================================================
+ * Design tokens — Secretaria Acadêmica / Certificados
+ * ----------------------------------------------------------------------------
+ * The institutional logo is packaged by the application. Color and typeface
+ * decisions remain centralized here so future brand-guide adjustments do not
+ * require component changes.
+ *
+ *   :root {
+ *     --brand-700: #0b4a6f;   //  primary institutional color (actions, nav)
+ *     --brand-600: #0e5c88;
+ *     --brand-50:  #eff7fb;
+ *     --font-sans: "Institution Sans", system-ui, sans-serif;
+ *   }
+ *
+ * Tokens are also exposed to Tailwind v4 through @theme (see base.css), so
+ * utilities such as `bg-surface`, `text-ink-muted`, `border-line` resolve here.
+ * ========================================================================== */
+
+:root {
+  /* ── IDENTITY ─────────────────────────────────────────────────────────────
+   * Replace this block to brand the system. Deliberately a restrained, desatu-
+   * rated institutional blue — reads as civic/administrative, not product-tech.
+   * Contrast verified against --surface (#ffffff) and --surface-sunken.
+   */
+  --brand-50: #eef4f8;
+  --brand-100: #d6e5ef;
+  --brand-200: #b0cde0;
+  --brand-300: #7ba9c6;
+  --brand-400: #4b83a6;
+  --brand-500: #2c6485; /*  4.87:1 on white — large text / borders only */
+  --brand-600: #235571; /*  6.28:1 on white — AA for body text            */
+  --brand-700: #1c455c; /*  8.42:1 on white — primary action background   */
+  --brand-800: #16374a; /* 10.6:1  on white                                */
+  --brand-900: #112b3a;
+
+  /* Typeface. A workhorse UI sans; the system stack keeps rendering native and
+   * avoids shipping a webfont the institution has not licensed. */
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* ── NEUTRALS ─────────────────────────────────────────────────────────────
+   * Slightly cool gray ramp. `surface` is the content ground; `surface-sunken`
+   * is the second neutral layer used by sidebar, toolbars and table headers.
+   */
+  --neutral-0: #ffffff;
+  --neutral-25: #fbfcfd;
+  --neutral-50: #f6f8fa;
+  --neutral-100: #eef1f4;
+  --neutral-200: #e0e5ea;
+  --neutral-300: #cbd2da;
+  --neutral-400: #9aa5b1;
+  --neutral-500: #6f7b8a;
+  --neutral-600: #556170; /*  7.0:1 on white  */
+  --neutral-700: #3d4854;
+  --neutral-800: #2a333d;
+  --neutral-900: #1a2129;
+
+  /* ── SEMANTIC SURFACES ───────────────────────────────────────────────────*/
+  --surface: var(--neutral-0);
+  --surface-sunken: var(--neutral-50);
+  --surface-raised: var(--neutral-0);
+  --surface-inset: var(--neutral-100);
+  --surface-nav: #14202b; /* sidebar: darker second neutral layer */
+  --surface-nav-hover: #1e2d3a;
+  --surface-nav-active: #26404f;
+
+  /* ── INK ─────────────────────────────────────────────────────────────────
+   * Contrast on --surface: ink 15.9:1, ink-muted 7.0:1, ink-subtle 4.6:1.
+   * ink-subtle is the floor for body text and placeholders (AA ≥ 4.5:1).
+   */
+  --ink: var(--neutral-900);
+  --ink-muted: var(--neutral-600);
+  --ink-subtle: #667381; /* 4.62:1 on white — smallest permitted body ink */
+  --ink-inverse: var(--neutral-0);
+  /* Nav ink must clear 4.5:1 on the LIGHTEST nav background
+   * (--surface-nav-active), not just on --surface-nav. Measured:
+   *   --ink-nav        8.0:1 on nav, 7.2:1 on nav-active
+   *   --ink-nav-muted  8.0:1 on nav, 5.3:1 on nav-active
+   * The muted value was #93a3b1 and failed at 4.2:1 on the active row. */
+  --ink-nav: #c8d3dd;
+  --ink-nav-muted: #a8b6c2;
+
+  /* ── LINES ───────────────────────────────────────────────────────────────*/
+  --line: var(--neutral-200);
+  --line-strong: var(--neutral-300);
+  --line-nav: #263441;
+
+  /* ── STATUS ──────────────────────────────────────────────────────────────
+   * Each status carries fg (text/icon, AA on its own bg), bg, and border.
+   * Status is never signalled by color alone — see StatusBadge, which pairs
+   * every color with a distinct glyph and a text label.
+   */
+  --ok-fg: #16613c; /* 5.6:1 on --ok-bg  */
+  --ok-bg: #e9f5ee;
+  --ok-line: #b6ddc6;
+
+  --warn-fg: #7a4a06; /* 6.4:1 on --warn-bg */
+  --warn-bg: #fdf3e2;
+  --warn-line: #e8cd9b;
+
+  --danger-fg: #a32020; /* 5.9:1 on --danger-bg */
+  --danger-bg: #fdeded;
+  --danger-line: #f0bfbf;
+  --danger-solid: #a32020; /* 5.9:1 with white text */
+  --danger-solid-hover: #8a1b1b;
+
+  --info-fg: var(--brand-700);
+  --info-bg: var(--brand-50);
+  --info-line: var(--brand-200);
+
+  --neutral-fg: var(--neutral-700);
+  --neutral-bg: var(--neutral-100);
+  --neutral-line: var(--neutral-300);
+
+  /* ── FOCUS ───────────────────────────────────────────────────────────────
+   * A single focus treatment used everywhere: 2px ring + 2px offset, so it
+   * stays visible on both light surfaces and the dark sidebar.
+   */
+  --focus-ring: #1d70b8;
+  --focus-ring-inverse: #ffd24d;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+
+  /* ── SPACING ─────────────────────────────────────────────────────────────
+   * 4px base. Regular, predictable rhythm; no arbitrary values in components.
+   */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* ── RADIUS ──────────────────────────────────────────────────────────────
+   * Deliberately shallow. `--radius-full` exists only for the two places a
+   * circle is correct (avatar, numeric step marker) — never for buttons/chips.
+   */
+  --radius-sm: 2px;
+  --radius: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 999px;
+
+  /* ── ELEVATION ───────────────────────────────────────────────────────────
+   * Every shadow has a real vertical offset and soft blur. No colored halos.
+   */
+  --shadow-sm: 0 1px 2px rgba(20, 32, 43, 0.06);
+  --shadow: 0 1px 3px rgba(20, 32, 43, 0.09), 0 1px 2px rgba(20, 32, 43, 0.05);
+  --shadow-md: 0 4px 10px rgba(20, 32, 43, 0.08), 0 1px 3px rgba(20, 32, 43, 0.06);
+  --shadow-lg: 0 12px 28px rgba(20, 32, 43, 0.14), 0 4px 8px rgba(20, 32, 43, 0.07);
+
+  /* ── TYPE SCALE ──────────────────────────────────────────────────────────
+   * Fixed rem steps (~1.15 ratio). Not fluid: product UI is viewed at a
+   * consistent DPI and a shrinking h1 inside a panel reads as a bug.
+   */
+  --text-2xs: 0.6875rem; /* 11px — table micro-labels only  */
+  --text-xs: 0.75rem; /* 12px */
+  --text-sm: 0.8125rem; /* 13px — dense table body          */
+  --text-base: 0.875rem; /* 14px — default UI body           */
+  --text-md: 1rem; /* 16px — prose, public site body   */
+  --text-lg: 1.125rem; /* 18px */
+  --text-xl: 1.3125rem; /* 21px — page title                */
+  --text-2xl: 1.5rem; /* 24px */
+  --text-3xl: 1.875rem; /* 30px — metric figures            */
+
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.65;
+
+  /* ── LAYOUT ──────────────────────────────────────────────────────────────*/
+  --sidebar-width: 15.5rem;
+  --topbar-height: 3.5rem;
+  --content-max: 82rem;
+  --prose-max: 68ch;
+
+  /* Minimum interactive target (WCAG 2.2 AA 2.5.8 asks 24px; 44px is the
+   * comfortable floor we hold for primary controls and all touch targets). */
+  --target-min: 44px;
+  --target-compact: 32px;
+
+  /* ── MOTION ──────────────────────────────────────────────────────────────*/
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration: 180ms;
+  --duration-slow: 240ms;
+
+  --z-sticky: 20;
+  --z-drawer: 60;
+  --z-modal: 70;
+  --z-toast: 80;
+}
+
+/* Respect the OS "reduce motion" setting: collapse durations to a value that
+ * still fires transitionend handlers but shows no perceptible movement. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0.01ms;
+    --duration: 0.01ms;
+    --duration-slow: 0.01ms;
+  }
+}
+
+/* Windows high-contrast / forced-colors: let the OS palette win, keep borders
+ * so structure survives when our background colors are discarded. */
+@media (forced-colors: active) {
+  :root {
+    --line: CanvasText;
+    --line-strong: CanvasText;
+  }
+}

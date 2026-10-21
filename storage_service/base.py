@@ -5,6 +5,7 @@ of the application (generator, routes, main) should import a concrete provider
 directly — they go through ``storage_service.get_storage()`` and the
 ``CertificateStorage`` interface below.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -132,6 +133,16 @@ class CertificateStorage(ABC):
 
     #: short, stable identifier persisted as ``storage_provider``
     provider: str = "abstract"
+
+    def for_folder(self, folder_id: str) -> CertificateStorage:
+        """Return a writer bound to one durable destination folder.
+
+        Local storage has no folder concept and therefore returns itself. Remote
+        providers override this method. Keeping the operation on the storage
+        contract lets the emission saga remain provider-agnostic while a batch
+        chooses a Google Drive destination per event.
+        """
+        return self
 
     @abstractmethod
     def save(

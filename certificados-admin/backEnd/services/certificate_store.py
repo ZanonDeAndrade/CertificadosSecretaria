@@ -5,22 +5,14 @@ Persistence itself now goes through the saga in :mod:`services.certificate_servi
 instead of pre-checking codes outside a transaction. This module only provides
 the random code factory and the legacy lookup shape used by ``/validate``.
 """
+
 from __future__ import annotations
 
 import secrets
-import sys
 from datetime import datetime
-from pathlib import Path
 
-# Make the shared `database` package importable regardless of how deep this app
-# lives, by walking up to the repo root that contains database/db.py.
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
-
-from database import db  # noqa: E402  (import after sys.path bootstrap)
+from database import db
+from database.certificate_types import certificate_type_label
 
 # Code format: CERT-<ano>-<6 chars>, e.g. CERT-2026-AB1234.
 # Alphabet excludes ambiguous characters (0/O, 1/I) so codes are easy to read,
@@ -55,4 +47,6 @@ def find_certificate(code: str) -> dict | None:
         "issued_at": row["issue_date"],
         "date": row["issue_date"],
         "certificate_text": row.get("certificate_text"),
+        "certificate_type": row.get("certificate_type"),
+        "certificate_type_label": certificate_type_label(row.get("certificate_type")),
     }

@@ -1,23 +1,19 @@
-FROM node:20-alpine AS build
+# syntax=docker/dockerfile:1.7
+ARG NODE_IMAGE=node:20.20.2-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:1.30.4-alpine3.24@sha256:44e36330f74d4f3a1d4e222acca9e23b401fb87811a7597024502bb759c4dd49
 
+FROM ${NODE_IMAGE} AS build
 WORKDIR /frontend
-COPY certificados-admin/frontend/package*.json ./
-RUN npm ci
+COPY certificados-admin/frontend/package.json certificados-admin/frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY certificados-admin/frontend/ ./
-
-# The browser always calls the panel origin. Nginx proxies /api to the private
-# application endpoint configured at container runtime.
 ARG VITE_API_BASE_URL=/api
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 
-FROM nginx:1.27-alpine
-
-ENV PORT=8080 \
-    ADMIN_API_HOST=certificados-admin-api-hj3rwyicha-ue.a.run.app \
-    CONSULTA_API_HOST=certificados-consulta-hj3rwyicha-ue.a.run.app
-
-COPY --from=build /frontend/dist /usr/share/nginx/html
-COPY deploy/nginx.cloudrun.conf /etc/nginx/templates/default.conf.template
-
+FROM ${NGINX_IMAGE} AS runtime
+ENV PORT=8080
+COPY --from=build --chown=101:101 /frontend/dist /usr/share/nginx/html
+COPY --chown=101:101 deploy/nginx.cloudrun.conf /etc/nginx/templates/default.conf.template
+USER 101:101
 EXPOSE 8080

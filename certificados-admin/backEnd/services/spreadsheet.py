@@ -6,7 +6,7 @@ accents, no spaces/punctuation) and matched against a set of synonyms, so
 
     nome*          carga_horaria*  (* obrigatório)
     curso          evento          data_emissao
-    data_inicio    data_fim        email   documento/matricula
+    data_inicio    data_fim        email   registro_academico
 
 Rules enforced here:
 - Only ``nome`` and ``carga_horaria`` are REQUIRED. Everything else is optional
@@ -18,6 +18,7 @@ Rules enforced here:
 - ``evento`` is a distinct column (never the course).
 - invalid rows (missing name or workload) never produce a certificate.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -32,9 +33,8 @@ from pathlib import Path
 from typing import IO
 
 import pandas as pd
-
-from utils.courses import COURSES, normalize_course_name
-from utils.dates import normalize_date
+from certificados_backend.utils.courses import COURSES, normalize_course_name
+from certificados_backend.utils.dates import normalize_date
 
 DEFAULT_MAX_ROWS = 2000
 DEFAULT_MAX_COLS = 50
@@ -52,13 +52,29 @@ _CANONICAL_COURSES = {normalize_course_name(c): c for c in COURSES}
 _COLUMN_SYNONYMS: dict[str, set[str]] = {
     "nome": {"nome", "name", "participante", "aluno", "nomecompleto"},
     "email": {"email", "e-mail", "correio", "emailaluno"},
-    "documento": {"documento", "cpf", "matricula", "registro", "document", "doc", "ra"},
+    "documento": {
+        "registroacademico",
+        "ra",
+        # Cabeçalhos legados continuam aceitos para planilhas já existentes.
+        "documento",
+        "cpf",
+        "matricula",
+        "registro",
+        "document",
+        "doc",
+    },
     "curso": {"curso", "course", "cursonome"},
     "evento": {"evento", "event", "atividade", "nomeevento"},
     "carga_horaria": {"cargahoraria", "carga", "ch", "horas", "workload", "cargahorariatotal"},
     "data_inicio": {"datainicio", "inicio", "datadeinicio", "start", "startdate"},
     "data_fim": {"datafim", "fim", "termino", "datatermino", "end", "enddate"},
-    "data_emissao": {"dataemissao", "emissao", "datadeemissao", "issuedate", "dataemissaocertificado"},
+    "data_emissao": {
+        "dataemissao",
+        "emissao",
+        "datadeemissao",
+        "issuedate",
+        "dataemissaocertificado",
+    },
 }
 
 REQUIRED_COLUMNS = ("nome", "carga_horaria")
@@ -90,9 +106,9 @@ class SpreadsheetRow:
     nome: str
     carga_horaria: int
     # Optional fields — written by the secretary in the body text when absent.
-    curso: str = ""            # canonical course name when matched, else raw
+    curso: str = ""  # canonical course name when matched, else raw
     evento: str = ""
-    data_emissao: str = ""     # normalised (por extenso) when parseable
+    data_emissao: str = ""  # normalised (por extenso) when parseable
     email: str = ""
     documento: str = ""
     data_inicio: str = ""
@@ -167,7 +183,11 @@ def _norm_text(value: str) -> str:
     return " ".join(s.lower().split())
 
 
-def compute_business_key(row: SpreadsheetRow, body: str | None = None) -> str:
+def compute_business_key(
+    row: SpreadsheetRow,
+    body: str | None = None,
+    certificate_type: str | None = None,
+) -> str:
     """Stable hash identifying a unique certificate (idempotency).
 
     Based on name + document + event + course + workload + issue date, all
@@ -189,6 +209,8 @@ def compute_business_key(row: SpreadsheetRow, body: str | None = None) -> str:
     ]
     if body is not None:
         parts.append(_norm_text(body))
+    if certificate_type is not None:
+        parts.append(_norm_text(certificate_type))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -228,7 +250,10 @@ def enforce_xlsx_limits(
     total_uncompressed = 0
     for info in archive.infolist():
         total_uncompressed += info.file_size
-        if info.compress_size > 0 and (info.file_size / info.compress_size) > _MAX_COMPRESSION_RATIO:
+        if (
+            info.compress_size > 0
+            and (info.file_size / info.compress_size) > _MAX_COMPRESSION_RATIO
+        ):
             raise SpreadsheetError("Planilha rejeitada (possível bomba de descompressão).")
     if total_uncompressed > _MAX_UNCOMPRESSED_BYTES:
         raise SpreadsheetError("Planilha rejeitada: conteúdo descomprimido excede o limite.")
@@ -294,9 +319,7 @@ def read_and_validate(
     has_emissao_default = bool((default_data_emissao or "").strip())
 
     if len(dataframe) > max_rows:
-        raise SpreadsheetError(
-            f"A planilha tem {len(dataframe)} linhas; o limite é {max_rows}."
-        )
+        raise SpreadsheetError(f"A planilha tem {len(dataframe)} linhas; o limite é {max_rows}.")
 
     default_emissao_norm = normalize_date(default_data_emissao) if has_emissao_default else None
 
@@ -344,6 +367,7 @@ def read_and_validate(
         if errors:
             report.invalid.append(InvalidRow(row_number=row_number, data=values, errors=errors))
             continue
+        assert carga is not None  # required and parsed above; narrows for the type checker
 
         report.valid.append(
             SpreadsheetRow(

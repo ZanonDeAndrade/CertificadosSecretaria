@@ -11,21 +11,13 @@ Covers:
   - SQLite migration adds the new columns without losing data.
   - End-to-end generation via LocalStorage persists storage metadata.
 """
+
 from __future__ import annotations
 
 import dataclasses
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-# Ensure both backEnd/ and the repo root are importable.
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import storage_service
 from storage_service import RetrievedFile, download_certificate, get_storage
@@ -81,7 +73,9 @@ class FakeGenerator:
     def render_pdf_bytes_default(self, record, template_path=None, qr_url=None) -> bytes:
         return PDF_BYTES
 
-    def render_pdf_bytes_visual(self, record, layout, *, qr_url=None, background_bytes=None) -> bytes:
+    def render_pdf_bytes_visual(
+        self, record, layout, *, qr_url=None, background_bytes=None
+    ) -> bytes:
         return PDF_BYTES
 
 
@@ -131,18 +125,26 @@ def test_dispatcher_uses_drive_when_file_id_present(monkeypatch):
     fake = FakeDriveStorage()
     stored = fake.save(b"DRIVE-BYTES", filename="d.pdf")
     # Patch the symbol the dispatcher resolves at call time.
-    monkeypatch.setattr(storage_service, "GoogleDriveStorage", lambda *a, **k: fake)
+    folders = []
+
+    def drive_for_folder(*_args, **kwargs):
+        folders.append(kwargs.get("folder_id"))
+        return fake
+
+    monkeypatch.setattr(storage_service, "GoogleDriveStorage", drive_for_folder)
 
     retrieved = download_certificate(
         {
             "storage_provider": "google_drive",
             "drive_file_id": stored.drive_file_id,
+            "drive_folder_id": "folder-event-2026",
             "original_filename": "d.pdf",
         }
     )
     assert isinstance(retrieved, RetrievedFile)
     assert retrieved.content == b"DRIVE-BYTES"
     assert retrieved.filename == "d.pdf"
+    assert folders == ["folder-event-2026"]
 
 
 def test_dispatcher_falls_back_to_local_when_no_drive_id(monkeypatch, tmp_path):
@@ -159,6 +161,25 @@ def test_dispatcher_falls_back_to_local_when_no_drive_id(monkeypatch, tmp_path):
     )
     assert retrieved.content == b"LEGACY-LOCAL"
     assert retrieved.filename == "CERT-X.pdf"  # falls back to code-based name
+
+
+def test_dispatcher_never_reads_local_fallback_in_production(monkeypatch, tmp_path):
+    from database import db
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setattr(db, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(db, "PDFS_DIR", tmp_path / "pdfs")
+    (tmp_path / "pdfs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pdfs" / "legacy.pdf").write_bytes(b"LEGACY-LOCAL")
+
+    with pytest.raises(storage_service.StorageConfigError):
+        download_certificate(
+            {
+                "storage_provider": "local",
+                "pdf_path": "pdfs/legacy.pdf",
+                "unique_code": "CERT-X",
+            }
+        )
 
 
 def test_retrieved_file_never_exposes_drive_link():

@@ -21,3 +21,4 @@ class ParticipantRegistryRecord:
     texto_certificado: str = ""
     certificate_text: str = ""
     data_emissao: str = ""
+    certificate_type: str = ""

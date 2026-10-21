@@ -20,6 +20,7 @@ Path resolution (single source of truth for both projects):
 
 Import-safe: never opens a connection at import time.
 """
+
 from __future__ import annotations
 
 import os
@@ -37,6 +38,9 @@ from .repositories import (
     AuditLogRepository,
     AuthSessionRepository,
     CertificateRepository,
+    EmissionBatchRepository,
+    GoogleDriveIntegrationRepository,
+    InstitutionalSettingsRepository,
     LoginThrottleRepository,
     PublicRateLimitRepository,
     TemplateVersionRepository,
@@ -63,9 +67,7 @@ DATABASE_PATH: Path = _path_from_env(
     REPO_ROOT / "database" / "certificates.db", "DB_PATH", "DATABASE_PATH"
 )
 # Local PDF storage root (development / legacy fallback only).
-STORAGE_DIR: Path = _path_from_env(
-    REPO_ROOT / "storage", "LOCAL_STORAGE_PATH", "STORAGE_DIR"
-)
+STORAGE_DIR: Path = _path_from_env(REPO_ROOT / "storage", "LOCAL_STORAGE_PATH", "STORAGE_DIR")
 PDFS_DIR: Path = STORAGE_DIR / "pdfs"
 
 
@@ -79,9 +81,9 @@ def _current_database_url() -> str:
     raw = config.get_configured_database_url()
     if raw:
         return config.normalize_database_url(raw)
-    if config.is_production():
+    if config.requires_postgresql():
         raise config.ConfigError(
-            "APP_ENV=production exige DATABASE_URL ou DATABASE_URL_FILE (PostgreSQL)."
+            "Este ambiente exige DATABASE_URL ou DATABASE_URL_FILE (PostgreSQL)."
         )
     return f"sqlite:///{Path(DATABASE_PATH).as_posix()}"
 
@@ -115,7 +117,9 @@ _EXTRA_COLUMNS: dict[str, str] = {
     "participant_document": "TEXT",
     "participant_name_normalized": "TEXT",
     "participant_document_hash": "TEXT",
+    "participant_document_hash_key_id": "TEXT",
     "course_name": "TEXT",
+    "certificate_type": "TEXT",
     "workload_hours": "INTEGER",
     "start_date": "TEXT",
     "end_date": "TEXT",
@@ -123,11 +127,28 @@ _EXTRA_COLUMNS: dict[str, str] = {
     "template_used": "TEXT",
     "template_version_id": "INTEGER",
     "template_snapshot": "TEXT",
+    "institutional_snapshot": "TEXT",
     "issued_by": "INTEGER",
+    "batch_id": "TEXT",
     "revoked_at": "TEXT",
     "revoked_by": "INTEGER",
     "revoke_reason": "TEXT",
     "updated_at": "TEXT",
+    "reissue_count": "INTEGER NOT NULL DEFAULT 0",
+    "reissued_at": "TEXT",
+    "reissued_by": "INTEGER",
+}
+
+_ADMIN_USER_EXTRA_COLUMNS: dict[str, str] = {
+    "name": "TEXT",
+    "must_change_password": "INTEGER NOT NULL DEFAULT 0",
+    "password_changed_at": "TEXT",
+    "updated_at": "TEXT",
+    "created_by": "INTEGER",
+}
+
+_EMISSION_BATCH_EXTRA_COLUMNS: dict[str, str] = {
+    "certificate_type": "TEXT",
 }
 
 _INDEXES: tuple[str, ...] = (
@@ -139,8 +160,13 @@ _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_certificates_status ON certificates (status)",
     # Chronological ordering/filtering uses the real (ISO) issue date.
     "CREATE INDEX IF NOT EXISTS idx_certificates_issue_date ON certificates (issue_date)",
+    "CREATE INDEX IF NOT EXISTS idx_certificates_batch_id ON certificates (batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_certificates_certificate_type ON certificates (certificate_type)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_certificates_business_key ON certificates (business_key)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_action_created_at ON audit_log (action, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_actor_created_at ON audit_log (actor_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log (target_type, target_id)",
 )
 
 
@@ -151,15 +177,29 @@ def _legacy_sqlite_migrate(eng) -> None:
     """
     with eng.begin() as conn:
         existing = {
-            row[1]
-            for row in conn.exec_driver_sql("PRAGMA table_info(certificates)").fetchall()
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(certificates)").fetchall()
         }
         if existing:  # table already there → add any missing columns
             for column, ddl in _EXTRA_COLUMNS.items():
                 if column not in existing:
-                    conn.exec_driver_sql(
-                        f"ALTER TABLE certificates ADD COLUMN {column} {ddl}"
-                    )
+                    conn.exec_driver_sql(f"ALTER TABLE certificates ADD COLUMN {column} {ddl}")
+        existing_users = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(admin_users)").fetchall()
+        }
+        if existing_users:
+            for column, ddl in _ADMIN_USER_EXTRA_COLUMNS.items():
+                if column not in existing_users:
+                    conn.exec_driver_sql(f"ALTER TABLE admin_users ADD COLUMN {column} {ddl}")
+            conn.exec_driver_sql(
+                "UPDATE admin_users SET name = username WHERE name IS NULL OR trim(name) = ''"
+            )
+        existing_batches = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(emission_batches)").fetchall()
+        }
+        if existing_batches:
+            for column, ddl in _EMISSION_BATCH_EXTRA_COLUMNS.items():
+                if column not in existing_batches:
+                    conn.exec_driver_sql(f"ALTER TABLE emission_batches ADD COLUMN {column} {ddl}")
         for statement in _INDEXES:
             conn.exec_driver_sql(statement)
 
@@ -167,47 +207,98 @@ def _legacy_sqlite_migrate(eng) -> None:
 def init_db() -> None:
     """Ensure the schema exists. Idempotent; safe on every startup.
 
-    - **production**: schema is owned by Alembic; this only checks connectivity.
-    - **dev/test**: creates the tables from the ORM metadata and applies the
-      legacy SQLite auto-migration for old databases.
+    - **PostgreSQL in every environment**: the schema is owned exclusively by
+      Alembic; this function only checks connectivity. Running ORM ``create_all``
+      against a database on an older revision can pre-create future tables and
+      make the next migration fail with ``DuplicateTable``.
+    - **SQLite dev/test**: creates tables from the ORM metadata and applies the
+      legacy auto-migration for old local databases.
     """
     url = _current_database_url()
     eng = engine.get_engine(url)
-    if config.is_production():
+    if not config.is_sqlite_url(url):
         with eng.connect() as conn:
             conn.execute(text("SELECT 1"))
         return
     Base.metadata.create_all(eng)
-    if config.is_sqlite_url(url):
-        _legacy_sqlite_migrate(eng)
+    _legacy_sqlite_migrate(eng)
 
 
-def prepare_private_data() -> int:
-    """Backfill searchable names/hashes and erase legacy plaintext when configured."""
-    from .privacy import document_hash, normalize_name
-    from .models import Certificate
+def prepare_private_data(
+    retention_days: int | None = None,
+    *,
+    batch_size: int = 500,
+    max_rows: int | None = None,
+) -> int:
+    """Explicit, bounded backfill; never called as part of application startup."""
     from sqlalchemy import select
 
+    from .models import Certificate
+    from .privacy import (
+        LEGACY_DOCUMENT_KEY_ID,
+        document_hash_with_key_id,
+        normalize_name,
+    )
+
     changed = 0
-    minimize = os.getenv("MINIMIZE_DOCUMENT_PLAINTEXT", "true").strip().lower() not in {"0", "false", "no"}
+    processed = 0
+    last_id = 0
+    batch_size = max(1, min(int(batch_size), 5000))
+    while max_rows is None or processed < max_rows:
+        current_limit = (
+            batch_size if max_rows is None else min(batch_size, max(0, int(max_rows) - processed))
+        )
+        if current_limit <= 0:
+            break
+        with _session() as session:
+            rows = (
+                session.execute(
+                    select(Certificate)
+                    .where(Certificate.id > last_id)
+                    .order_by(Certificate.id)
+                    .limit(current_limit)
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                break
+            last_id = int(rows[-1].id)
+            processed += len(rows)
+            for row in rows:
+                normalized_name = normalize_name(row.participant_name)
+                if row.participant_document_hash:
+                    hashed_document = row.participant_document_hash
+                    hash_key_id = row.participant_document_hash_key_id or LEGACY_DOCUMENT_KEY_ID
+                else:
+                    hashed_document, hash_key_id = document_hash_with_key_id(
+                        row.participant_document
+                    )
+                if row.participant_name_normalized != normalized_name:
+                    row.participant_name_normalized = normalized_name
+                    changed += 1
+                if row.participant_document_hash != hashed_document:
+                    row.participant_document_hash = hashed_document
+                    changed += 1
+                if row.participant_document_hash_key_id != hash_key_id:
+                    row.participant_document_hash_key_id = hash_key_id
+                    changed += 1
+                if row.participant_document is not None:
+                    row.participant_document = None
+                    changed += 1
+
     with _session() as session:
-        rows = session.execute(select(Certificate)).scalars().all()
-        for row in rows:
-            normalized_name = normalize_name(row.participant_name)
-            hashed_document = row.participant_document_hash or document_hash(row.participant_document)
-            if row.participant_name_normalized != normalized_name:
-                row.participant_name_normalized = normalized_name
-                changed += 1
-            if row.participant_document_hash != hashed_document:
-                row.participant_document_hash = hashed_document
-                changed += 1
-            if minimize and row.participant_document is not None:
-                row.participant_document = None
-                changed += 1
-        try:
-            retention_days = max(0, int(os.getenv("PRIVATE_DATA_RETENTION_DAYS", "0")))
-        except ValueError:
-            retention_days = 0
+        # Retention is a set-based database operation, so it does not materialize
+        # the certificate table in process memory.
+        if retention_days is None:
+            settings = InstitutionalSettingsRepository(session).get()
+            if settings is not None:
+                retention_days = int(settings.get("retention_days") or 0)
+            else:
+                try:
+                    retention_days = max(0, int(os.getenv("PRIVATE_DATA_RETENTION_DAYS", "0")))
+                except ValueError:
+                    retention_days = 0
         if retention_days:
             cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
             result = session.execute(
@@ -225,6 +316,7 @@ def prepare_private_data() -> int:
 
 # ── Certificates: writes ────────────────────────────────────────────────────────
 
+
 def insert_certificates(rows: list[dict]) -> None:
     """Strict insert (no INSERT OR IGNORE). Raises on a UNIQUE conflict."""
     if not rows:
@@ -234,6 +326,7 @@ def insert_certificates(rows: list[dict]) -> None:
 
 
 # ── Saga: reservation / finalization / failure ──────────────────────────────────
+
 
 def reserve_certificate(
     *,
@@ -255,6 +348,25 @@ def reserve_certificate(
     if business_key:
         existing = get_by_business_key(business_key)
         if existing is not None:
+            batch_id = str(fields.get("batch_id") or "")
+            retryable = (
+                batch_id
+                and str(existing.get("batch_id") or "") == batch_id
+                and existing.get("status") == "failed"
+                and not existing.get("drive_file_id")
+                and not existing.get("pdf_path")
+            )
+            if retryable:
+                with _session() as s:
+                    reopened = CertificateRepository(s).retry_failed_reservation(
+                        code=str(existing["unique_code"]),
+                        business_key=business_key,
+                        batch_id=batch_id,
+                        fields=fields,
+                    )
+                if reopened:
+                    return str(existing["unique_code"]), None
+                existing = get_by_business_key(business_key)
             return None, existing
 
     for _ in range(max_attempts):
@@ -273,9 +385,7 @@ def reserve_certificate(
                 if existing is not None:
                     return None, existing
             continue
-    raise RuntimeError(
-        "Não foi possível reservar um código único após várias tentativas."
-    )
+    raise RuntimeError("Não foi possível reservar um código único após várias tentativas.")
 
 
 def finalize_certificate(unique_code: str, drive_fields: dict) -> bool:
@@ -307,19 +417,21 @@ def clear_certificate_storage(unique_code: str) -> bool:
         return CertificateRepository(s).clear_storage(unique_code)
 
 
-def list_pending_certificates(cutoff: datetime) -> list[dict]:
+def list_pending_certificates(
+    cutoff: datetime, *, after_id: int = 0, limit: int | None = None
+) -> list[dict]:
     with _session() as s:
-        return CertificateRepository(s).pending_older_than(cutoff)
+        return CertificateRepository(s).pending_older_than(cutoff, after_id=after_id, limit=limit)
 
 
-def list_active_without_file() -> list[dict]:
+def list_active_without_file(*, after_id: int = 0, limit: int | None = None) -> list[dict]:
     with _session() as s:
-        return CertificateRepository(s).active_without_file()
+        return CertificateRepository(s).active_without_file(after_id=after_id, limit=limit)
 
 
-def list_failed_with_orphan() -> list[dict]:
+def list_failed_with_orphan(*, after_id: int = 0, limit: int | None = None) -> list[dict]:
     with _session() as s:
-        return CertificateRepository(s).failed_with_orphan_file()
+        return CertificateRepository(s).failed_with_orphan_file(after_id=after_id, limit=limit)
 
 
 def block_certificate_integrity(unique_code: str) -> bool:
@@ -328,10 +440,28 @@ def block_certificate_integrity(unique_code: str) -> bool:
         return CertificateRepository(s).set_integrity_blocked(unique_code, True)
 
 
-def list_active_with_remote_file() -> list[dict]:
+def rotate_certificate_document_hash(
+    unique_code: str,
+    *,
+    expected_hash: str,
+    new_hash: str,
+    new_key_id: str,
+) -> bool:
+    """Persist a lazy HMAC rotation without ever receiving plaintext."""
+
+    with _session() as s:
+        return CertificateRepository(s).rotate_document_hash(
+            unique_code,
+            expected_hash=expected_hash,
+            new_hash=new_hash,
+            new_key_id=new_key_id,
+        )
+
+
+def list_active_with_remote_file(*, after_id: int = 0, limit: int | None = None) -> list[dict]:
     """Active, non-blocked certificates that have a file to verify periodically."""
     with _session() as s:
-        return CertificateRepository(s).active_with_remote_file()
+        return CertificateRepository(s).active_with_remote_file(after_id=after_id, limit=limit)
 
 
 def drive_file_index() -> dict[str, str]:
@@ -340,7 +470,13 @@ def drive_file_index() -> dict[str, str]:
         return CertificateRepository(s).drive_file_index()
 
 
+def drive_file_index_by_folder() -> dict[str | None, dict[str, str]]:
+    with _session() as s:
+        return CertificateRepository(s).drive_file_index_by_folder()
+
+
 # ── Certificates: reads ─────────────────────────────────────────────────────────
+
 
 def get_by_code(unique_code: str) -> dict | None:
     with _session() as s:
@@ -381,8 +517,12 @@ def list_certificates(
     code: str | None = None,
     course: str | None = None,
     event: str | None = None,
+    certificate_type: str | None = None,
     status: str | None = None,
     statuses: tuple[str, ...] | None = None,
+    issue_date_from: str | None = None,
+    issue_date_to: str | None = None,
+    batch_id: str | None = None,
     order_by: str = "created_at",
     descending: bool = True,
     limit: int = 20,
@@ -390,9 +530,45 @@ def list_certificates(
 ) -> tuple[list[dict], int]:
     with _session() as s:
         return CertificateRepository(s).list(
-            name=name, code=code, course=course, event=event, status=status, statuses=statuses,
-            order_by=order_by, descending=descending, limit=limit, offset=offset,
+            name=name,
+            code=code,
+            course=course,
+            event=event,
+            certificate_type=certificate_type,
+            status=status,
+            statuses=statuses,
+            issue_date_from=issue_date_from,
+            issue_date_to=issue_date_to,
+            batch_id=batch_id,
+            order_by=order_by,
+            descending=descending,
+            limit=limit,
+            offset=offset,
         )
+
+
+def list_certificates_by_document_hashes(
+    hashes_by_key_id: dict[str, str],
+    *,
+    statuses: tuple[str, ...] = ("ativo", "revogado"),
+) -> list[dict]:
+    """Find certificates by versioned RA hashes, never by plaintext RA."""
+
+    with _session() as s:
+        return CertificateRepository(s).list_by_document_hashes(
+            hashes_by_key_id,
+            statuses=statuses,
+        )
+
+
+def certificate_dashboard_stats(recent_days: int = 30) -> dict:
+    with _session() as s:
+        return CertificateRepository(s).dashboard_stats(recent_days=recent_days)
+
+
+def recent_certificates(limit: int = 8) -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).recent(limit=limit)
 
 
 def certificates_pending_drive_migration() -> list[dict]:
@@ -422,9 +598,22 @@ def set_drive_metadata(
         )
 
 
-def update_certificate_file(unique_code: str, fields: dict) -> bool:
+def update_certificate_file(
+    unique_code: str, fields: dict, *, reissued_by: int | None = None
+) -> bool:
     with _session() as s:
-        return CertificateRepository(s).update_file(unique_code, fields)
+        return CertificateRepository(s).update_file(unique_code, fields, reissued_by=reissued_by)
+
+
+def restore_certificate_file(unique_code: str, fields: dict, *, expected_checksum: str) -> bool:
+    """Attach a verified PDF backup without changing reissue history."""
+
+    with _session() as s:
+        return CertificateRepository(s).restore_file(
+            unique_code,
+            fields,
+            expected_checksum=expected_checksum,
+        )
 
 
 def update_certificate_status(
@@ -433,14 +622,20 @@ def update_certificate_status(
     status: str,
     revoked_by: int | None = None,
     revoke_reason: str | None = None,
+    expected_status: str | None = None,
 ) -> bool:
     with _session() as s:
         return CertificateRepository(s).update_status(
-            unique_code, status=status, revoked_by=revoked_by, revoke_reason=revoke_reason
+            unique_code,
+            status=status,
+            revoked_by=revoked_by,
+            revoke_reason=revoke_reason,
+            expected_status=expected_status,
         )
 
 
 # ── Admin users ─────────────────────────────────────────────────────────────────
+
 
 def get_admin_user_by_username(username: str) -> dict | None:
     with _session() as s:
@@ -452,14 +647,39 @@ def get_admin_user_by_id(user_id: int) -> dict | None:
         return AdminUserRepository(s).get_by_id(user_id)
 
 
-def create_admin_user(username: str, password_hash: str, role: str = "secretaria") -> int | None:
+def create_admin_user(
+    username: str,
+    password_hash: str,
+    role: str = "secretaria",
+    *,
+    name: str | None = None,
+    must_change_password: bool = False,
+    created_by: int | None = None,
+) -> int | None:
     with _session() as s:
-        return AdminUserRepository(s).create(username, password_hash, role)
+        return AdminUserRepository(s).create(
+            username,
+            password_hash,
+            role,
+            name=name,
+            must_change_password=must_change_password,
+            created_by=created_by,
+        )
 
 
 def count_admin_users() -> int:
     with _session() as s:
         return AdminUserRepository(s).count()
+
+
+def list_admin_users() -> list[dict]:
+    with _session() as s:
+        return AdminUserRepository(s).list_all()
+
+
+def count_active_admins(exclude_user_id: int | None = None) -> int:
+    with _session() as s:
+        return AdminUserRepository(s).count_active_admins(exclude_user_id=exclude_user_id)
 
 
 def set_admin_user_active(user_id: int, active: bool) -> bool:
@@ -473,6 +693,30 @@ def set_admin_user_active(user_id: int, active: bool) -> bool:
 def set_admin_user_role(user_id: int, role: str) -> bool:
     with _session() as s:
         return AdminUserRepository(s).set_role(user_id, role)
+
+
+def update_admin_user(
+    user_id: int,
+    *,
+    name: str | None = None,
+    username: str | None = None,
+    role: str | None = None,
+) -> bool:
+    with _session() as s:
+        return AdminUserRepository(s).update_identity_and_role(
+            user_id, name=name, username=username, role=role
+        )
+
+
+def set_admin_user_password(
+    user_id: int, password_hash: str, *, must_change_password: bool
+) -> bool:
+    with _session() as s:
+        return AdminUserRepository(s).set_password(
+            user_id,
+            password_hash,
+            must_change_password=must_change_password,
+        )
 
 
 # ── Revocable authentication sessions ───────────────────────────────────────
@@ -501,14 +745,26 @@ def get_active_auth_session(session_id: str, now: datetime) -> dict | None:
         return AuthSessionRepository(s).get_active(session_id, now)
 
 
+def get_active_auth_session_user(session_id: str, now: datetime) -> dict | None:
+    with _session() as s:
+        return AuthSessionRepository(s).get_active_user(session_id, now)
+
+
 def revoke_auth_session(session_id: str, reason: str = "logout") -> bool:
     with _session() as s:
         return AuthSessionRepository(s).revoke(session_id, reason)
 
 
-def revoke_all_auth_sessions(user_id: int, reason: str = "revoke_all") -> int:
+def revoke_all_auth_sessions(
+    user_id: int,
+    reason: str = "revoke_all",
+    *,
+    exclude_session_id: str | None = None,
+) -> int:
     with _session() as s:
-        return AuthSessionRepository(s).revoke_all(user_id, reason)
+        return AuthSessionRepository(s).revoke_all(
+            user_id, reason, exclude_session_id=exclude_session_id
+        )
 
 
 def cleanup_auth_sessions(before: datetime) -> int:
@@ -583,7 +839,205 @@ def cleanup_public_rate_limits(before: datetime) -> int:
         return PublicRateLimitRepository(s).cleanup(before)
 
 
+# ── Institutional settings ───────────────────────────────────────────────────
+
+
+def get_google_drive_connection(user_id: int) -> dict | None:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).connection(user_id)
+
+
+def get_google_drive_connection_by_state(state_hash: str) -> dict | None:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).connection_by_state(state_hash)
+
+
+def store_google_drive_oauth_state(user_id: int, values: dict) -> dict:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).store_state(user_id, values)
+
+
+def consume_google_drive_oauth_state(user_id: int, state_hash: str) -> bool:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).consume_state(user_id, state_hash)
+
+
+def complete_google_drive_connection(user_id: int, values: dict) -> bool:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).complete_connection(user_id, values)
+
+
+def clear_google_drive_connection(user_id: int) -> int:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).clear_connection(user_id)
+
+
+def upsert_google_drive_folder_grant(values: dict) -> dict:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).upsert_grant(values)
+
+
+def get_google_drive_folder_grant(user_id: int, folder_hash: str) -> dict | None:
+    with _session() as s:
+        return GoogleDriveIntegrationRepository(s).grant(user_id, folder_hash)
+
+
+def get_institutional_settings() -> dict | None:
+    with _session() as s:
+        return InstitutionalSettingsRepository(s).get()
+
+
+def create_institutional_settings(values: dict) -> dict:
+    with _session() as s:
+        return InstitutionalSettingsRepository(s).create(values)
+
+
+def update_institutional_settings(values: dict, *, actor_id: int | None = None) -> dict | None:
+    with _session() as s:
+        return InstitutionalSettingsRepository(s).update(values, actor_id=actor_id)
+
+
+# ── Emission batches ─────────────────────────────────────────────────────────
+
+
+def create_emission_batch(values: dict, items: list[dict] | None = None) -> dict:
+    with _session() as s:
+        return EmissionBatchRepository(s).create(values, items)
+
+
+def get_emission_batch(batch_id: str) -> dict | None:
+    with _session() as s:
+        return EmissionBatchRepository(s).get(batch_id)
+
+
+def get_emission_batch_by_idempotency_key(key: str) -> dict | None:
+    with _session() as s:
+        return EmissionBatchRepository(s).get_by_idempotency_key(key)
+
+
+def get_emission_batch_items(
+    batch_id: str, *, statuses: tuple[str, ...] | None = None
+) -> list[dict]:
+    with _session() as s:
+        return EmissionBatchRepository(s).items(batch_id, statuses=statuses)
+
+
+def claim_emission_batch(
+    *,
+    worker_id: str,
+    now: datetime,
+    lease_expires_at: datetime,
+    batch_id: str | None = None,
+) -> dict | None:
+    with _session() as s:
+        return EmissionBatchRepository(s).claim(
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=lease_expires_at,
+            batch_id=batch_id,
+        )
+
+
+def heartbeat_emission_batch(
+    batch_id: str,
+    *,
+    worker_id: str,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).heartbeat(
+            batch_id,
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=lease_expires_at,
+        )
+
+
+def mark_emission_batch_item_processing(item_id: int, *, now: datetime) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).mark_item_processing(item_id, now=now)
+
+
+def mark_emission_batch_item(
+    item_id: int,
+    *,
+    status: str,
+    certificate_code: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    clear_payload: bool = False,
+) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).mark_item(
+            item_id,
+            status=status,
+            certificate_code=certificate_code,
+            error_code=error_code,
+            error_message=error_message,
+            clear_payload=clear_payload,
+        )
+
+
+def emission_batch_item_counts(batch_id: str) -> dict[str, int]:
+    with _session() as s:
+        return EmissionBatchRepository(s).counts(batch_id)
+
+
+def purge_terminal_emission_payloads(before: datetime) -> int:
+    with _session() as s:
+        return EmissionBatchRepository(s).purge_terminal_payloads(before)
+
+
+def request_emission_batch_cancel(batch_id: str, *, now: datetime) -> str | None:
+    with _session() as s:
+        return EmissionBatchRepository(s).request_cancel(batch_id, now=now)
+
+
+def cancel_remaining_emission_batch_items(batch_id: str, *, now: datetime) -> int:
+    with _session() as s:
+        return EmissionBatchRepository(s).cancel_remaining(batch_id, now=now)
+
+
+def release_emission_batch(
+    batch_id: str,
+    *,
+    worker_id: str,
+    retry_at: datetime | None,
+    error_code: str,
+    error_message: str,
+    now: datetime,
+) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).release(
+            batch_id,
+            worker_id=worker_id,
+            retry_at=retry_at,
+            error_code=error_code,
+            error_message=error_message,
+            now=now,
+        )
+
+
+def retry_emission_batch(batch_id: str, *, now: datetime) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).retry(batch_id, now=now)
+
+
+def update_emission_batch(batch_id: str, values: dict) -> bool:
+    with _session() as s:
+        return EmissionBatchRepository(s).update(batch_id, values)
+
+
+def list_emission_batches(
+    *, created_by: int | None = None, limit: int = 20, offset: int = 0
+) -> tuple[list[dict], int]:
+    with _session() as s:
+        return EmissionBatchRepository(s).list(created_by=created_by, limit=limit, offset=offset)
+
+
 # ── Template versions (single global template) ──────────────────────────────────
+
 
 def create_template_version(
     *,
@@ -637,7 +1091,18 @@ def activate_template_version(version_id: int, actor: int | None = None) -> bool
         return TemplateVersionRepository(s).activate(version_id, actor)
 
 
+def rename_template_version(version_id: int, name: str) -> dict | None:
+    with _session() as s:
+        return TemplateVersionRepository(s).rename(version_id, name)
+
+
+def delete_template_version_if_unused(version_id: int) -> tuple[str, dict | None]:
+    with _session() as s:
+        return TemplateVersionRepository(s).delete_if_unused(version_id)
+
+
 # ── Audit log ───────────────────────────────────────────────────────────────────
+
 
 def insert_audit_log(
     *,
@@ -661,4 +1126,31 @@ def insert_audit_log(
 
 def list_audit_logs(action: str | None = None, limit: int = 100) -> list[dict]:
     with _session() as s:
-        return AuditLogRepository(s).list(action=action, limit=limit)
+        rows, _total = AuditLogRepository(s).list(action=action, limit=limit)
+        return rows
+
+
+def list_audit_logs_page(
+    *,
+    action: str | None = None,
+    actions: tuple[str, ...] | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    with _session() as s:
+        return AuditLogRepository(s).list(
+            action=action,
+            actions=actions,
+            actor=actor,
+            target_type=target_type,
+            target_id=target_id,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            offset=offset,
+        )

@@ -13,13 +13,30 @@ x-app: &app
   build:
     context: .
     dockerfile: Dockerfile
-  image: certificados-app:latest
-  env_file: .env
+    target: runtime
+  image: certificados-app:dev
+  env_file: ${DEVELOPMENT_ENV_FILE:-.env}
   restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  mem_limit: 1g
+  cpus: 1.0
 
 services:
+  storage-init:
+    image: alpine:3.24
+    command:
+      ["sh", "-ec", "mkdir -p /data/storage/pdfs && chown -R 10001:10001 /data/storage && chmod 750 /data/storage /data/storage/pdfs"]
+    volumes:
+      - storage_data:/data/storage
+    restart: "no"
+
   db:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -37,34 +54,81 @@ services:
   migrate:
     <<: *app
     restart: "no"
-    command: >
-      sh -c "alembic upgrade head &&
-             python certificados-admin/backEnd/seed_template.py"
+    environment:
+      APP_TARGET: migrate
     depends_on:
       db:
         condition: service_healthy
 
   admin:
     <<: *app
-    command: >
-      uvicorn main:app --host 0.0.0.0 --port 8000
-      --app-dir certificados-admin/backEnd --workers ${ADMIN_WORKERS:-1}
+    environment:
+      APP_TARGET: admin
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      BATCH_WORKER_MODE: external
+      PORT: 8000
+      WEB_CONCURRENCY: ${ADMIN_WORKERS:-1}
+    volumes:
+      - storage_data:/data/storage
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
 
   consulta:
     <<: *app
-    command: >
-      uvicorn app:app --host 0.0.0.0 --port 8001
-      --app-dir certificados-consulta --workers ${CONSULTA_WORKERS:-1}
+    environment:
+      APP_TARGET: consulta
+      GOOGLE_DRIVE_ACCESS_MODE: read_only
+      PORT: 8001
+      WEB_CONCURRENCY: ${CONSULTA_WORKERS:-1}
+    volumes:
+      - storage_data:/data/storage:ro
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *app
+    environment:
+      APP_TARGET: worker
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      BATCH_WORKER_MODE: external
+    command: ["--max-jobs", "1000", "--poll-seconds", "2"]
+    volumes:
+      - storage_data:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "from database import db; db.check_connection()"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
 
   web:
     build:
@@ -73,12 +137,24 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     depends_on:
-      - admin
-      - consulta
+      admin:
+        condition: service_healthy
+      consulta:
+        condition: service_healthy
     ports:
-      - "80:80"        # consulta (público)
-      - "8080:8080"    # admin (SPA + /api)
+      - "80:8080"        # consulta (público)
+      - "8080:8081"      # admin (SPA + /api)
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
 
 volumes:
   pgdata:
+  storage_data:

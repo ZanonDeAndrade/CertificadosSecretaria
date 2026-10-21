@@ -5,6 +5,7 @@ each token carries a ``jti`` backed by ``auth_sessions``. Login throttling is
 also persisted in the shared SQL database, so both controls work across
 workers and deployments without process-local state.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,34 +15,39 @@ import logging
 import math
 import os
 import secrets
-import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
-
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
 
 import bcrypt
 import jwt
 from fastapi import HTTPException, Request
 
-from database import config as db_config  # noqa: E402
-from database import db  # noqa: E402
+from database import config as db_config
+from database import db
 
 LOGGER = logging.getLogger("certificados.auth")
+_EPHEMERAL_SECRET: str | None = None
 
 COOKIE_NAME = "admin_token"
 JWT_ALGORITHM = "HS256"
 MIN_JWT_SECRET_BYTES = 32
 MIN_ESTIMATED_SECRET_ENTROPY_BITS = 128.0
+MAX_USERNAME_LENGTH = 150
+MIN_NEW_PASSWORD_LENGTH = 6
+MAX_BCRYPT_PASSWORD_BYTES = 72
 VALID_ROLES = frozenset({"admin", "secretaria", "auditor"})
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_COMMON_PASSWORDS = frozenset(
+    {
+        "123456789012",
+        "administrador",
+        "admin12345678",
+        "password1234",
+        "senha12345678",
+    }
+)
 
 
 def _env(*names: str) -> str:
@@ -56,8 +62,21 @@ def _is_production() -> bool:
     return (os.getenv("APP_ENV") or "").strip().lower() in ("prod", "production")
 
 
+def _is_local_server() -> bool:
+    return (os.getenv("APP_ENV") or "").strip().lower() in {
+        "local_server",
+        "local-server",
+        "lan",
+    }
+
+
 def is_production() -> bool:
     return _is_production()
+
+
+def is_hardened_environment() -> bool:
+    """Production and local-server both require real secrets and closed docs."""
+    return _is_production() or _is_local_server()
 
 
 def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
@@ -72,9 +91,7 @@ def _estimated_entropy_bits(material: bytes) -> float:
         return 0.0
     counts = Counter(material)
     length = len(material)
-    per_byte = -sum(
-        (count / length) * math.log2(count / length) for count in counts.values()
-    )
+    per_byte = -sum((count / length) * math.log2(count / length) for count in counts.values())
     return per_byte * length
 
 
@@ -97,18 +114,16 @@ def validate_jwt_secret(secret: str) -> None:
 def _jwt_secret() -> str:
     secret = db_config.read_secret("JWT_SECRET")
     if secret:
-        if _is_production():
+        if is_hardened_environment():
             validate_jwt_secret(secret)
         return secret
-    if _is_production():
-        raise RuntimeError("APP_ENV=production exige JWT_SECRET forte.")
+    if is_hardened_environment():
+        raise RuntimeError("Este ambiente exige JWT_SECRET forte.")
     global _EPHEMERAL_SECRET
-    try:
-        return _EPHEMERAL_SECRET
-    except NameError:
+    if _EPHEMERAL_SECRET is None:
         _EPHEMERAL_SECRET = secrets.token_urlsafe(48)
         LOGGER.warning("JWT_SECRET não definido; usando segredo efêmero apenas em desenvolvimento.")
-        return _EPHEMERAL_SECRET
+    return _EPHEMERAL_SECRET
 
 
 def cookie_secure() -> bool:
@@ -129,7 +144,7 @@ def cookie_samesite() -> str:
 
 def require_production_secret() -> None:
     """Backward-compatible entry point for startup validation."""
-    if not _is_production():
+    if not is_hardened_environment():
         return
     secret = db_config.read_secret("JWT_SECRET")
     if not secret:
@@ -138,11 +153,11 @@ def require_production_secret() -> None:
 
 
 def require_production_auth_config() -> None:
-    if not _is_production():
+    if not is_hardened_environment():
         cookie_samesite()  # validate explicit dev/test configuration too
         return
     require_production_secret()
-    if not cookie_secure():
+    if _is_production() and not cookie_secure():
         raise RuntimeError("Em produção, AUTH_COOKIE_SECURE não pode ser desativado.")
     cookie_samesite()
 
@@ -186,13 +201,59 @@ def login_backoff_max_ms() -> int:
 # ── Password hashing ─────────────────────────────────────────────────────────
 
 
+def validate_username(username: str) -> str:
+    clean = username.strip()
+    if not clean or len(clean) > MAX_USERNAME_LENGTH:
+        raise ValueError(f"O usuário deve ter entre 1 e {MAX_USERNAME_LENGTH} caracteres.")
+    if any(ord(character) < 32 for character in clean):
+        raise ValueError("O usuário não pode conter caracteres de controle.")
+    return clean
+
+
+def _validate_bcrypt_input(plain: str) -> bytes:
+    if not isinstance(plain, str) or not plain:
+        raise ValueError("A senha não pode ser vazia.")
+    material = plain.encode("utf-8")
+    if len(material) > MAX_BCRYPT_PASSWORD_BYTES:
+        raise ValueError(f"A senha deve ter no máximo {MAX_BCRYPT_PASSWORD_BYTES} bytes UTF-8.")
+    return material
+
+
+def validate_new_password(password: str, *, username: str | None = None) -> None:
+    """Apply one policy to seeded and CLI-created administrative passwords."""
+
+    _validate_bcrypt_input(password)
+    if len(password) < MIN_NEW_PASSWORD_LENGTH:
+        raise ValueError(f"A senha deve ter ao menos {MIN_NEW_PASSWORD_LENGTH} caracteres.")
+    normalized = password.casefold()
+    if normalized in _COMMON_PASSWORDS:
+        raise ValueError("A senha escolhida é muito comum.")
+    if any(ord(character) < 32 for character in password):
+        raise ValueError("A senha não pode conter caracteres de controle.")
+    missing_requirements = []
+    if not any(character.isupper() for character in password):
+        missing_requirements.append("uma letra maiúscula")
+    if not any(character.islower() for character in password):
+        missing_requirements.append("uma letra minúscula")
+    if not any("0" <= character <= "9" for character in password):
+        missing_requirements.append("um número")
+    if not any(not character.isalnum() and not character.isspace() for character in password):
+        missing_requirements.append("um caractere especial")
+    if missing_requirements:
+        raise ValueError("A senha deve conter " + ", ".join(missing_requirements) + ".")
+    if username:
+        clean_username = validate_username(username).casefold()
+        if len(clean_username) >= 4 and clean_username in normalized:
+            raise ValueError("A senha não pode conter o nome de usuário.")
+
+
 def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(_validate_bcrypt_input(plain), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+        return bcrypt.checkpw(_validate_bcrypt_input(plain), hashed.encode("utf-8"))
     except (ValueError, TypeError):
         return False
 
@@ -202,7 +263,12 @@ _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(24))
 
 
 def _authenticate_with_reason(username: str, password: str) -> tuple[dict | None, str]:
-    user = db.get_admin_user_by_username(username.strip())
+    try:
+        clean_username = validate_username(username)
+        _validate_bcrypt_input(password)
+    except ValueError:
+        return None, "invalid_credentials"
+    user = db.get_admin_user_by_username(clean_username)
     password_hash = user["password_hash"] if user else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(password, password_hash)
     if not user or not password_ok:
@@ -259,12 +325,12 @@ def _audit_login(
     ip_hash: str,
     reason: str,
     actor_id: int | None = None,
-    session_id: str | None = None,
     failures: int | None = None,
 ) -> None:
-    details = {"reason": reason, "ip_hash": ip_hash}
-    if session_id:
-        details["session_id"] = session_id
+    # The audit trail needs the outcome, not an authentication/session token or
+    # a network fingerprint. The hashed IP remains available only to the
+    # dedicated throttling records for their short retention window.
+    details: dict[str, str | int] = {"reason": reason, "ip_hash": ip_hash}
     if failures is not None:
         details["failures"] = failures
     db.insert_audit_log(
@@ -277,9 +343,7 @@ def _audit_login(
     )
 
 
-async def login_with_throttling(
-    username: str, password: str, request: Request
-) -> tuple[dict, str]:
+async def login_with_throttling(username: str, password: str, request: Request) -> tuple[dict, str]:
     now = datetime.now(timezone.utc)
     ip_hash, user_agent_hash = _request_fingerprint(request)
     user_hash = _hash_identifier("user", username)
@@ -328,18 +392,14 @@ async def login_with_throttling(
             failures=failures,
         )
         if newly_blocked:
-            retry_after = max(
-                1, math.ceil((max(newly_blocked) - now).total_seconds())
-            )
-            raise LoginRejected(
-                429, "Muitas tentativas. Tente novamente mais tarde.", retry_after
-            )
+            retry_after = max(1, math.ceil((max(newly_blocked) - now).total_seconds()))
+            raise LoginRejected(429, "Muitas tentativas. Tente novamente mais tarde.", retry_after)
         raise LoginRejected(401, "Usuário ou senha inválidos.")
 
     # A valid login clears only this username's state. IP state remains so one
     # known credential cannot reset brute-force attempts against other users.
     db.clear_login_throttle("user", user_hash)
-    token, session_id = create_session_token(
+    token, _session_id = create_session_token(
         user, ip_hash=ip_hash, user_agent_hash=user_agent_hash
     )
     _audit_login(
@@ -348,7 +408,6 @@ async def login_with_throttling(
         ip_hash=ip_hash,
         reason="success",
         actor_id=user["id"],
-        session_id=session_id,
     )
     # Successful logins are low-volume and provide a safe periodic cleanup
     # trigger in addition to startup cleanup (no process-local scheduler/state).
@@ -410,7 +469,13 @@ def _extract_token(request: Request) -> tuple[str | None, str | None]:
     return None, None
 
 
-async def get_current_admin(request: Request) -> dict:
+def get_current_session_user(request: Request) -> dict:
+    """Authenticate a revocable session, including first-login sessions.
+
+    Only the self-service password and session endpoints should depend on this
+    lower-level function. Business endpoints use :func:`get_current_admin`,
+    which also enforces completion of the temporary-password flow.
+    """
     token, source = _extract_token(request)
     if not token:
         raise HTTPException(status_code=401, detail="Não autenticado.")
@@ -422,10 +487,9 @@ async def get_current_admin(request: Request) -> dict:
         session_id = str(payload["jti"])
     except (KeyError, ValueError, TypeError):
         raise HTTPException(status_code=401, detail="Sessão inválida.")
-    session = db.get_active_auth_session(session_id, datetime.now(timezone.utc))
-    if not session or int(session["user_id"]) != user_id:
+    user = db.get_active_auth_session_user(session_id, datetime.now(timezone.utc))
+    if not user or int(user["id"]) != user_id:
         raise HTTPException(status_code=401, detail="Sessão revogada ou expirada.")
-    user = db.get_admin_user_by_id(user_id)
     if not user or not user.get("is_active", 1):
         raise HTTPException(status_code=401, detail="Usuário inativo ou inexistente.")
     if (user.get("role") or "") not in VALID_ROLES:
@@ -436,13 +500,26 @@ async def get_current_admin(request: Request) -> dict:
     return current
 
 
+def get_current_admin(request: Request) -> dict:
+    current = get_current_session_user(request)
+    if bool(current.get("must_change_password")):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "password_change_required",
+                "message": "Troque a senha temporária antes de continuar.",
+            },
+        )
+    return current
+
+
 def require_roles(*allowed_roles: str) -> Callable:
     allowed = frozenset(allowed_roles)
     if not allowed or not allowed.issubset(VALID_ROLES):
         raise ValueError("Conjunto de papéis inválido.")
 
-    async def dependency(request: Request) -> dict:
-        user = await get_current_admin(request)
+    def dependency(request: Request) -> dict:
+        user = get_current_admin(request)
         if user.get("role") not in allowed:
             raise HTTPException(status_code=403, detail="Permissão insuficiente.")
         return user
@@ -463,8 +540,8 @@ def revoke_request_session(request: Request, reason: str = "logout") -> bool:
             action="logout",
             actor_id=int(payload["sub"]) if str(payload.get("sub", "")).isdigit() else None,
             actor_username=str(payload.get("username") or "")[:150] or None,
-            target_type="auth_session",
-            target_id=str(payload["jti"]),
+            target_type="admin_user",
+            target_id=str(payload.get("sub") or "")[:32] or None,
             details=json.dumps({"reason": reason}),
         )
     return revoked
@@ -522,7 +599,17 @@ def seed_admin_from_env() -> None:
         return
     if role not in VALID_ROLES:
         raise RuntimeError(f"ADMIN_INITIAL_ROLE inválido: {role}.")
+    try:
+        username = validate_username(username)
+        validate_new_password(password, username=username)
+    except ValueError as exc:
+        raise RuntimeError(f"Credencial administrativa inicial inválida: {exc}") from exc
     if db.get_admin_user_by_username(username):
         return
-    db.create_admin_user(username, hash_password(password), role)
-    LOGGER.info("Usuário administrativo inicial criado a partir do ambiente: %s", username)
+    db.create_admin_user(
+        username,
+        hash_password(password),
+        role,
+        name=_env("ADMIN_INITIAL_NAME") or username,
+    )
+    LOGGER.info("Usuário administrativo inicial criado a partir do ambiente")

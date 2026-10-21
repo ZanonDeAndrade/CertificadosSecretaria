@@ -6,8 +6,9 @@
 {$PUBLIC_DOMAIN} {
 	encode zstd gzip
 	log {
-		output stdout
-		format json
+		# Access logs are disabled here because query strings can contain legacy
+		# sensitive searches. Application logs keep path-only correlation events.
+		output discard
 	}
 	header {
 		-Server
@@ -15,8 +16,10 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
 	}
-	reverse_proxy web:80 {
+	reverse_proxy web:8080 {
 		health_uri /health/ready
 		health_interval 30s
 		health_timeout 10s
@@ -26,8 +29,7 @@
 {$ADMIN_DOMAIN} {
 	encode zstd gzip
 	log {
-		output stdout
-		format json
+		output discard
 	}
 	header {
 		-Server
@@ -35,8 +37,10 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' https://apis.google.com https://www.gstatic.com; connect-src 'self' https://accounts.google.com https://www.googleapis.com; frame-src https://accounts.google.com https://docs.google.com https://drive.google.com"
 	}
-	reverse_proxy web:8080 {
+	reverse_proxy web:8081 {
 		health_uri /api/health/ready
 		health_interval 30s
 		health_timeout 10s

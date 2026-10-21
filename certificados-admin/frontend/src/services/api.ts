@@ -9,6 +9,8 @@ export interface ValidationResult {
   issued_at?: string;
   certificate_text?: string;
   date?: string;
+  certificate_type?: string | null;
+  certificate_type_label?: string;
 }
 
 // In production builds the API is reached at a same-origin "/api" prefix — a
@@ -51,8 +53,11 @@ api.interceptors.response.use(
 
 export interface AdminUser {
   id: number;
+  name: string;
   username: string;
-  role?: string;
+  role: string;
+  permissions: string[];
+  must_change_password: boolean;
 }
 
 export async function login(
@@ -75,6 +80,27 @@ export async function getMe(): Promise<AdminUser> {
   return response.data;
 }
 
+export async function changeOwnPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ ok: boolean; sessions_revoked: number }> {
+  const response = await api.post<{ ok: boolean; sessions_revoked: number }>(
+    "/auth/change-password",
+    { current_password: currentPassword, new_password: newPassword },
+  );
+  return response.data;
+}
+
+export interface PublicInstitutionSettings {
+  institution_name: string;
+  public_url: string;
+}
+
+export async function getPublicInstitutionSettings(): Promise<PublicInstitutionSettings> {
+  const response = await api.get<PublicInstitutionSettings>("/institution");
+  return response.data;
+}
+
 // ── Structured flow (spreadsheet → preview → generate) ──────────────────────
 
 export interface PreviewRow {
@@ -84,8 +110,6 @@ export interface PreviewRow {
   evento: string;
   carga_horaria: number;
   data_emissao: string;
-  email: string;
-  documento: string;
   data_inicio: string;
   data_fim: string;
 }
@@ -102,15 +126,19 @@ export interface SpreadsheetPreview {
   invalid_count: number;
   valid: PreviewRow[];
   invalid: InvalidRow[];
+  events: { key: string; label: string; count: number }[];
   /** Body text interpolated for the first valid row (preview before emission). */
   resolved_text_preview?: string | null;
 }
 
 export interface GenerationSummary {
+  batch_id?: string;
   generated: { name: string; code: string }[];
   generated_count: number;
   duplicates: { name: string; existing_code: string }[];
   duplicate_count: number;
+  failed: { name: string; error: string }[];
+  failed_count: number;
   invalid: { row_number: number; errors: string[] }[];
   invalid_count: number;
   total_rows: number;
@@ -121,12 +149,31 @@ export interface AdminCertificate {
   participant_name: string;
   course_name?: string | null;
   event_name?: string | null;
+  certificate_type?: string | null;
+  certificate_type_label?: string;
   workload_hours?: number | null;
   issue_date?: string | null;
+  issue_date_iso?: string | null;
   status: string;
   download_available: boolean;
+  integrity_status: string;
+  integrity_blocked: boolean;
   storage_provider?: string | null;
+  template_used?: string | null;
+  template_version_id?: number | null;
+  issued_by?: { id: number; name?: string | null; username?: string | null } | null;
+  batch_id?: string | null;
+  participant_email?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  file_size?: number | null;
+  certificate_text?: string | null;
+  revoked_at?: string | null;
+  revoke_reason?: string | null;
+  reissue_count?: number;
+  reissued_at?: string | null;
   created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface CertificatesPage {
@@ -140,30 +187,15 @@ export async function validateSpreadsheet(
   file: File,
   dataEmissao?: string,
   textoPadrao?: string,
+  certificateType?: string,
 ): Promise<SpreadsheetPreview> {
   const formData = new FormData();
   formData.append("file", file);
   if (dataEmissao) formData.append("data_emissao", dataEmissao);
   if (textoPadrao !== undefined) formData.append("texto_padrao", textoPadrao);
+  if (certificateType) formData.append("certificate_type", certificateType);
   const response = await api.post<SpreadsheetPreview>(
     "/certificates/validate-spreadsheet",
-    formData,
-    { headers: { "Content-Type": "multipart/form-data" } },
-  );
-  return response.data;
-}
-
-export async function generateCertificatesFromSpreadsheet(
-  file: File,
-  dataEmissao?: string,
-  textoPadrao?: string,
-): Promise<GenerationSummary> {
-  const formData = new FormData();
-  formData.append("file", file);
-  if (dataEmissao) formData.append("data_emissao", dataEmissao);
-  if (textoPadrao !== undefined) formData.append("texto_padrao", textoPadrao);
-  const response = await api.post<GenerationSummary>(
-    "/certificates/generate",
     formData,
     { headers: { "Content-Type": "multipart/form-data" } },
   );
@@ -175,7 +207,11 @@ export interface ListCertificatesParams {
   code?: string;
   course?: string;
   event?: string;
+  certificate_type?: string;
   status?: string;
+  date_from?: string;
+  date_to?: string;
+  batch_id?: string;
   limit?: number;
   offset?: number;
 }
@@ -184,6 +220,13 @@ export async function listCertificates(
   params: ListCertificatesParams,
 ): Promise<CertificatesPage> {
   const response = await api.get<CertificatesPage>("/certificates", { params });
+  return response.data;
+}
+
+export async function getCertificate(code: string): Promise<AdminCertificate> {
+  const response = await api.get<AdminCertificate>(
+    `/certificates/${encodeURIComponent(code)}`,
+  );
   return response.data;
 }
 
@@ -273,6 +316,8 @@ export async function validateCertificate(code: string): Promise<ValidationResul
       event_name?: string | null;
       course_name?: string | null;
       issue_date?: string | null;
+      certificate_type?: string | null;
+      certificate_type_label?: string;
     };
   }>(
     `${PUBLIC_API_BASE_URL.replace(/\/$/, "")}/public/verify/${encodeURIComponent(code.trim())}`,
@@ -286,13 +331,360 @@ export async function validateCertificate(code: string): Promise<ValidationResul
     name: payload.certificate?.participant_name,
     event: payload.certificate?.event_name ?? payload.certificate?.course_name ?? undefined,
     issued_at: payload.certificate?.issue_date ?? undefined,
+    certificate_type: payload.certificate?.certificate_type,
+    certificate_type_label: payload.certificate?.certificate_type_label,
   };
+}
+
+// ── Painel, usuários e auditoria ────────────────────────────────────────────
+
+export interface DashboardStats {
+  total: number;
+  active: number;
+  revoked: number;
+  failed: number;
+  pending: number;
+  recent: number;
+  recent_days: number;
+  integrity_blocked: number;
+  active_without_file: number;
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  const response = await api.get<DashboardStats>("/admin/stats");
+  return response.data;
+}
+
+export async function getRecentCertificates(
+  limit = 8,
+): Promise<AdminCertificate[]> {
+  const response = await api.get<AdminCertificate[]>("/admin/recent-certificates", {
+    params: { limit },
+  });
+  return response.data;
+}
+
+export interface AdminUserRow {
+  id: number;
+  name: string;
+  username: string;
+  role: string;
+  is_active: boolean;
+  must_change_password: boolean;
+  password_changed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AdminUsersPage {
+  items: AdminUserRow[];
+  total: number;
+}
+
+export interface CreateAdminUserInput {
+  name: string;
+  username: string;
+  role: string;
+  temporary_password: string;
+}
+
+export interface AdminUserMutation {
+  user: AdminUserRow;
+  sessions_revoked: number;
+}
+
+export async function listAdminUsers(): Promise<AdminUsersPage> {
+  const response = await api.get<AdminUsersPage>("/admin/users");
+  return response.data;
+}
+
+export async function createAdminUser(
+  input: CreateAdminUserInput,
+): Promise<AdminUserRow> {
+  const response = await api.post<AdminUserRow>("/admin/users", input);
+  return response.data;
+}
+
+export async function updateAdminUser(
+  id: number,
+  changes: { name?: string; username?: string; role?: string; is_active?: boolean },
+): Promise<AdminUserMutation> {
+  const response = await api.patch<AdminUserMutation>(`/admin/users/${id}`, changes);
+  return response.data;
+}
+
+export async function setAdminUserActive(
+  id: number,
+  active: boolean,
+): Promise<AdminUserMutation> {
+  const response = await api.post<AdminUserMutation>(
+    `/admin/users/${id}/${active ? "activate" : "deactivate"}`,
+  );
+  return response.data;
+}
+
+export async function resetAdminUserPassword(
+  id: number,
+  temporaryPassword: string,
+): Promise<AdminUserMutation> {
+  const response = await api.post<AdminUserMutation>(
+    `/admin/users/${id}/reset-password`,
+    { temporary_password: temporaryPassword },
+  );
+  return response.data;
+}
+
+export async function revokeAdminUserSessions(id: number): Promise<number> {
+  const response = await api.post<{ revoked: number }>(
+    `/admin/users/${id}/sessions/revoke-all`,
+  );
+  return response.data.revoked;
+}
+
+export interface AuditEntry {
+  id: number;
+  action: string;
+  actor_id: number | null;
+  actor_username: string | null;
+  target_type: string | null;
+  target_id: string | null;
+  details: Record<string, unknown> | null;
+  created_at?: string | null;
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface AuditFilters {
+  category?: string;
+  action?: string;
+  actor?: string;
+  target_type?: string;
+  target_id?: string;
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listAuditLog(params: AuditFilters): Promise<AuditPage> {
+  const response = await api.get<AuditPage>("/admin/audit", { params });
+  return response.data;
+}
+
+export interface InstitutionalSettings extends PublicInstitutionSettings {
+  id: number;
+  issue_location: string;
+  signatory_name: string;
+  signatory_title: string;
+  retention_days: number;
+  max_batch_rows: number;
+  max_upload_mb: number;
+  secretaria_can_revoke: boolean;
+  secretaria_can_reissue: boolean;
+  updated_at?: string | null;
+  updated_by?: number | null;
+}
+
+export type InstitutionalSettingsInput = Omit<
+  InstitutionalSettings,
+  "id" | "updated_at" | "updated_by"
+>;
+
+export async function getInstitutionalSettings(): Promise<InstitutionalSettings> {
+  const response = await api.get<InstitutionalSettings>("/admin/settings");
+  return response.data;
+}
+
+export async function updateInstitutionalSettings(
+  input: InstitutionalSettingsInput,
+): Promise<InstitutionalSettings> {
+  const response = await api.put<InstitutionalSettings>("/admin/settings", input);
+  return response.data;
+}
+
+export type EmissionBatchStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+export interface EmissionBatch {
+  id: string;
+  status: EmissionBatchStatus;
+  total_rows: number;
+  valid_count: number;
+  invalid_count: number;
+  processed_count: number;
+  generated_count: number;
+  duplicate_count: number;
+  failed_count: number;
+  certificate_type?: string | null;
+  certificate_type_label?: string;
+  progress_percent: number;
+  attempt_count?: number;
+  max_attempts?: number;
+  result: GenerationSummary | null;
+  invalid_report: InvalidRow[];
+  error_message: string | null;
+  created_by: number | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at?: string | null;
+}
+
+export async function startEmissionBatch(
+  file: File,
+  idempotencyKey: string,
+  certificateType: string,
+  dataEmissao?: string,
+  textoPadrao?: string,
+  driveFolders: Record<string, string> = {},
+): Promise<EmissionBatch> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (dataEmissao) formData.append("data_emissao", dataEmissao);
+  if (textoPadrao !== undefined) formData.append("texto_padrao", textoPadrao);
+  formData.append("drive_folders_json", JSON.stringify(driveFolders));
+  formData.append("certificate_type", certificateType);
+  const response = await api.post<EmissionBatch>("/emission-batches", formData, {
+    headers: {
+      "Content-Type": "multipart/form-data",
+      "Idempotency-Key": idempotencyKey,
+    },
+  });
+  return response.data;
+}
+
+export interface GoogleDriveConnectionStatus {
+  connected: boolean;
+  account_email: string | null;
+  expires_at: string | null;
+  storage_provider?: "google_drive" | "local";
+}
+
+export interface GoogleDrivePickerSession {
+  access_token: string;
+  api_key: string;
+  app_id: string | null;
+  expires_at: string;
+}
+
+export async function getGoogleDriveStatus(): Promise<GoogleDriveConnectionStatus> {
+  const response = await api.get<GoogleDriveConnectionStatus>(
+    "/integrations/google-drive/status",
+  );
+  return response.data;
+}
+
+export async function startGoogleDriveOAuth(): Promise<string> {
+  const response = await api.post<{ authorization_url: string }>(
+    "/integrations/google-drive/oauth/start",
+  );
+  return response.data.authorization_url;
+}
+
+export async function getGoogleDrivePickerSession(): Promise<GoogleDrivePickerSession> {
+  const response = await api.get<GoogleDrivePickerSession>(
+    "/integrations/google-drive/picker-session",
+  );
+  return response.data;
+}
+
+export async function selectGoogleDriveFolder(
+  folderId: string,
+  event: string,
+): Promise<{ folder_name: string; ready: boolean }> {
+  const response = await api.post<{ folder_name: string; ready: boolean }>(
+    "/integrations/google-drive/folders/select",
+    { folder_id: folderId, event },
+  );
+  return response.data;
+}
+
+export async function disconnectGoogleDrive(): Promise<void> {
+  await api.post("/integrations/google-drive/disconnect");
+}
+
+export async function getEmissionBatch(batchId: string): Promise<EmissionBatch> {
+  const response = await api.get<EmissionBatch>(
+    `/emission-batches/${encodeURIComponent(batchId)}`,
+  );
+  return response.data;
+}
+
+export async function resumeEmissionBatch(
+  idempotencyKey: string,
+): Promise<EmissionBatch> {
+  const response = await api.get<EmissionBatch>(
+    `/emission-batches/by-idempotency-key/${encodeURIComponent(idempotencyKey)}`,
+  );
+  return response.data;
+}
+
+export async function cancelEmissionBatch(batchId: string): Promise<EmissionBatch> {
+  const response = await api.post<EmissionBatch>(
+    `/emission-batches/${encodeURIComponent(batchId)}/cancel`,
+  );
+  return response.data;
+}
+
+export async function retryEmissionBatch(batchId: string): Promise<EmissionBatch> {
+  const response = await api.post<EmissionBatch>(
+    `/emission-batches/${encodeURIComponent(batchId)}/retry`,
+  );
+  return response.data;
+}
+
+export const spreadsheetTemplateUrl = `${API_BASE_URL.replace(/\/$/, "")}/certificates/spreadsheet-template`;
+
+/**
+ * Classifies a failed request so screens can show the right recovery.
+ * `offline` is distinguished from a server error because retrying without a
+ * connection cannot work, and 403 from 401 because one needs a different
+ * account and the other needs signing in again.
+ */
+export type RequestFailure =
+  | "offline"
+  | "unauthorized"
+  | "forbidden"
+  | "rate-limited"
+  | "server";
+
+export function classifyError(error: unknown): RequestFailure {
+  if (axios.isAxiosError(error)) {
+    if (!error.response) {
+      return typeof navigator !== "undefined" && navigator.onLine === false
+        ? "offline"
+        : "server";
+    }
+    const status = error.response.status;
+    if (status === 401) return "unauthorized";
+    if (status === 403) return "forbidden";
+    if (status === 429) return "rate-limited";
+  }
+  return "server";
 }
 
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
     const detail = error.response?.data?.detail;
     if (typeof detail === "string" && detail.trim()) return detail;
+    if (
+      detail &&
+      typeof detail === "object" &&
+      typeof (detail as { message?: unknown }).message === "string"
+    ) {
+      const message = (detail as { message: string }).message.trim();
+      if (message) return message;
+    }
     if (Array.isArray(detail)) {
       const messages = detail
         .map((item) => (typeof item?.msg === "string" ? item.msg : ""))

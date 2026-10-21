@@ -1,0 +1,47 @@
+{# Base pública. O nome institucional vem da configuração tipada compartilhada. #}
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    {# Página de consulta de dados pessoais: fora de buscadores. #}
+    <meta name="robots" content="noindex, nofollow" />
+    <meta
+      name="description"
+      content="Consulte e valide certificados emitidos pela secretaria acadêmica."
+    />
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
+    <link rel="icon" type="image/jpeg" href="{{ public_base_path }}/static/logo-amf.jpg" />
+    <link rel="stylesheet" href="{{ public_base_path }}/static/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#conteudo">Ir para o conteúdo</a>
+
+    <header class="site-header">
+      <div class="site-header__inner">
+        <img
+          class="site-header__mark"
+          src="{{ public_base_path }}/static/logo-amf.jpg"
+          alt=""
+          aria-hidden="true"
+        />
+        <div>
+          <div class="site-header__title">{{ app_name }}</div>
+          <div class="site-header__org">{{ institution_name }}</div>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell" id="conteudo">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__inner">
+        Consulta pública de certificados de {{ institution_name }}. Em caso de
+        dúvida sobre um documento, procure o setor responsável da instituição.
+      </div>
+    </footer>
+  </body>
+</html>

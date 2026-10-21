@@ -10,20 +10,14 @@ Example:
         --client-file C:/secure/client_secret.json \
         --token-file C:/secure/certificados-oauth-token.json
 """
+
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "storage_service" / "google_drive.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
-
-from storage_service.google_drive import SCOPES  # noqa: E402
+from storage_service.google_drive import SCOPES
 
 
 def authorize(

@@ -1,0 +1,24 @@
+{
+  "displayName": "Certificados | latencia HTTP p95",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "O p95 HTTP superou 2 segundos por 10 minutos. Emissao deve ocorrer no worker, nao na requisicao.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [{
+    "displayName": "p95 maior que 2s",
+    "conditionThreshold": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_request_duration_ms\" AND resource.type=\"cloud_run_revision\"",
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 2000,
+      "duration": "600s",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_PERCENTILE_95",
+        "crossSeriesReducer": "REDUCE_PERCENTILE_95"
+      }],
+      "trigger": {"count": 1}
+    }
+  }]
+}

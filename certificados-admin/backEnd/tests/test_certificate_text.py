@@ -5,40 +5,36 @@ allowed variable, persistence of the RESOLVED body, faithful reissue,
 idempotency that considers the text, the block when the active template has no
 body element, and long-text wrapping that never leaves the certificate.
 """
+
 from __future__ import annotations
 
 import base64
-import sys
 from io import BytesIO
 from pathlib import Path
 
 import pytest
-
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from models import ParticipantRegistryRecord  # noqa: E402
-from services import template_service  # noqa: E402
-from services.certificate_service import (  # noqa: E402
+from certificados_backend.models import ParticipantRegistryRecord
+from certificados_backend.services import template_service
+from certificados_backend.services.certificate_service import (
     CertificateBatchConfig,
     CertificateBatchService,
     build_row_variables,
 )
-from services.certificate_text import (  # noqa: E402
+from certificados_backend.services.certificate_text import (
     CertificateTextError,
     render_certificate_body,
     validate_body_template,
 )
-from services.spreadsheet import SpreadsheetRow  # noqa: E402
-from storage_service.base import (  # noqa: E402
+from certificados_backend.services.spreadsheet import SpreadsheetRow
+
+from storage_service.base import (
     CertificateStorage,
     StoredFile,
     sha256_hex,
     utc_now_iso,
 )
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 PDF_BYTES = b"%PDF-1.4\nbody\n%%EOF"
 
@@ -165,15 +161,16 @@ def test_malformed_braces_are_rejected():
 
 
 def test_allowed_variables_are_interpolated():
-    template = "{{nome}} fez {{carga_horaria}} horas"
+    template = "{{nome}} fez {{carga_horaria}} horas como {{certificate_type}}"
     validate_body_template(template)  # must pass validation
-    out = render_certificate_body(template, build_row_variables(_row()))
+    out = render_certificate_body(template, build_row_variables(_row(), "speaker"))
     assert "{{" not in out and "}}" not in out
-    assert out == "Ana Souza fez 40 horas"
+    assert out == "Ana Souza fez 40 horas como Palestrante"
 
 
 def test_non_spreadsheet_variables_are_rejected():
-    # Only name + workload are columns now; the rest is written literally.
+    # Spreadsheet columns beyond name/workload remain unavailable; the
+    # controlled certificate type is supplied by the batch, not the sheet.
     for bad in ("{{curso}}", "{{evento}}", "{{data_inicio}}", "{{data_emissao}}"):
         with pytest.raises(CertificateTextError):
             validate_body_template(f"texto {bad}")
@@ -284,7 +281,7 @@ def _times(size: int):
 
 
 def test_long_body_wraps_within_width():
-    from utils.text_utils import get_text_size, wrap_hard_breaks
+    from certificados_backend.utils.text_utils import get_text_size, wrap_hard_breaks
 
     draw = _draw()
     font = _times(28)
@@ -295,14 +292,17 @@ def test_long_body_wraps_within_width():
 
 
 def test_typed_line_breaks_are_respected():
-    from utils.text_utils import wrap_hard_breaks
+    from certificados_backend.utils.text_utils import wrap_hard_breaks
 
     lines = wrap_hard_breaks(_draw(), "linha um\nlinha dois", _times(24), 800)
     assert lines == ["linha um", "linha dois"]
 
 
 def test_visual_generator_renders_long_body(tmp_path):
-    from services.generator import CertificateGenerator, CertificateGeneratorConfig
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
 
     buf = BytesIO()
     from PIL import Image
@@ -348,3 +348,60 @@ def test_visual_generator_renders_long_body(tmp_path):
     }
     pdf = gen.render_pdf_bytes_visual(record, layout, background_bytes=buf.getvalue())
     assert pdf[:4] == b"%PDF"
+
+
+def test_participant_name_uses_second_surname_line_and_smaller_font(tmp_path):
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
+    from certificados_backend.utils.text_utils import get_text_size
+
+    gen = CertificateGenerator(
+        CertificateGeneratorConfig(
+            template_path=_BACKEND_DIR / "templates" / "certificado_base.png",
+            regular_font_path=_BACKEND_DIR / "fonts" / "times.ttf",
+            bold_font_path=_BACKEND_DIR / "fonts" / "timesbd.ttf",
+            output_dir=tmp_path / "pdfs",
+        )
+    )
+    draw = _draw()
+    font, lines = gen._fit_name_to_width(
+        draw,
+        "Arthur Zanon de Andrade",
+        lambda size: gen._load_font(gen.config.bold_font_path, size),
+        80,
+        36,
+        700,
+    )
+
+    assert lines == ["Arthur Zanon", "de Andrade"]
+    assert font.size < 80
+    assert all(get_text_size(draw, line, font)[0] <= 700 for line in lines)
+
+
+def test_name_with_single_particle_surname_stays_on_one_line(tmp_path):
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
+
+    gen = CertificateGenerator(
+        CertificateGeneratorConfig(
+            template_path=_BACKEND_DIR / "templates" / "certificado_base.png",
+            regular_font_path=_BACKEND_DIR / "fonts" / "times.ttf",
+            bold_font_path=_BACKEND_DIR / "fonts" / "timesbd.ttf",
+            output_dir=tmp_path / "pdfs",
+        )
+    )
+    font, lines = gen._fit_name_to_width(
+        _draw(),
+        "João da Silva",
+        lambda size: gen._load_font(gen.config.bold_font_path, size),
+        80,
+        36,
+        700,
+    )
+
+    assert lines == ["João da Silva"]
+    assert font.size == 80

@@ -10,23 +10,17 @@ Rules:
 
 There are NO per-course templates and NO per-batch template selection.
 """
+
 from __future__ import annotations
 
 import base64
 import binascii
 import json
 import re
-import sys
 from io import BytesIO
 from pathlib import Path
 
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
-
-from database import db  # noqa: E402
+from database import db
 
 MAX_BACKGROUND_BYTES = 10 * 1024 * 1024  # 10 MB
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -38,14 +32,19 @@ class TemplateError(Exception):
     """Invalid template payload (bad/missing background, etc.)."""
 
 
+class TemplateConflictError(TemplateError):
+    """A requested mutation would break active or issued template history."""
+
+
 # Upload/abuse limits.
 MAX_IMAGE_PIXELS = 40_000_000  # 40 MP — guards against decompression bombs
-MAX_IMAGE_DIMENSION = 12_000   # max width/height in px
+MAX_IMAGE_DIMENSION = 12_000  # max width/height in px
 MAX_LAYOUT_ELEMENTS = 200
 MAX_TOTAL_DATA_URL_BYTES = 15 * 1024 * 1024
 
 
 # ── Image helpers ───────────────────────────────────────────────────────────────
+
 
 def _validate_image(content: bytes) -> None:
     """Validate a template image: format, size, real decodability, and pixel/
@@ -144,6 +143,7 @@ def _resolve_background(bg_field: str) -> tuple[bytes, str]:
 
 # ── Serialization ───────────────────────────────────────────────────────────────
 
+
 def _layout_with_background(version: dict) -> dict:
     layout = json.loads(version["layout_json"])
     layout["background"] = background_serving_path(version["id"])
@@ -171,6 +171,7 @@ def serialize_version(version: dict, *, include_layout: bool = True) -> dict:
 
 
 # ── Public API ──────────────────────────────────────────────────────────────────
+
 
 def list_versions() -> list[dict]:
     return [serialize_version(v, include_layout=False) for v in db.list_template_versions()]
@@ -210,11 +211,43 @@ def create_version(*, name: str | None, layout: dict, created_by: int | None = N
         background_mime_type=mime,
         created_by=created_by,
     )
-    return serialize_version(db.get_template_version(created["id"]))
+    persisted = db.get_template_version(created["id"])
+    if persisted is None:
+        raise TemplateError("A versão criada não pôde ser relida.")
+    return serialize_version(persisted)
 
 
 def activate_version(version_id: int, actor: int | None = None) -> bool:
     return db.activate_template_version(version_id, actor)
+
+
+def rename_version(version_id: int, name: str) -> dict | None:
+    """Change the display name without changing the immutable layout."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise TemplateError("Informe um nome para a versão.")
+    if len(clean_name) > 255:
+        raise TemplateError("O nome da versão deve ter no máximo 255 caracteres.")
+    renamed = db.rename_template_version(version_id, clean_name)
+    return serialize_version(renamed) if renamed else None
+
+
+def delete_version(version_id: int) -> dict | None:
+    """Delete only drafts/history that cannot affect an issued certificate."""
+    status, version = db.delete_template_version_if_unused(version_id)
+    if status == "not_found":
+        return None
+    if status == "active":
+        raise TemplateConflictError(
+            "A versão ativa não pode ser excluída. Ative outra versão primeiro."
+        )
+    if status == "last_version":
+        raise TemplateConflictError("A única versão do template não pode ser excluída.")
+    if status == "referenced":
+        raise TemplateConflictError(
+            "Esta versão foi usada por certificados emitidos e deve permanecer no histórico."
+        )
+    return serialize_version(version, include_layout=False) if version else None
 
 
 def get_background_bytes(version_id: int) -> tuple[bytes, str]:
@@ -225,6 +258,7 @@ def get_background_bytes(version_id: int) -> tuple[bytes, str]:
 
 
 # ── Default seeding ─────────────────────────────────────────────────────────────
+
 
 def _placeholder_png() -> bytes:
     from PIL import Image
@@ -274,7 +308,12 @@ def _default_layout(width: int, height: int) -> dict:
         # interpolado por linha e renderizado aqui (quebra automática + quebras
         # digitadas). Curso, evento, carga horária e datas entram via variáveis.
         t("texto_certificado", 0.46, 0.024, align="left", x=margin),
-        t("date", 0.72, 0.022),
+        # These values come from the institutional settings snapshot. They stay
+        # editable as layout elements without freezing business data in a
+        # template version.
+        t("issue_line", 0.72, 0.022),
+        t("signatory_name", 0.79, 0.018),
+        t("signatory_title", 0.825, 0.016),
         t("validation_code", 0.92, 0.014),
         {
             "type": "qr",

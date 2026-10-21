@@ -1,0 +1,10 @@
+{
+  "name": "certificados_operation_failures",
+  "description": "Falhas de emissao, reconciliacao, backup ou restore drill sem PII.",
+  "filter": "jsonPayload.logger=\"certificados.metrics\" AND jsonPayload.metric_kind=\"counter_delta\" AND (jsonPayload.metric=\"emission_jobs_failed_total\" OR jsonPayload.metric=\"emission_job_dispatch_failed_total\" OR jsonPayload.metric=\"reconciliation_errors_total\" OR jsonPayload.metric=\"backups_failed_total\" OR jsonPayload.metric=\"restore_drills_failed_total\")",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "INT64",
+    "unit": "1"
+  }
+}

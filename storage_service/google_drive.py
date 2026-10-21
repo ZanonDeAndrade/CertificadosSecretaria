@@ -4,15 +4,15 @@ Uses either a **Service Account** or an offline **user OAuth token** with the
 Google Drive API. Credentials come strictly from environment variables; nothing
 is read from or written to the database, and no secret is ever logged.
 
-Files are uploaded into ``GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID`` and are **not**
-made public — only the service account (and whoever the folder is shared with)
-can read them. The public area never receives a Drive link; downloads are
-proxied by the backend using the verification code.
+New panel emissions bind this backend to the folder selected for each event.
+``GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID`` remains only as an explicit legacy/tool
+fallback. Files are never made public and downloads remain backend-proxied.
 
 The ``googleapiclient`` / ``google.oauth2`` imports are deliberately lazy
 (inside methods) so the rest of the system — and the test suite — can import
 this module without the Google libraries installed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,8 +32,10 @@ from .base import (
 
 LOGGER = logging.getLogger("certificados.storage.gdrive")
 
-# drive.file: access limited to files the app creates — least privilege.
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+ADMIN_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+PUBLIC_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# Backward-compatible export used only by the one-time admin authorization tool.
+SCOPES = ADMIN_SCOPES
 
 
 class GoogleDriveStorage(CertificateStorage):
@@ -41,12 +43,22 @@ class GoogleDriveStorage(CertificateStorage):
 
     def __init__(self, folder_id: str | None = None, service: Any = None) -> None:
         self._folder_id = folder_id or config.get_drive_folder_id()
-        if not self._folder_id:
-            raise StorageConfigError(
-                "GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID não definido."
-            )
         # ``service`` may be injected (e.g. fakes in tests); otherwise built lazily.
         self._service = service
+        self.read_only = config.get_drive_access_mode() == "read_only"
+
+    def for_folder(self, folder_id: str) -> GoogleDriveStorage:
+        clean = (folder_id or "").strip()
+        if not clean:
+            raise StorageConfigError("Selecione uma pasta do Google Drive antes de emitir.")
+        return GoogleDriveStorage(folder_id=clean, service=self._service)
+
+    def _require_folder(self) -> str:
+        if not self._folder_id:
+            raise StorageConfigError(
+                "Nenhuma pasta do Google Drive foi definida para esta operação."
+            )
+        return self._folder_id
 
     # ── Service client ────────────────────────────────────────────────────────
 
@@ -74,7 +86,7 @@ class GoogleDriveStorage(CertificateStorage):
                 raise StorageConfigError("Biblioteca 'google-auth' ausente.") from exc
             info = config.load_service_account_info()
             creds = service_account.Credentials.from_service_account_info(
-                info, scopes=SCOPES
+                info, scopes=config.get_drive_scopes()
             )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
 
@@ -88,7 +100,7 @@ class GoogleDriveStorage(CertificateStorage):
 
         try:
             creds = Credentials.from_authorized_user_info(
-                config.load_oauth_token_info(), scopes=SCOPES
+                config.load_oauth_token_info(), scopes=config.get_drive_scopes()
             )
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
@@ -99,9 +111,7 @@ class GoogleDriveStorage(CertificateStorage):
                 "Token OAuth do Google Drive inválido, expirado ou revogado."
             ) from exc
         if not creds.valid:
-            raise StorageConfigError(
-                "Token OAuth do Google Drive inválido, expirado ou revogado."
-            )
+            raise StorageConfigError("Token OAuth do Google Drive inválido, expirado ou revogado.")
         return creds
 
     # ── Operations ──────────────────────────────────────────────────────────────
@@ -113,16 +123,19 @@ class GoogleDriveStorage(CertificateStorage):
         filename: str,
         mime_type: str = DEFAULT_MIME_TYPE,
     ) -> StoredFile:
+        if self.read_only:
+            raise StorageConfigError(
+                "O perfil público somente leitura não pode enviar arquivos ao Drive."
+            )
+        folder_id = self._require_folder()
         try:
             from googleapiclient.errors import HttpError
             from googleapiclient.http import MediaIoBaseUpload
         except ImportError as exc:  # pragma: no cover
-            raise StorageConfigError(
-                "Bibliotecas do Google ausentes para upload."
-            ) from exc
+            raise StorageConfigError("Bibliotecas do Google ausentes para upload.") from exc
 
         media = MediaIoBaseUpload(BytesIO(content), mimetype=mime_type, resumable=False)
-        metadata = {"name": filename, "parents": [self._folder_id]}
+        metadata = {"name": filename, "parents": [folder_id]}
         try:
             created = (
                 self.service.files()
@@ -135,15 +148,11 @@ class GoogleDriveStorage(CertificateStorage):
                 .execute()
             )
         except HttpError as exc:
-            LOGGER.error("Falha no upload para o Drive (arquivo=%s): %s", filename, exc)
+            LOGGER.error("Falha no upload para o Drive: %s", type(exc).__name__)
             raise StorageError("Falha ao enviar o certificado para o Google Drive.") from exc
 
         file_id = created["id"]
-        LOGGER.info(
-            "Certificado enviado ao Drive: file_id=%s folder_id=%s",
-            file_id,
-            self._folder_id,
-        )
+        LOGGER.info("Certificado enviado ao Drive")
         return StoredFile(
             storage_provider=self.provider,
             original_filename=filename,
@@ -152,7 +161,7 @@ class GoogleDriveStorage(CertificateStorage):
             checksum_sha256=sha256_hex(content),
             created_at=utc_now_iso(),
             drive_file_id=file_id,
-            drive_folder_id=self._folder_id,
+            drive_folder_id=folder_id,
             pdf_path="",
         )
 
@@ -165,15 +174,11 @@ class GoogleDriveStorage(CertificateStorage):
             from googleapiclient.errors import HttpError
             from googleapiclient.http import MediaIoBaseDownload
         except ImportError as exc:  # pragma: no cover
-            raise StorageConfigError(
-                "Bibliotecas do Google ausentes para download."
-            ) from exc
+            raise StorageConfigError("Bibliotecas do Google ausentes para download.") from exc
 
         buffer = BytesIO()
         try:
-            request = self.service.files().get_media(
-                fileId=file_id, supportsAllDrives=True
-            )
+            request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
             downloader = MediaIoBaseDownload(buffer, request)
             done = False
             while not done:
@@ -181,9 +186,9 @@ class GoogleDriveStorage(CertificateStorage):
         except HttpError as exc:
             status = getattr(getattr(exc, "resp", None), "status", None)
             if status == 404:
-                LOGGER.warning("Arquivo do Drive não encontrado: file_id=%s", file_id)
+                LOGGER.warning("Arquivo do Drive não encontrado")
                 raise FileNotFoundError("Arquivo não encontrado no Google Drive.") from exc
-            LOGGER.error("Falha no download do Drive (file_id=%s): %s", file_id, exc)
+            LOGGER.error("Falha no download do Drive: %s", type(exc).__name__)
             raise StorageError("Falha ao obter o certificado do Google Drive.") from exc
 
         return buffer.getvalue()
@@ -199,6 +204,7 @@ class GoogleDriveStorage(CertificateStorage):
         except ImportError as exc:  # pragma: no cover
             raise StorageConfigError("Bibliotecas do Google ausentes.") from exc
 
+        folder_id = self._require_folder()
         files: list[dict] = []
         page_token = None
         try:
@@ -206,7 +212,7 @@ class GoogleDriveStorage(CertificateStorage):
                 response = (
                     self.service.files()
                     .list(
-                        q=f"'{self._folder_id}' in parents and trashed = false",
+                        q=f"'{folder_id}' in parents and trashed = false",
                         fields="nextPageToken, files(id, size, md5Checksum)",
                         pageSize=1000,
                         supportsAllDrives=True,
@@ -225,26 +231,24 @@ class GoogleDriveStorage(CertificateStorage):
 
     def delete(self, cert_row: Mapping[str, Any]) -> None:
         """Delete a Drive file (saga compensation). Idempotent: a 404 is a no-op."""
+        if self.read_only:
+            raise StorageConfigError(
+                "O perfil público somente leitura não pode excluir arquivos do Drive."
+            )
         file_id = (cert_row.get("drive_file_id") or "").strip()
         if not file_id:
             return
         try:
             from googleapiclient.errors import HttpError
         except ImportError as exc:  # pragma: no cover
-            raise StorageConfigError(
-                "Bibliotecas do Google ausentes para exclusão."
-            ) from exc
+            raise StorageConfigError("Bibliotecas do Google ausentes para exclusão.") from exc
         try:
-            self.service.files().delete(
-                fileId=file_id, supportsAllDrives=True
-            ).execute()
-            LOGGER.info("Arquivo do Drive removido (compensação): file_id=%s", file_id)
+            self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            LOGGER.info("Arquivo do Drive removido em compensação")
         except HttpError as exc:
             status = getattr(getattr(exc, "resp", None), "status", None)
             if status == 404:
-                LOGGER.warning(
-                    "Arquivo do Drive já ausente na exclusão: file_id=%s", file_id
-                )
+                LOGGER.warning("Arquivo do Drive já ausente na exclusão")
                 return  # already gone — compensation is idempotent
-            LOGGER.error("Falha ao excluir do Drive (file_id=%s): %s", file_id, exc)
+            LOGGER.error("Falha ao excluir do Drive: %s", type(exc).__name__)
             raise StorageError("Falha ao excluir o certificado do Google Drive.") from exc

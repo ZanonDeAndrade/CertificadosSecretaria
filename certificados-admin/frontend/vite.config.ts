@@ -23,5 +23,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
     css: true,
+    // Component tests live in src/. e2e/ holds Playwright specs, which use a
+    // different runner and would fail if vitest tried to collect them.
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    exclude: ["node_modules/**", "dist/**", "e2e/**"],
   },
 });

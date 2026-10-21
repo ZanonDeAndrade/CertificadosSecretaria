@@ -1,18 +1,13 @@
 """Tests for the finalization pass: date utils, signatory config, migration."""
+
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
+from certificados_backend.utils.dates import format_extenso, normalize_date, normalize_date_text
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from utils.dates import format_extenso, normalize_date, normalize_date_text
-
 
 # ── Dates (pt-BR, accented months) ────────────────────────────────────────────
 
@@ -50,7 +45,10 @@ def test_normalize_date_text_is_lenient():
 
 
 def _generator(tmp_path, **signature):
-    from services.generator import CertificateGenerator, CertificateGeneratorConfig
+    from certificados_backend.services.generator import (
+        CertificateGenerator,
+        CertificateGeneratorConfig,
+    )
 
     return CertificateGenerator(
         CertificateGeneratorConfig(
@@ -64,7 +62,7 @@ def _generator(tmp_path, **signature):
 
 
 def _record(code="CERT-2026-CFG001"):
-    from models import ParticipantRegistryRecord
+    from certificados_backend.models import ParticipantRegistryRecord
 
     return ParticipantRegistryRecord(
         nome="Ana Souza",
@@ -134,11 +132,11 @@ def test_migration_dry_run_reports_without_changing_db(monkeypatch, tmp_path):
     pdfs.mkdir(parents=True, exist_ok=True)
     (pdfs / "a.pdf").write_bytes(b"%PDF-1.4 a")
 
-    _seed(db, "CERT-2026-LOC001", "pdfs/a.pdf")          # exists → would migrate
-    _seed(db, "CERT-2026-LOC002", "pdfs/missing.pdf")    # missing → not_found
+    _seed(db, "CERT-2026-LOC001", "pdfs/a.pdf")  # exists → would migrate
+    _seed(db, "CERT-2026-LOC002", "pdfs/missing.pdf")  # missing → not_found
     _seed(db, "CERT-2026-DRV001", "pdfs/c.pdf", drive_file_id="already")  # excluded
 
-    import migrate_to_drive
+    from certificados_backend import migrate_to_drive
 
     report = migrate_to_drive.run_migration(dry_run=True)
 

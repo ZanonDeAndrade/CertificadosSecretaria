@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS certificates (
     participant_email   TEXT,                             -- e-mail (opcional)
     participant_document TEXT,                            -- CPF/matrícula (opcional)
     participant_document_hash TEXT,                       -- HMAC para confirmação pública
+    participant_document_hash_key_id TEXT,                -- versão da chave HMAC (ex.: v1)
     course_name         TEXT,                             -- curso (lista canônica)
     event_name          TEXT    NOT NULL,                 -- nome do evento (legado: curso)
     workload_hours      INTEGER,                          -- carga horária (estruturada)

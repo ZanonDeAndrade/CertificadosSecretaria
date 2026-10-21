@@ -1,24 +1,17 @@
 """Tests for F8 (ISO dates/ordering), F12 (Drive integrity), F15 (malicious
 uploads), F16 (CHECK/FK constraints) and F21 (local path traversal)."""
+
 from __future__ import annotations
 
-import sys
 import zipfile
 from io import BytesIO
-from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select
 
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from database import engine as db_engine  # noqa: E402
-from database.models import AdminUser, AuditLog, Base, Certificate  # noqa: E402
-from database.repositories import (  # noqa: E402
+from database import engine as db_engine
+from database.models import AdminUser, AuditLog, Base, Certificate
+from database.repositories import (
     AdminUserRepository,
     AuditLogRepository,
     CertificateRepository,
@@ -57,7 +50,7 @@ def _cert(code, **over):
 
 
 def test_dates_iso_helpers():
-    from utils.dates import extenso_from_iso, parse_date, to_iso
+    from certificados_backend.utils.dates import extenso_from_iso, parse_date, to_iso
 
     assert to_iso("10/06/2026") == "2026-06-10"
     assert to_iso("10 de junho de 2026") == "2026-06-10"
@@ -188,15 +181,19 @@ def test_download_rejects_non_pdf_mime(tmp_path, monkeypatch):
     stored = storage.save(junk, filename="x.pdf")
     with pytest.raises(StorageIntegrityError):
         download_certificate(
-            {"pdf_path": stored.pdf_path, "file_size": len(junk),
-             "checksum_sha256": sha256_hex(junk)},
+            {
+                "pdf_path": stored.pdf_path,
+                "file_size": len(junk),
+                "checksum_sha256": sha256_hex(junk),
+            },
             verify=True,
         )
 
 
 def test_periodic_integrity_check_blocks_tampered_file(tmp_path, monkeypatch):
+    from certificados_backend.services.integrity import run_integrity_check
+
     from database import db
-    from services.integrity import run_integrity_check
     from storage_service.base import sha256_hex
 
     monkeypatch.setattr(db, "DATABASE_PATH", tmp_path / "c.db")
@@ -238,14 +235,14 @@ def _xlsx_bytes(rows: list[dict]) -> bytes:
 
 
 def test_enforce_xlsx_rejects_non_zip():
-    from services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
+    from certificados_backend.services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
 
     with pytest.raises(SpreadsheetError):
         enforce_xlsx_limits(b"definitely not a zip file")
 
 
 def test_enforce_xlsx_rejects_non_office_zip():
-    from services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
+    from certificados_backend.services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
 
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -255,7 +252,7 @@ def test_enforce_xlsx_rejects_non_office_zip():
 
 
 def test_enforce_xlsx_rejects_decompression_bomb():
-    from services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
+    from certificados_backend.services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
 
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -266,7 +263,7 @@ def test_enforce_xlsx_rejects_decompression_bomb():
 
 
 def test_enforce_xlsx_row_column_cell_limits():
-    from services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
+    from certificados_backend.services.spreadsheet import SpreadsheetError, enforce_xlsx_limits
 
     data = _xlsx_bytes([{"a": 1, "b": 2, "c": 3}, {"a": 4, "b": 5, "c": 6}])
     # Too many columns.
@@ -295,15 +292,15 @@ def _png_bytes(w: int, h: int) -> bytes:
 
 
 def test_image_validation_rejects_oversized_dimensions():
-    from services.template_service import TemplateError, _validate_image
+    from certificados_backend.services.template_service import TemplateError, _validate_image
 
     with pytest.raises(TemplateError):
         _validate_image(_png_bytes(13000, 2))  # exceeds MAX_IMAGE_DIMENSION
 
 
 def test_image_validation_rejects_pixel_bomb(monkeypatch):
-    from services import template_service
-    from services.template_service import TemplateError, _validate_image
+    from certificados_backend.services import template_service
+    from certificados_backend.services.template_service import TemplateError, _validate_image
 
     monkeypatch.setattr(template_service, "MAX_IMAGE_PIXELS", 1000)
     with pytest.raises(TemplateError):
@@ -311,7 +308,7 @@ def test_image_validation_rejects_pixel_bomb(monkeypatch):
 
 
 def test_image_validation_rejects_corrupt_png():
-    from services.template_service import TemplateError, _validate_image
+    from certificados_backend.services.template_service import TemplateError, _validate_image
 
     corrupt = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40  # valid magic, broken body
     with pytest.raises(TemplateError):
@@ -319,7 +316,7 @@ def test_image_validation_rejects_corrupt_png():
 
 
 def test_layout_limits_reject_too_many_elements_and_data_urls():
-    from services.template_service import TemplateError, _enforce_layout_limits
+    from certificados_backend.services.template_service import TemplateError, _enforce_layout_limits
 
     with pytest.raises(TemplateError):
         _enforce_layout_limits({"elements": [{"type": "text"} for _ in range(201)]})

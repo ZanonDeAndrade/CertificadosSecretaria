@@ -1,0 +1,10 @@
+{
+  "name": "certificados_backup_success",
+  "description": "Backups criptografados concluidos.",
+  "filter": "jsonPayload.logger=\"certificados.metrics\" AND jsonPayload.metric=\"backups_completed_total\" AND jsonPayload.metric_kind=\"counter_delta\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "INT64",
+    "unit": "1"
+  }
+}

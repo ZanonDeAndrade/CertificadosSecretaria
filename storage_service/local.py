@@ -5,6 +5,7 @@ PDFs are written under ``STORAGE_DIR/pdfs`` and referenced by a
 keeping full backward compatibility with certificates issued before the storage
 abstraction existed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -58,7 +59,7 @@ class LocalStorage(CertificateStorage):
             raise StorageError(f"Falha ao gravar PDF localmente: {exc}") from exc
 
         rel = os.path.relpath(dest, self._storage_dir).replace(os.sep, "/")
-        LOGGER.info("Certificado salvo localmente: %s", rel)
+        LOGGER.info("Certificado salvo no storage local")
         return StoredFile(
             storage_provider=self.provider,
             original_filename=filename,
@@ -94,7 +95,7 @@ class LocalStorage(CertificateStorage):
     def download(self, cert_row: Mapping[str, Any]) -> bytes:
         path = self._resolve_within_storage(cert_row.get("pdf_path") or "")
         if not path.is_file():
-            raise FileNotFoundError(f"Arquivo local não encontrado: {path}")
+            raise FileNotFoundError("Arquivo local do certificado não encontrado.")
         return path.read_bytes()
 
     def delete(self, cert_row: Mapping[str, Any]) -> None:
@@ -106,4 +107,4 @@ class LocalStorage(CertificateStorage):
             path.unlink(missing_ok=True)
         except OSError as exc:  # pragma: no cover - filesystem dependent
             raise StorageError(f"Falha ao remover PDF local: {exc}") from exc
-        LOGGER.info("Certificado local removido (compensação): %s", cert_row["pdf_path"])
+        LOGGER.info("Certificado local removido em compensação")

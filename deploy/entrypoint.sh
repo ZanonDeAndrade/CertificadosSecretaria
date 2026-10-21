@@ -1,39 +1,53 @@
 #!/bin/sh
-# Container entrypoint for environments that run ONE process per container and
-# inject the port via $PORT (Google Cloud Run, Railway, Fly, etc.).
-#
-# Pick the process with APP_TARGET:
-#   admin     → certificados-admin/backEnd (FastAPI admin API)  [default]
-#   consulta  → certificados-consulta      (public site)
-#   migrate   → alembic upgrade head + seed the default template
-#
-# Docker Compose overrides `command:` per service, so this file is only used by
-# platforms that run the image as-is (Cloud Run uses the image CMD).
 set -eu
+
+if [ "${APP_ENV:-development}" = "production" ] && [ -z "${APP_TARGET:-}" ]; then
+  echo "APP_TARGET é obrigatório em produção." >&2
+  exit 64
+fi
 
 PORT="${PORT:-8000}"
 WORKERS="${WEB_CONCURRENCY:-1}"
 TARGET="${APP_TARGET:-admin}"
+export FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1}"
 
 case "$TARGET" in
   admin)
-    exec uvicorn main:app \
-      --app-dir certificados-admin/backEnd \
+    exec uvicorn certificados_backend.main:app \
       --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" \
-      --proxy-headers --forwarded-allow-ips="*"
+      --no-access-log \
+      --proxy-headers --forwarded-allow-ips="$FORWARDED_ALLOW_IPS"
     ;;
   consulta)
-    exec uvicorn app:app \
-      --app-dir certificados-consulta \
+    exec uvicorn certificados_consulta.app:app \
       --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" \
-      --proxy-headers --forwarded-allow-ips="*"
+      --no-access-log \
+      --proxy-headers --forwarded-allow-ips="$FORWARDED_ALLOW_IPS"
+    ;;
+  worker)
+    exec certificados-worker "$@"
     ;;
   migrate)
     alembic upgrade head
-    exec python certificados-admin/backEnd/seed_template.py
+    exec python -m certificados_backend.seed_template
+    ;;
+  reconcile)
+    exec certificados-reconcile "$@"
+    ;;
+  integrity)
+    exec certificados-integrity "$@"
+    ;;
+  cleanup)
+    exec certificados-maintenance cleanup-runtime "$@"
+    ;;
+  backup)
+    : "${BACKUP_DESTINATION:?BACKUP_DESTINATION é obrigatório}"
+    exec certificados-backup create \
+      --destination "$BACKUP_DESTINATION" \
+      --retention-days "${BACKUP_RETENTION_DAYS:-35}" "$@"
     ;;
   *)
-    echo "APP_TARGET inválido: '$TARGET' (use admin|consulta|migrate)" >&2
+    echo "APP_TARGET inválido: use admin|consulta|worker|migrate|reconcile|integrity|cleanup|backup" >&2
     exit 64
     ;;
 esac

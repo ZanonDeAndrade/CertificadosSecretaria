@@ -1,20 +1,11 @@
 """Tests for the spreadsheet model: column normalisation, validation, business key."""
-from __future__ import annotations
 
-import sys
-from pathlib import Path
+from __future__ import annotations
 
 import pandas as pd
 import pytest
-
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from services import spreadsheet
-from services.spreadsheet import SpreadsheetError, compute_business_key
+from certificados_backend.services import spreadsheet
+from certificados_backend.services.spreadsheet import SpreadsheetError, compute_business_key
 
 
 def _xlsx(tmp_path, rows, name="in.xlsx"):
@@ -46,11 +37,28 @@ def test_valid_row_with_synonym_headers(tmp_path):
     assert row.data_emissao == "10 de junho de 2026"
 
 
+def test_registro_academico_header_populates_private_confirmation_field(tmp_path):
+    path = _xlsx(
+        tmp_path,
+        [{"nome": "Ana Souza", "carga_horaria": 8, "registro_academico": "RA-2026-42"}],
+    )
+    report = spreadsheet.read_and_validate(path)
+    assert report.valid_count == 1
+    assert report.valid[0].documento == "RA-2026-42"
+
+
 def test_event_is_not_course(tmp_path):
     path = _xlsx(
         tmp_path,
-        [{"nome": "X", "curso": "Pedagogia", "evento": "Congresso", "carga_horaria": 8,
-          "data_emissao": "01/02/2026"}],
+        [
+            {
+                "nome": "X",
+                "curso": "Pedagogia",
+                "evento": "Congresso",
+                "carga_horaria": 8,
+                "data_emissao": "01/02/2026",
+            }
+        ],
     )
     report = spreadsheet.read_and_validate(path)
     row = report.valid[0]
@@ -97,7 +105,7 @@ def test_missing_name_or_workload_is_invalid(tmp_path):
     path = _xlsx(
         tmp_path,
         [
-            {"nome": "", "carga_horaria": 10},     # missing name
+            {"nome": "", "carga_horaria": 10},  # missing name
             {"nome": "Bia", "carga_horaria": ""},  # missing workload
         ],
     )
@@ -136,8 +144,13 @@ def test_default_data_emissao_fallback(tmp_path):
 
 def test_max_rows_enforced(tmp_path):
     rows = [
-        {"nome": f"P{i}", "curso": "Direito", "evento": "E", "carga_horaria": 8,
-         "data_emissao": "01/02/2026"}
+        {
+            "nome": f"P{i}",
+            "curso": "Direito",
+            "evento": "E",
+            "carga_horaria": 8,
+            "data_emissao": "01/02/2026",
+        }
         for i in range(5)
     ]
     path = _xlsx(tmp_path, rows)
@@ -149,8 +162,13 @@ def test_blank_rows_are_skipped(tmp_path):
     path = _xlsx(
         tmp_path,
         [
-            {"nome": "Ana", "curso": "Direito", "evento": "E", "carga_horaria": 8,
-             "data_emissao": "01/02/2026"},
+            {
+                "nome": "Ana",
+                "curso": "Direito",
+                "evento": "E",
+                "carga_horaria": 8,
+                "data_emissao": "01/02/2026",
+            },
             {"nome": "", "curso": "", "evento": "", "carga_horaria": "", "data_emissao": ""},
         ],
     )
@@ -162,10 +180,20 @@ def test_business_key_is_stable_and_distinct(tmp_path):
     path = _xlsx(
         tmp_path,
         [
-            {"nome": "Ana Souza", "curso": "Direito", "evento": "Sem. Jur",
-             "carga_horaria": 40, "data_emissao": "10/06/2026"},
-            {"nome": "Ana Souza", "curso": "Direito", "evento": "Outro Evento",
-             "carga_horaria": 40, "data_emissao": "10/06/2026"},
+            {
+                "nome": "Ana Souza",
+                "curso": "Direito",
+                "evento": "Sem. Jur",
+                "carga_horaria": 40,
+                "data_emissao": "10/06/2026",
+            },
+            {
+                "nome": "Ana Souza",
+                "curso": "Direito",
+                "evento": "Outro Evento",
+                "carga_horaria": 40,
+                "data_emissao": "10/06/2026",
+            },
         ],
     )
     report = spreadsheet.read_and_validate(path)

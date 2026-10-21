@@ -1,0 +1,5 @@
+# Falsos positivos históricos estritamente limitados a fixtures sintéticas.
+# O fingerprint inclui commit, caminho, regra e linha; novos achados continuam bloqueando o CI.
+a44097ac4affa4b684f35b64e33d566f9669812c:certificados-admin/backEnd/tests/conftest.py:generic-api-key:30
+a44097ac4affa4b684f35b64e33d566f9669812c:certificados-admin/backEnd/tests/test_auth.py:generic-api-key:21
+a44097ac4affa4b684f35b64e33d566f9669812c:certificados-admin/backEnd/tests/test_persistence.py:generic-api-key:212

@@ -9,7 +9,7 @@ For each certificate stored locally (has ``pdf_path``) and not yet on Drive
      (the local pdf_path is kept as a backup reference);
 
 It never re-uploads a certificate that already has a drive_file_id, supports a
-``--dry-run`` mode, logs every action and prints a final report.
+``--dry-run`` mode, emits privacy-safe event logs and prints a final report.
 
 Usage:
     python migrate_to_drive.py --dry-run        # simula, não envia nada
@@ -19,22 +19,15 @@ Usage:
 Requires (real run): STORAGE_PROVIDER=google_drive + credenciais e
 GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID configurados no .env.
 """
+
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
-from pathlib import Path
 
-# Make the shared `database` package and storage layer importable.
-for _ancestor in Path(__file__).resolve().parents:
-    if (_ancestor / "database" / "db.py").is_file():
-        if str(_ancestor) not in sys.path:
-            sys.path.insert(0, str(_ancestor))
-        break
-
-from database import db  # noqa: E402
-from storage_service.base import sha256_hex  # noqa: E402
+from database import db
 
 LOGGER = logging.getLogger("certificados.migrate")
 
@@ -57,33 +50,34 @@ def run_migration(dry_run: bool = False, limit: int | None = None) -> dict:
         code = cert["unique_code"]
 
         if (cert.get("drive_file_id") or "").strip():
-            LOGGER.info("[skip] %s já está no Drive.", code)
+            LOGGER.info("event=drive_migration_skipped")
             report["skipped"] += 1
             continue
 
         local_path = db.resolve_pdf_path(cert.get("pdf_path") or "")
         if not local_path.is_file():
-            LOGGER.warning("[missing] %s: arquivo local não encontrado (%s).", code, local_path)
+            LOGGER.warning("event=drive_migration_missing")
             report["not_found"] += 1
             continue
 
         content = local_path.read_bytes()
-        checksum = sha256_hex(content)
-
         if dry_run:
             LOGGER.info(
-                "[dry-run] migraria %s (%s, %d bytes, sha256=%s…).",
-                code, local_path.name, len(content), checksum[:12],
+                "event=drive_migration_dry_run bytes=%d",
+                len(content),
             )
             report["migrated"] += 1
             continue
 
         try:
+            assert storage is not None
             stored = storage.save(
                 content,
                 filename=cert.get("original_filename") or local_path.name,
                 mime_type=cert.get("mime_type") or "application/pdf",
             )
+            if not stored.drive_file_id:
+                raise RuntimeError("Upload no Drive não retornou um identificador.")
             db.set_drive_metadata(
                 code,
                 drive_file_id=stored.drive_file_id,
@@ -93,17 +87,22 @@ def run_migration(dry_run: bool = False, limit: int | None = None) -> dict:
                 file_size=stored.file_size,
                 checksum_sha256=stored.checksum_sha256,
             )
-            LOGGER.info("[ok] %s migrado (drive_file_id=%s).", code, stored.drive_file_id)
+            LOGGER.info("event=drive_migration_succeeded")
             report["migrated"] += 1
         except Exception as exc:  # noqa: BLE001 - report and continue
-            LOGGER.error("[fail] %s: %s", code, exc)
+            LOGGER.error(
+                "event=drive_migration_failed error_type=%s",
+                type(exc).__name__,
+            )
             report["failed"] += 1
 
     return report
 
 
 def main(argv: list[str]) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    import observability
+
+    observability.configure_logging()
     parser = argparse.ArgumentParser(description="Migra PDFs locais para o Google Drive.")
     parser.add_argument("--dry-run", action="store_true", help="Simula sem enviar nada.")
     parser.add_argument("--limit", type=int, default=None, help="Máximo de certificados.")
@@ -111,14 +110,7 @@ def main(argv: list[str]) -> int:
 
     report = run_migration(dry_run=args.dry_run, limit=args.limit)
 
-    print("\n-------- Relatório da migração --------")
-    print(f"  Modo:        {'DRY-RUN (nada enviado)' if args.dry_run else 'EXECUÇÃO'}")
-    print(f"  Total alvo:  {report['total']}")
-    print(f"  Migrados:    {report['migrated']}")
-    print(f"  Ignorados:   {report['skipped']} (já no Drive)")
-    print(f"  Não encontrados: {report['not_found']}")
-    print(f"  Falhas:      {report['failed']}")
-    print("---------------------------------------")
+    print(json.dumps({"event": "drive_migration_completed", **report}, sort_keys=True))
     return 1 if report["failed"] else 0
 
 

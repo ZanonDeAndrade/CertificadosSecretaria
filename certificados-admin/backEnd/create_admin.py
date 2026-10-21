@@ -1,34 +1,35 @@
 """Create (or update) a secretaria admin user.
 
 Usage:
-    python create_admin.py <username> <password> [role]
+    python create_admin.py [username] [role]
 
 Reads the shared database (DATABASE_PATH). Passwords are stored as bcrypt
-hashes — the plaintext is never persisted.
+hashes — the plaintext is prompted securely and never placed in process args.
 """
+
 from __future__ import annotations
 
 import sys
 from getpass import getpass
 
-import auth
+from certificados_backend import auth
+
 from database import db
 
 
 def main(argv: list[str]) -> int:
     db.init_db()
 
-    if len(argv) >= 3:
-        username, password = argv[1], argv[2]
-        role = argv[3] if len(argv) > 3 else "admin"
-    else:
-        username = input("Usuário: ").strip()
-        password = getpass("Senha: ")
-        confirm = getpass("Confirme a senha: ")
-        if password != confirm:
-            print("As senhas não conferem.")
-            return 1
-        role = "admin"
+    username = argv[1] if len(argv) >= 2 else input("Usuário: ").strip()
+    role = argv[2] if len(argv) >= 3 else "admin"
+    if len(argv) > 3:
+        print("Uso: python create_admin.py [username] [role]")
+        return 1
+    password = getpass("Senha: ")
+    confirm = getpass("Confirme a senha: ")
+    if password != confirm:
+        print("As senhas não conferem.")
+        return 1
 
     if not username or not password:
         print("Usuário e senha são obrigatórios.")
@@ -36,6 +37,13 @@ def main(argv: list[str]) -> int:
 
     if role not in auth.VALID_ROLES:
         print(f"Papel inválido. Use: {', '.join(sorted(auth.VALID_ROLES))}.")
+        return 1
+
+    try:
+        username = auth.validate_username(username)
+        auth.validate_new_password(password, username=username)
+    except ValueError as exc:
+        print(f"Credencial inválida: {exc}")
         return 1
 
     existing = db.get_admin_user_by_username(username)

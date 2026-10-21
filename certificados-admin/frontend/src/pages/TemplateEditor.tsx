@@ -1,68 +1,188 @@
-import { useEffect, useState } from "react";
+/**
+ * Template do certificado — version list and visual editor.
+ *
+ * Two views in one route. The list is the safe, default view; the editor is
+ * entered deliberately. Key behaviours the brief asked for:
+ *
+ *  - Undo/redo (Ctrl+Z / Ctrl+Shift+Z) via useTemplateHistory.
+ *  - An unsaved-changes guard on both browser exit and in-app "Voltar".
+ *  - Zoom with keyboard shortcuts and a reset.
+ *  - Activation of a version is confirmed with a typed phrase, because it
+ *    changes every certificate issued from that moment on.
+ *  - Versions can be compared side by side before activating one.
+ *
+ * Layout: on notebooks (≤1279px) the two side panels collapse into a tabbed
+ * strip so the canvas keeps usable width at 1366×768.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
 import EditorCanvas from "../components/editor/EditorCanvas";
 import EditorTopbar from "../components/editor/EditorTopbar";
 import ElementList from "../components/editor/ElementList";
 import PropertiesPanel from "../components/editor/PropertiesPanel";
 import AccessibleModal from "../components/AccessibleModal";
+import ConfirmDialog from "../ui/ConfirmDialog";
+import PageHeader from "../ui/PageHeader";
+import Panel, { PanelHeader } from "../ui/Panel";
+import Alert from "../ui/Alert";
+import Button from "../ui/Button";
+import Icon from "../ui/Icon";
+import StatusBadge from "../ui/StatusBadge";
+import { Field, TextInput } from "../ui/Field";
+import { EmptyState, ErrorState, Skeleton } from "../ui/Feedback";
+import { cn } from "../ui/cn";
 import { useEditorCanvas } from "../hooks/useEditorCanvas";
+import {
+  useTemplateHistory,
+  useUnsavedChangesWarning,
+} from "../hooks/useTemplateHistory";
+import { useAuth } from "../app/AuthContext";
+import { useMediaQuery } from "../app/useMediaQuery";
+import { failureMessage } from "../app/useAsyncData";
 import {
   TemplateVersion,
   activateVersion,
   createVersion,
-  getActiveVersion,
+  deleteVersion,
   getVersion,
   listVersions,
+  renameVersion,
 } from "../services/templateApi";
-import { API_BASE_URL, getApiErrorMessage } from "../services/api";
+import { API_BASE_URL } from "../services/api";
 
 type EditorMode = "list" | "edit";
-type DialogState = {
-  title: string;
-  message: string;
-  confirmLabel?: string;
-  onConfirm?: () => void;
-};
 
 function bgUrl(version: TemplateVersion): string {
   return `${API_BASE_URL.replace(/\/$/, "")}${version.background_url}`;
 }
 
-function TemplateEditor() {
+function formatDate(value?: string | null): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? "—"
+    : parsed.toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+}
+
+export default function TemplateEditor() {
+  const { can } = useAuth();
+  const canManage = can("templates.manage");
+
   const [mode, setMode] = useState<EditorMode>("list");
   const [versions, setVersions] = useState<TemplateVersion[]>([]);
   const [active, setActive] = useState<TemplateVersion | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
   const [templateName, setTemplateName] = useState("Nova versão");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [notice, setNotice] = useState("");
+
+  const [message, setMessage] = useState<{ title: string; body: string } | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [activating, setActivating] = useState<TemplateVersion | null>(null);
+  const [activateBusy, setActivateBusy] = useState(false);
+  const [activateError, setActivateError] = useState("");
+  const [renaming, setRenaming] = useState<TemplateVersion | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState("");
+  const [deleting, setDeleting] = useState<TemplateVersion | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [compare, setCompare] = useState<TemplateVersion[] | null>(null);
 
   const editor = useEditorCanvas();
+  const history = useTemplateHistory(editor);
+  const isEditing = mode === "edit";
+  useUnsavedChangesWarning(isEditing && history.isDirty);
 
-  const refreshList = async () => {
+  /* Every canvas mutation is routed through `noteUserEdit` so the history layer
+   * can tell a real change apart from the layout settling after a load. Wrapped
+   * here rather than inside useEditorCanvas to keep that hook (and its tests)
+   * untouched. */
+  const { noteUserEdit } = history;
+  const edited = useCallback(
+    <Args extends unknown[], R>(action: (...args: Args) => R) =>
+      (...args: Args): R => {
+        noteUserEdit();
+        return action(...args);
+      },
+    [noteUserEdit],
+  );
+
+  const editorActions = useMemo(
+    () => ({
+      addTextElement: edited(editor.addTextElement),
+      addImageElement: edited(editor.addImageElement),
+      updateElement: edited(editor.updateElement),
+      deleteElement: edited(editor.deleteElement),
+      duplicateElement: edited(editor.duplicateElement),
+      setBackground: edited(editor.setBackground),
+      clearAll: edited(editor.clearAll),
+      importJSON: edited(editor.importJSON),
+    }),
+    [
+      edited,
+      editor.addTextElement,
+      editor.addImageElement,
+      editor.updateElement,
+      editor.deleteElement,
+      editor.duplicateElement,
+      editor.setBackground,
+      editor.clearAll,
+      editor.importJSON,
+    ],
+  );
+
+  /* Below xl the side panels share one strip, so the canvas keeps its width. */
+  const isWideEditor = useMediaQuery("(min-width: 1280px)", true);
+  const [activeSidePanel, setActiveSidePanel] = useState<"elements" | "properties">(
+    "elements",
+  );
+
+  const refreshList = useCallback(async () => {
     setLoading(true);
     setLoadError("");
     try {
-      const [list, act] = await Promise.all([listVersions(), getActiveVersion()]);
+      const list = await listVersions();
       setVersions(list);
-      setActive(act);
+      setActive(list.find((version) => version.is_active) ?? null);
     } catch (error) {
-      setLoadError(getApiErrorMessage(error, "Não foi possível carregar o template. Tente novamente."));
+      setLoadError(
+        failureMessage(error, "Não foi possível carregar as versões do template."),
+      );
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    if (mode === "list") refreshList();
-  }, [mode]);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled && mode === "list") void refreshList();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, refreshList]);
 
   const openEditor = async (versionId: number | null, name: string) => {
     setSaveError("");
     setTemplateName(name);
     setMode("edit");
+    history.reset();
+    // Whatever settles on the canvas next is the clean starting point, whether
+    // that is an empty canvas or a loaded version.
+    history.markNextAsBaseline();
     if (versionId == null) {
       editor.clearAll();
       return;
@@ -71,7 +191,9 @@ function TemplateEditor() {
       const full = await getVersion(versionId);
       if (full.layout) editor.loadTemplate(full.layout);
     } catch (error) {
-      setSaveError(getApiErrorMessage(error, "Não foi possível carregar a versão para edição."));
+      setSaveError(
+        failureMessage(error, "Não foi possível carregar esta versão para edição."),
+      );
     }
   };
 
@@ -79,279 +201,780 @@ function TemplateEditor() {
     const name = templateName.trim();
     const layout = editor.getLayout();
     if (!layout.background) {
-      setSaveError("Faça upload de uma imagem de fundo antes de salvar.");
+      setSaveError("Envie a arte de fundo antes de salvar a versão.");
       return;
     }
     setSaving(true);
     setSaveError("");
     try {
-      const created = await createVersion(name || "Nova versão", layout);
+      await createVersion(name || "Nova versão", layout);
+      history.markSaved();
       setMode("list");
+      setNotice(
+        "Nova versão salva. Ela ainda não está ativa — ative-a quando quiser que valha para as próximas emissões.",
+      );
       await refreshList();
-      // Surface the new (inactive) version so the user can activate it.
-      setActive((prev) => prev);
-      void created;
     } catch (error) {
-      setSaveError(getApiErrorMessage(error, "Erro ao salvar a versão. Verifique o servidor e tente novamente."));
+      setSaveError(failureMessage(error, "Erro ao salvar a versão."));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleActivate = async (id: number) => {
+  const handleActivate = async () => {
+    if (!activating) return;
+    setActivateBusy(true);
+    setActivateError("");
     try {
-      await activateVersion(id);
+      await activateVersion(activating.id);
+      setActivating(null);
+      setNotice(
+        `Versão ${activating.version_number} ativada. Os próximos certificados usarão este layout.`,
+      );
       await refreshList();
     } catch (error) {
-      setDialog({
-        title: "Falha ao ativar versão",
-        message: getApiErrorMessage(error, "Não foi possível ativar esta versão."),
-      });
+      setActivateError(failureMessage(error, "Não foi possível ativar esta versão."));
+    } finally {
+      setActivateBusy(false);
     }
   };
 
-  const modal = (
-    <AccessibleModal
-      open={Boolean(dialog)}
-      title={dialog?.title ?? "Aviso"}
-      onClose={() => setDialog(null)}
-      footer={
-        <>
-          {dialog?.onConfirm && (
-            <button
-              type="button"
-              onClick={() => {
-                dialog.onConfirm?.();
-                setDialog(null);
-              }}
-              className="rounded-full bg-rose-700 px-5 py-2 text-sm font-semibold text-white"
-            >
-              {dialog.confirmLabel ?? "Confirmar"}
-            </button>
-          )}
-          <button type="button" onClick={() => setDialog(null)} className="rounded-full border border-slate-300 px-4 py-2 text-sm">
-            {dialog?.onConfirm ? "Cancelar" : "Fechar"}
-          </button>
-        </>
-      }
-    >
-      <p className="text-sm text-slate-700">{dialog?.message}</p>
-    </AccessibleModal>
-  );
+  const handleRename = async () => {
+    if (!renaming) return;
+    const cleanName = renameName.trim();
+    if (!cleanName) {
+      setRenameError("Informe um nome para a versão.");
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError("");
+    try {
+      await renameVersion(renaming.id, cleanName);
+      setRenaming(null);
+      setNotice(`Versão ${renaming.version_number} renomeada com sucesso.`);
+      await refreshList();
+    } catch (error) {
+      setRenameError(failureMessage(error, "Não foi possível renomear esta versão."));
+    } finally {
+      setRenameBusy(false);
+    }
+  };
 
-  // ── List view ──────────────────────────────────────────────────────────────
+  const handleDelete = async () => {
+    if (!deleting) return;
+    setDeleteBusy(true);
+    setDeleteError("");
+    try {
+      await deleteVersion(deleting.id);
+      setDeleting(null);
+      setNotice(`Versão ${deleting.version_number} excluída.`);
+      await refreshList();
+    } catch (error) {
+      setDeleteError(failureMessage(error, "Não foi possível excluir esta versão."));
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const requestBack = () => {
+    if (history.isDirty) setLeaving(true);
+    else setMode("list");
+  };
+
+  /* Keyboard shortcuts — only while the editor view is open, and never while
+   * the operator is typing into a field. */
+  useEffect(() => {
+    if (!isEditing) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
+      const mod = event.ctrlKey || event.metaKey;
+
+      if (mod && event.key.toLowerCase() === "z") {
+        if (typing) return;
+        event.preventDefault();
+        if (event.shiftKey) history.redo();
+        else history.undo();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === "y") {
+        if (typing) return;
+        event.preventDefault();
+        history.redo();
+        return;
+      }
+      if (mod && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void handleSave();
+        return;
+      }
+      if (mod && (event.key === "=" || event.key === "+")) {
+        event.preventDefault();
+        editor.setZoom(Math.min(3, editor.zoom + 0.25));
+        return;
+      }
+      if (mod && event.key === "-") {
+        event.preventDefault();
+        editor.setZoom(Math.max(0.25, editor.zoom - 0.25));
+        return;
+      }
+      if (mod && event.key === "0") {
+        event.preventDefault();
+        editor.setZoom(1);
+        return;
+      }
+      if (event.key === "?" && !typing) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, history, editor.zoom]);
+
+  /* ── List view ──────────────────────────────────────────────────────── */
   if (mode === "list") {
     return (
       <>
-      <section className="space-y-6">
-        <div className="flex items-end justify-between">
-          <div className="space-y-1">
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-sky-700">
-              Template global
-            </p>
-            <h2 className="text-2xl font-semibold text-slate-950">
-              Modelo único de certificado
-            </h2>
-            <p className="text-sm text-slate-500">
-              Existe um único template global. Cada alteração cria uma{" "}
-              <strong>nova versão imutável</strong>; ative a que deve valer para
-              todos os certificados.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => openEditor(active ? active.id : null, active ? `Cópia de v${active.version_number}` : "Nova versão")}
-              className="inline-flex items-center justify-center rounded-full border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-sky-400 hover:bg-sky-50"
-            >
-              {active ? "Editar (nova versão)" : "Criar template"}
-            </button>
-          </div>
-        </div>
+        <PageHeader
+          title="Template do certificado"
+          description="Existe um único template global. Cada alteração cria uma nova versão imutável; ative a que deve valer para as próximas emissões."
+          actions={
+            canManage ? (
+              <Button
+                variant="primary"
+                icon={active ? "duplicate" : "plus"}
+                onClick={() =>
+                  openEditor(
+                    active ? active.id : null,
+                    active ? `Cópia de v${active.version_number}` : "Nova versão",
+                  )
+                }
+              >
+                {active ? "Editar (nova versão)" : "Criar template"}
+              </Button>
+            ) : undefined
+          }
+        />
+
+        {notice && (
+          <Alert tone="ok" className="mb-4">
+            {notice}
+          </Alert>
+        )}
 
         {loadError && (
-          <div className="rounded-[1.5rem] border border-rose-200 bg-rose-50/90 p-4 text-sm font-medium text-rose-800">
-            {loadError}
-          </div>
+          <Panel className="mb-4">
+            <ErrorState description={loadError} onRetry={refreshList} />
+          </Panel>
         )}
 
-        {loading ? (
-          <p className="text-sm text-slate-500">Carregando…</p>
-        ) : (
-          <>
-            {/* Active template */}
-            <div className="rounded-[1.75rem] border border-slate-200/80 bg-white/90 p-5">
-              <p className="mb-3 text-sm font-semibold text-slate-700">Versão ativa</p>
-              {active ? (
-                <div className="flex items-center gap-4">
-                  <img
-                    src={bgUrl(active)}
-                    alt={`Versão ${active.version_number}`}
-                    className="h-28 w-44 rounded-xl border border-slate-200 object-cover"
-                  />
-                  <div className="space-y-0.5">
-                    <p className="font-semibold text-slate-900">
-                      v{active.version_number}
-                      {active.name ? ` — ${active.name}` : ""}
-                    </p>
-                    <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
-                      Ativa
-                    </span>
-                  </div>
+        {!canManage && (
+          <Alert tone="info" live={false} className="mb-4">
+            Seu perfil permite consultar o template, mas não criar nem ativar
+            versões.
+          </Alert>
+        )}
+
+        {/* Active version */}
+        <Panel className="mb-4">
+          <PanelHeader
+            title="Versão ativa"
+            description="Layout usado em todos os certificados emitidos agora."
+          />
+          <div className="px-4 py-4 sm:px-5">
+            {loading ? (
+              <div className="flex gap-4">
+                <Skeleton className="h-28 w-44" />
+                <div className="flex-1 space-y-2">
+                  <Skeleton width="12rem" />
+                  <Skeleton width="8rem" />
                 </div>
-              ) : (
-                <p className="text-sm text-slate-400">
-                  Nenhuma versão ativa ainda. Crie e ative um template.
-                </p>
-              )}
-            </div>
-
-            {/* Version history */}
-            <div className="rounded-[1.75rem] border border-slate-200/80 bg-white/90 p-5">
-              <p className="mb-3 text-sm font-semibold text-slate-700">
-                Histórico de versões
-              </p>
-              {versions.length === 0 ? (
-                <p className="text-sm text-slate-400">Nenhuma versão criada ainda.</p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {versions.map((v) => (
-                    <li
-                      key={v.id}
-                      className="flex items-center justify-between gap-3 py-3"
+              </div>
+            ) : active ? (
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+                <img
+                  src={bgUrl(active)}
+                  alt={`Arte de fundo da versão ${active.version_number}`}
+                  className="h-28 w-full max-w-[16rem] rounded-[var(--radius)] border border-[color:var(--line)] object-contain sm:w-44"
+                />
+                <div className="min-w-0">
+                  <p className="text-[length:var(--text-md)] font-semibold text-[color:var(--ink)]">
+                    Versão {active.version_number}
+                    {active.name ? ` — ${active.name}` : ""}
+                  </p>
+                  <div className="mt-1.5">
+                    <StatusBadge tone="ok">Ativa</StatusBadge>
+                  </div>
+                  <dl className="mt-3 space-y-1 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
+                    <div className="flex gap-2">
+                      <dt>Criada em:</dt>
+                      <dd className="text-[color:var(--ink)]">{formatDate(active.created_at)}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt>Ativada em:</dt>
+                      <dd className="text-[color:var(--ink)]">
+                        {formatDate(active.activated_at)}
+                      </dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt>Dimensões:</dt>
+                      <dd className="text-[color:var(--ink)]">
+                        {active.image_width} × {active.image_height} px
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              </div>
+            ) : (
+              <EmptyState
+                icon="template"
+                title="Nenhuma versão ativa"
+                description="Sem um template ativo os certificados não podem ser gerados. Crie um template e ative-o."
+                action={
+                  canManage ? (
+                    <Button
+                      variant="primary"
+                      icon="plus"
+                      onClick={() => openEditor(null, "Nova versão")}
                     >
-                      <div className="flex items-center gap-3">
-                        <img
-                          src={bgUrl(v)}
-                          alt={`v${v.version_number}`}
-                          className="h-12 w-20 rounded-lg border border-slate-200 object-cover"
-                        />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">
-                            v{v.version_number}
-                            {v.name ? ` — ${v.name}` : ""}
-                          </p>
-                          {v.created_at && (
-                            <p className="text-xs text-slate-400">
-                              {new Date(v.created_at).toLocaleString("pt-BR")}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {v.is_active ? (
-                          <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-                            Ativa
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleActivate(v.id)}
-                            className="rounded-full border border-emerald-300 px-3 py-1 text-xs font-medium text-emerald-700 transition hover:bg-emerald-50"
-                          >
-                            Ativar
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => openEditor(v.id, `Cópia de v${v.version_number}`)}
-                          className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
-                        >
-                          Editar
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                      Criar template
+                    </Button>
+                  ) : undefined
+                }
+              />
+            )}
+          </div>
+        </Panel>
+
+        {/* Version history */}
+        <Panel>
+          <PanelHeader
+            title="Histórico de versões"
+            description="Versões anteriores são preservadas. Compare duas lado a lado antes de ativar."
+            actions={
+              versions.length > 1 ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="eye"
+                  onClick={() => setCompare(versions.slice(0, 2))}
+                >
+                  Comparar versões
+                </Button>
+              ) : undefined
+            }
+          />
+
+          {loading ? (
+            <div className="space-y-3 px-4 py-4 sm:px-5">
+              {[0, 1, 2].map((row) => (
+                <Skeleton key={row} className="h-14" />
+              ))}
             </div>
-          </>
-        )}
-      </section>
-      {modal}
+          ) : versions.length === 0 ? (
+            <EmptyState
+              icon="template"
+              title="Nenhuma versão criada"
+              description="A primeira versão aparecerá aqui assim que você salvar o template."
+            />
+          ) : (
+            <ul className="divide-y divide-[color:var(--line)]">
+              {versions.map((version) => (
+                <li
+                  key={version.id}
+                  className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5"
+                >
+                  <img
+                    src={bgUrl(version)}
+                    alt=""
+                    className="h-14 w-24 shrink-0 rounded-[var(--radius)] border border-[color:var(--line)] object-contain"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-[color:var(--ink)]">
+                      Versão {version.version_number}
+                      {version.name ? ` — ${version.name}` : ""}
+                    </p>
+                    <p className="mt-0.5 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
+                      Criada em {formatDate(version.created_at)}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {version.is_active ? (
+                      <StatusBadge tone="ok">Ativa</StatusBadge>
+                    ) : (
+                      canManage && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => {
+                            setActivateError("");
+                            setActivating(version);
+                          }}
+                        >
+                          Ativar
+                        </Button>
+                      )
+                    )}
+                    {canManage && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setRenameError("");
+                          setRenameName(version.name || `Versão ${version.version_number}`);
+                          setRenaming(version);
+                        }}
+                      >
+                        Renomear
+                      </Button>
+                    )}
+                    {canManage && !version.is_active && (
+                      <Button
+                        size="sm"
+                        variant="danger-quiet"
+                        icon="trash"
+                        onClick={() => {
+                          setDeleteError("");
+                          setDeleting(version);
+                        }}
+                      >
+                        Excluir
+                      </Button>
+                    )}
+                    {canManage && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon="duplicate"
+                        onClick={() =>
+                          openEditor(version.id, `Cópia de v${version.version_number}`)
+                        }
+                      >
+                        Editar como nova
+                      </Button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+
+        {/* Activation — typed confirmation, since it affects every future issue */}
+        <ConfirmDialog
+          open={Boolean(activating)}
+          title={`Ativar versão ${activating?.version_number ?? ""}`}
+          description="Todos os certificados emitidos a partir de agora usarão este layout."
+          confirmLabel="Ativar esta versão"
+          tone="primary"
+          busy={activateBusy}
+          error={activateError}
+          requireTyped="ATIVAR"
+          onConfirm={handleActivate}
+          onClose={() => {
+            if (!activateBusy) {
+              setActivating(null);
+              setActivateError("");
+            }
+          }}
+        >
+          {activating && (
+            <div className="flex gap-3">
+              <img
+                src={bgUrl(activating)}
+                alt=""
+                className="h-20 w-32 shrink-0 rounded-[var(--radius)] border border-[color:var(--line)] object-contain"
+              />
+              <div className="min-w-0 text-[length:var(--text-sm)]">
+                <p className="text-[color:var(--ink)]">
+                  A versão ativa passará de{" "}
+                  <strong>
+                    {active ? `v${active.version_number}` : "nenhuma"}
+                  </strong>{" "}
+                  para <strong>v{activating.version_number}</strong>.
+                </p>
+                <p className="mt-1.5 text-[color:var(--ink-muted)]">
+                  Certificados já emitidos não mudam — eles mantêm o layout com
+                  que foram gerados.
+                </p>
+              </div>
+            </div>
+          )}
+        </ConfirmDialog>
+
+        <ConfirmDialog
+          open={Boolean(renaming)}
+          title={`Renomear versão ${renaming?.version_number ?? ""}`}
+          description="O nome é apenas uma identificação administrativa; o layout e os certificados emitidos não serão alterados."
+          confirmLabel="Salvar novo nome"
+          tone="primary"
+          busy={renameBusy}
+          error={renameError}
+          onConfirm={handleRename}
+          onClose={() => {
+            if (!renameBusy) {
+              setRenaming(null);
+              setRenameError("");
+            }
+          }}
+        >
+          <Field label="Nome da versão">
+            {(props) => (
+              <TextInput
+                {...props}
+                value={renameName}
+                maxLength={255}
+                autoComplete="off"
+                onChange={(event) => setRenameName(event.target.value)}
+              />
+            )}
+          </Field>
+        </ConfirmDialog>
+
+        <ConfirmDialog
+          open={Boolean(deleting)}
+          title={`Excluir versão ${deleting?.version_number ?? ""}`}
+          description="Esta ação remove permanentemente esta versão não utilizada."
+          confirmLabel="Excluir esta versão"
+          busy={deleteBusy}
+          error={deleteError}
+          requireTyped="EXCLUIR"
+          onConfirm={handleDelete}
+          onClose={() => {
+            if (!deleteBusy) {
+              setDeleting(null);
+              setDeleteError("");
+            }
+          }}
+        >
+          <Alert tone="warn">
+            A versão ativa e qualquer versão já usada em certificados não podem ser
+            excluídas. Nesses casos, o sistema preserva o histórico automaticamente.
+          </Alert>
+        </ConfirmDialog>
+
+        {/* Comparison */}
+        <AccessibleModal
+          open={Boolean(compare)}
+          title="Comparar versões"
+          description="Escolha duas versões para ver as artes lado a lado."
+          size="lg"
+          onClose={() => setCompare(null)}
+          footer={
+            <Button variant="secondary" onClick={() => setCompare(null)}>
+              Fechar
+            </Button>
+          }
+        >
+          {compare && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[0, 1].map((slot) => (
+                <div key={slot}>
+                  <label
+                    htmlFor={`compare-${slot}`}
+                    className="text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]"
+                  >
+                    {slot === 0 ? "Versão A" : "Versão B"}
+                  </label>
+                  <select
+                    id={`compare-${slot}`}
+                    value={compare[slot]?.id ?? ""}
+                    onChange={(event) => {
+                      const picked = versions.find(
+                        (version) => version.id === Number(event.target.value),
+                      );
+                      if (!picked) return;
+                      const next = [...compare];
+                      next[slot] = picked;
+                      setCompare(next);
+                    }}
+                    className="mt-1 h-10 w-full rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2.5 text-[length:var(--text-sm)]"
+                  >
+                    {versions.map((version) => (
+                      <option key={version.id} value={version.id}>
+                        v{version.version_number}
+                        {version.name ? ` — ${version.name}` : ""}
+                        {version.is_active ? " (ativa)" : ""}
+                      </option>
+                    ))}
+                  </select>
+
+                  {compare[slot] && (
+                    <>
+                      <img
+                        src={bgUrl(compare[slot])}
+                        alt={`Arte da versão ${compare[slot].version_number}`}
+                        className="mt-2 w-full rounded-[var(--radius)] border border-[color:var(--line)] object-contain"
+                      />
+                      <dl className="mt-2 space-y-0.5 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
+                        <div className="flex justify-between gap-2">
+                          <dt>Criada em</dt>
+                          <dd className="text-[color:var(--ink)]">
+                            {formatDate(compare[slot].created_at)}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt>Dimensões</dt>
+                          <dd className="text-[color:var(--ink)]">
+                            {compare[slot].image_width} × {compare[slot].image_height}
+                          </dd>
+                        </div>
+                      </dl>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </AccessibleModal>
       </>
     );
   }
 
-  // ── Editor view ────────────────────────────────────────────────────────────
+  /* ── Editor view ────────────────────────────────────────────────────── */
   return (
     <>
-    <div className="-mx-6 -my-12 flex h-screen flex-col md:-mx-10 md:-my-20">
-      <EditorTopbar
-        templateName={templateName}
-        saving={saving}
-        hasBackground={Boolean(editor.backgroundUrl)}
-        showMockData={editor.showMockData}
-        showGrid={editor.showGrid}
-        zoom={editor.zoom}
-        onNameChange={setTemplateName}
-        onSave={handleSave}
-        onBack={() => setMode("list")}
-        onRequestClear={() =>
-          setDialog({
-            title: "Limpar editor",
-            message: "Remover todos os elementos do canvas? Esta ação não pode ser desfeita.",
-            confirmLabel: "Limpar elementos",
-            onConfirm: editor.clearAll,
-          })
-        }
-        onError={(message) => setDialog({ title: "Erro no editor", message })}
-        onSetMock={editor.setShowMockData}
-        onSetGrid={editor.setShowGrid}
-        onSetZoom={editor.setZoom}
-        onExport={editor.exportJSON}
-        onImport={editor.importJSON}
-        onBackgroundUploaded={(url, w, h) => editor.setBackground(url, w, h)}
-        onImageUploaded={editor.addImageElement}
-      />
-
-      {saveError && (
-        <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700">
-          {saveError}
-        </div>
-      )}
-
-      {editor.canvasError && (
-        <div className="flex items-center justify-between gap-4 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700">
-          <span>{editor.canvasError}</span>
-          <button
-            type="button"
-            onClick={editor.clearCanvasError}
-            className="rounded-full border border-rose-300 px-3 py-1 text-xs hover:bg-rose-100"
-          >
-            Fechar
-          </button>
-        </div>
-      )}
-
-      <div className="flex flex-1 overflow-hidden">
-        <ElementList
-          elements={editor.elements}
-          selectedId={editor.selectedId}
-          onAdd={editor.addTextElement}
-          onSelect={editor.selectElement}
-          onDelete={editor.deleteElement}
-          onDuplicate={editor.duplicateElement}
-        />
-
-        <EditorCanvas
-          canvasRef={editor.canvasRef}
-          backgroundUrl={editor.backgroundUrl}
+      {/* Break out of the shell's padded container: the editor wants the whole
+          viewport, and a canvas inside a max-width column wastes the screen. */}
+      <div className="-mx-3 -my-5 flex h-[calc(100vh-var(--topbar-height))] flex-col sm:-mx-5 sm:-my-6 lg:-mx-8">
+        <EditorTopbar
+          templateName={templateName}
+          saving={saving}
+          hasBackground={Boolean(editor.backgroundUrl)}
+          isDirty={history.isDirty}
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+          showMockData={editor.showMockData}
+          showGrid={editor.showGrid}
           zoom={editor.zoom}
+          onNameChange={setTemplateName}
+          onSave={handleSave}
+          onBack={requestBack}
+          onUndo={history.undo}
+          onRedo={history.redo}
+          onRequestClear={() => setClearing(true)}
+          onError={(body) => setMessage({ title: "Erro no editor", body })}
+          onSetMock={editor.setShowMockData}
+          onSetGrid={editor.setShowGrid}
+          onSetZoom={editor.setZoom}
+          onExport={editor.exportJSON}
+          onImport={editorActions.importJSON}
+          onBackgroundUploaded={(url, width, height) =>
+            editorActions.setBackground(url, width, height)
+          }
+          onImageUploaded={editorActions.addImageElement}
+          onShowShortcuts={() => setShortcutsOpen(true)}
         />
 
-        <PropertiesPanel
-          elements={editor.elements}
-          selectedId={editor.selectedId}
-          onUpdate={editor.updateElement}
-          onDelete={editor.deleteElement}
-          onDuplicate={editor.duplicateElement}
-        />
+        {saveError && (
+          <Alert tone="danger" className="rounded-none border-x-0 border-t-0">
+            {saveError}
+          </Alert>
+        )}
+        {editor.canvasError && (
+          <Alert
+            tone="danger"
+            className="rounded-none border-x-0 border-t-0"
+            actions={
+              <Button size="sm" variant="secondary" onClick={editor.clearCanvasError}>
+                Fechar
+              </Button>
+            }
+          >
+            {editor.canvasError}
+          </Alert>
+        )}
+
+        <div className="flex min-h-0 flex-1">
+          {isWideEditor ? (
+            <>
+              <aside className="w-56 shrink-0 border-r border-[color:var(--line)]">
+                <ElementList
+                  elements={editor.elements}
+                  selectedId={editor.selectedId}
+                  onAdd={editorActions.addTextElement}
+                  onSelect={editor.selectElement}
+                  onDelete={editorActions.deleteElement}
+                  onDuplicate={editorActions.duplicateElement}
+                />
+              </aside>
+
+              <EditorCanvas
+                canvasRef={editor.canvasRef}
+                backgroundUrl={editor.backgroundUrl}
+                zoom={editor.zoom}
+              />
+
+              <aside className="w-64 shrink-0 border-l border-[color:var(--line)]">
+                <PropertiesPanel
+                  elements={editor.elements}
+                  selectedId={editor.selectedId}
+                  onUpdate={editorActions.updateElement}
+                  onDelete={editorActions.deleteElement}
+                  onDuplicate={editorActions.duplicateElement}
+                />
+              </aside>
+            </>
+          ) : (
+            <>
+              <EditorCanvas
+                canvasRef={editor.canvasRef}
+                backgroundUrl={editor.backgroundUrl}
+                zoom={editor.zoom}
+              />
+
+              {/* One shared side strip on smaller screens. */}
+              <aside className="flex w-60 shrink-0 flex-col border-l border-[color:var(--line)] bg-[var(--surface)]">
+                <div
+                  role="tablist"
+                  aria-label="Painéis do editor"
+                  className="flex border-b border-[color:var(--line)]"
+                >
+                  {(["elements", "properties"] as const).map((panel) => (
+                    <button
+                      key={panel}
+                      role="tab"
+                      type="button"
+                      aria-selected={activeSidePanel === panel}
+                      onClick={() => setActiveSidePanel(panel)}
+                      className={cn(
+                        "flex-1 px-3 py-2 text-[length:var(--text-xs)] font-medium",
+                        activeSidePanel === panel
+                          ? "border-b-2 border-[color:var(--brand-700)] text-[color:var(--ink)]"
+                          : "text-[color:var(--ink-muted)] hover:text-[color:var(--ink)]",
+                      )}
+                    >
+                      {panel === "elements" ? "Elementos" : "Propriedades"}
+                    </button>
+                  ))}
+                </div>
+                <div className="min-h-0 flex-1">
+                  {activeSidePanel === "elements" ? (
+                    <ElementList
+                      elements={editor.elements}
+                      selectedId={editor.selectedId}
+                      onAdd={editorActions.addTextElement}
+                      onSelect={editor.selectElement}
+                      onDelete={editorActions.deleteElement}
+                      onDuplicate={editorActions.duplicateElement}
+                    />
+                  ) : (
+                    <PropertiesPanel
+                      elements={editor.elements}
+                      selectedId={editor.selectedId}
+                      onUpdate={editorActions.updateElement}
+                      onDelete={editorActions.deleteElement}
+                      onDuplicate={editorActions.duplicateElement}
+                    />
+                  )}
+                </div>
+              </aside>
+            </>
+          )}
+        </div>
       </div>
-    </div>
-    {modal}
+
+      {/* Dialogs */}
+      <ConfirmDialog
+        open={clearing}
+        title="Limpar todos os elementos"
+        description="A arte de fundo é mantida."
+        confirmLabel="Limpar elementos"
+        onConfirm={() => {
+          editorActions.clearAll();
+          setClearing(false);
+        }}
+        onClose={() => setClearing(false)}
+      >
+        <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
+          Todos os campos posicionados no canvas serão removidos. Você ainda pode
+          desfazer com Ctrl+Z.
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={leaving}
+        title="Sair sem salvar?"
+        description="As alterações feitas nesta versão serão perdidas."
+        confirmLabel="Sair sem salvar"
+        onConfirm={() => {
+          setLeaving(false);
+          history.reset();
+          setMode("list");
+        }}
+        cancelLabel="Continuar editando"
+        onClose={() => setLeaving(false)}
+      >
+        <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
+          Há alterações que ainda não foram salvas como uma nova versão.
+        </p>
+      </ConfirmDialog>
+
+      <AccessibleModal
+        open={shortcutsOpen}
+        title="Atalhos de teclado"
+        onClose={() => setShortcutsOpen(false)}
+        footer={
+          <Button variant="secondary" onClick={() => setShortcutsOpen(false)}>
+            Fechar
+          </Button>
+        }
+      >
+        <dl className="divide-y divide-[color:var(--line)]">
+          {[
+            ["Ctrl + Z", "Desfazer"],
+            ["Ctrl + Shift + Z", "Refazer"],
+            ["Ctrl + S", "Salvar versão"],
+            ["Ctrl + +", "Aumentar zoom"],
+            ["Ctrl + −", "Diminuir zoom"],
+            ["Ctrl + 0", "Zoom 100%"],
+            ["Setas", "Mover o elemento selecionado"],
+            ["Delete", "Excluir o elemento selecionado"],
+            ["?", "Abrir esta lista"],
+          ].map(([keys, description]) => (
+            <div
+              key={keys}
+              className="flex items-baseline justify-between gap-4 py-2"
+            >
+              <dt>
+                <kbd className="rounded-[var(--radius-sm)] border border-[color:var(--line-strong)] bg-[var(--surface-sunken)] px-1.5 py-0.5 font-[family-name:var(--font-mono)] text-[length:var(--text-xs)] text-[color:var(--ink)]">
+                  {keys}
+                </kbd>
+              </dt>
+              <dd className="text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
+                {description}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </AccessibleModal>
+
+      <AccessibleModal
+        open={Boolean(message)}
+        title={message?.title ?? "Aviso"}
+        onClose={() => setMessage(null)}
+        footer={
+          <Button variant="secondary" onClick={() => setMessage(null)}>
+            Fechar
+          </Button>
+        }
+      >
+        <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
+          {message?.body}
+        </p>
+      </AccessibleModal>
+
+      <span className="sr-only" role="status" aria-live="polite">
+        {notice}
+      </span>
     </>
   );
 }
-
-export default TemplateEditor;

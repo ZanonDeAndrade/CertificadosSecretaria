@@ -4,6 +4,7 @@ All secrets come exclusively from environment variables (never from the
 database or hardcoded values). A single repo-root ``.env`` is loaded the same
 way ``database/db.py`` does it, so both projects pick up identical settings.
 """
+
 from __future__ import annotations
 
 import base64
@@ -37,7 +38,12 @@ def _load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
-_load_dotenv(REPO_ROOT / ".env")
+if (os.getenv("CERTIFICADOS_DISABLE_DOTENV") or "").strip().lower() not in {
+    "1",
+    "true",
+    "yes",
+}:
+    _load_dotenv(REPO_ROOT / ".env")
 
 
 # ── App environment ─────────────────────────────────────────────────────────
@@ -49,6 +55,11 @@ def get_app_env() -> str:
 
 def is_production() -> bool:
     return get_app_env() in ("prod", "production")
+
+
+def is_local_server() -> bool:
+    """True for the hardened, HTTP-only deployment inside a private LAN."""
+    return get_app_env() in {"local_server", "local-server", "lan"}
 
 
 # ── Simple getters ──────────────────────────────────────────────────────────
@@ -94,6 +105,77 @@ def get_drive_auth_mode() -> str:
         ) from exc
 
 
+def get_drive_access_mode() -> str:
+    """Return ``read_write`` for admin/jobs or ``read_only`` for public reads."""
+
+    default = "read_only" if (os.getenv("APP_TARGET") or "").strip() == "consulta" else "read_write"
+    raw = (os.getenv("GOOGLE_DRIVE_ACCESS_MODE") or default).strip().lower()
+    aliases = {
+        "read_only": "read_only",
+        "read-only": "read_only",
+        "readonly": "read_only",
+        "read_write": "read_write",
+        "read-write": "read_write",
+        "readwrite": "read_write",
+    }
+    try:
+        return aliases[raw]
+    except KeyError as exc:
+        raise StorageConfigError(
+            "GOOGLE_DRIVE_ACCESS_MODE deve ser 'read_only' ou 'read_write'."
+        ) from exc
+
+
+def get_drive_scopes() -> list[str]:
+    if get_drive_access_mode() == "read_only":
+        return ["https://www.googleapis.com/auth/drive.readonly"]
+    return ["https://www.googleapis.com/auth/drive.file"]
+
+
+def validate_declared_scopes(scopes: object) -> None:
+    """Require an exact least-privilege scope set when metadata declares it."""
+
+    if isinstance(scopes, str):
+        declared = set(scopes.split())
+    elif isinstance(scopes, list):
+        declared = {str(scope) for scope in scopes}
+    else:
+        declared = set()
+    expected = set(get_drive_scopes())
+    if is_production() and not declared:
+        raise StorageConfigError(
+            "A credencial de produção deve declarar explicitamente o escopo do Drive."
+        )
+    if declared and declared != expected:
+        raise StorageConfigError(
+            "A credencial não declara exatamente o escopo exigido pelo perfil de acesso."
+        )
+
+
+def _credential_names(kind: str) -> tuple[str, str]:
+    """Select profile-specific credential variables.
+
+    Production never falls back from PUBLIC/ADMIN variables to a shared generic
+    credential, which makes accidental privilege sharing a startup error.
+    """
+
+    profile = "PUBLIC" if get_drive_access_mode() == "read_only" else "ADMIN"
+    if kind == "oauth":
+        return f"GOOGLE_{profile}_OAUTH_TOKEN_JSON_BASE64", f"GOOGLE_{profile}_OAUTH_TOKEN_FILE"
+    return (
+        f"GOOGLE_{profile}_SERVICE_ACCOUNT_JSON_BASE64",
+        f"GOOGLE_{profile}_SERVICE_ACCOUNT_FILE",
+    )
+
+
+def _first_configured(*names: str) -> tuple[str, str]:
+    for name in names:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return name, value
+    return "", ""
+
+
 def normalize_public_validation_base_url(value: str) -> str:
     """Validate and normalize the public origin/base path used by QR links.
 
@@ -118,13 +200,9 @@ def normalize_public_validation_base_url(value: str) -> str:
         raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL é inválida.") from exc
 
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        raise StorageConfigError(
-            "PUBLIC_VALIDATION_BASE_URL deve ser uma URL HTTP(S) absoluta."
-        )
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL deve ser uma URL HTTP(S) absoluta.")
     if parsed.username or parsed.password:
-        raise StorageConfigError(
-            "PUBLIC_VALIDATION_BASE_URL não pode conter usuário ou senha."
-        )
+        raise StorageConfigError("PUBLIC_VALIDATION_BASE_URL não pode conter usuário ou senha.")
     if parsed.query or parsed.fragment:
         raise StorageConfigError(
             "PUBLIC_VALIDATION_BASE_URL não pode conter query string ou fragmento."
@@ -136,9 +214,7 @@ def normalize_public_validation_base_url(value: str) -> str:
             "PUBLIC_VALIDATION_BASE_URL não pode conter segmentos '.' ou '..'."
         )
     normalized_path = f"/{'/'.join(segments)}" if segments else ""
-    return urlunsplit(
-        (parsed.scheme.lower(), parsed.netloc, normalized_path, "", "")
-    )
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, normalized_path, "", ""))
 
 
 def get_public_validation_base_url() -> str:
@@ -168,9 +244,7 @@ def validate_production_public_validation_url() -> None:
     value = (os.getenv("PUBLIC_VALIDATION_BASE_URL") or "").strip()
     base_url = normalize_public_validation_base_url(value)
     if urlsplit(base_url).scheme != "https":
-        raise StorageConfigError(
-            "Em produção, PUBLIC_VALIDATION_BASE_URL deve usar HTTPS."
-        )
+        raise StorageConfigError("Em produção, PUBLIC_VALIDATION_BASE_URL deve usar HTTPS.")
 
 
 def get_max_file_size_bytes() -> int | None:
@@ -198,34 +272,42 @@ def load_service_account_info() -> dict[str, Any]:
       1. ``GOOGLE_SERVICE_ACCOUNT_JSON_BASE64`` — preferred for production.
       2. ``GOOGLE_SERVICE_ACCOUNT_FILE`` — path to a JSON file (local dev only).
     """
-    b64 = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64") or "").strip()
+    profile_b64, profile_file = _credential_names("service_account")
+    b64_names = [profile_b64]
+    file_names = [profile_file]
+    if not is_production():
+        b64_names.append("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64")
+        file_names.append("GOOGLE_SERVICE_ACCOUNT_FILE")
+    _b64_name, b64 = _first_configured(*b64_names)
     if b64:
         try:
             decoded = base64.b64decode(b64)
-            return json.loads(decoded)
+            info = json.loads(decoded)
         except (binascii.Error, ValueError, json.JSONDecodeError) as exc:
             raise StorageConfigError(
                 "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 inválido (base64/JSON)."
             ) from exc
 
-    file_path = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "").strip()
-    if file_path:
+    else:
+        _file_name, file_path = _first_configured(*file_names)
+        if not file_path:
+            raise StorageConfigError(
+                "Credencial de Service Account ausente para o perfil de acesso selecionado."
+            )
         path = Path(file_path).expanduser()
         if not path.is_file():
-            raise StorageConfigError(
-                f"GOOGLE_SERVICE_ACCOUNT_FILE não encontrado: {path}"
-            )
+            raise StorageConfigError("Arquivo de Service Account configurado não foi encontrado.")
         try:
-            return json.loads(path.read_text("utf-8"))
+            info = json.loads(path.read_text("utf-8"))
         except (ValueError, json.JSONDecodeError) as exc:
-            raise StorageConfigError(
-                "GOOGLE_SERVICE_ACCOUNT_FILE não contém JSON válido."
-            ) from exc
+            raise StorageConfigError("GOOGLE_SERVICE_ACCOUNT_FILE não contém JSON válido.") from exc
 
-    raise StorageConfigError(
-        "Credenciais do Google Drive ausentes. Defina "
-        "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 ou GOOGLE_SERVICE_ACCOUNT_FILE."
-    )
+    if not isinstance(info, dict):
+        raise StorageConfigError("Credencial de Service Account deve ser um objeto JSON.")
+    # Service-account credential JSON has no OAuth ``scopes`` field; the exact
+    # scope is supplied programmatically by ``get_drive_scopes`` when building
+    # the credentials. OAuth authorized-user tokens are validated below.
+    return info
 
 
 def load_oauth_token_info() -> dict[str, Any]:
@@ -234,7 +316,13 @@ def load_oauth_token_info() -> dict[str, Any]:
     The token is generated once by ``authorize_google_drive.py``. Production
     should inject it as base64; a file path is convenient for local setup.
     """
-    b64 = (os.getenv("GOOGLE_OAUTH_TOKEN_JSON_BASE64") or "").strip()
+    profile_b64, profile_file = _credential_names("oauth")
+    b64_names = [profile_b64]
+    file_names = [profile_file]
+    if not is_production():
+        b64_names.append("GOOGLE_OAUTH_TOKEN_JSON_BASE64")
+        file_names.append("GOOGLE_OAUTH_TOKEN_FILE")
+    _b64_name, b64 = _first_configured(*b64_names)
     if b64:
         try:
             info = json.loads(base64.b64decode(b64))
@@ -243,39 +331,37 @@ def load_oauth_token_info() -> dict[str, Any]:
                 "GOOGLE_OAUTH_TOKEN_JSON_BASE64 inválido (base64/JSON)."
             ) from exc
     else:
-        file_path = (os.getenv("GOOGLE_OAUTH_TOKEN_FILE") or "").strip()
+        _file_name, file_path = _first_configured(*file_names)
         if not file_path:
             raise StorageConfigError(
-                "Token OAuth do Google Drive ausente. Defina "
-                "GOOGLE_OAUTH_TOKEN_JSON_BASE64 ou GOOGLE_OAUTH_TOKEN_FILE."
+                "Token OAuth do Google Drive ausente para o perfil de acesso selecionado."
             )
         path = Path(file_path).expanduser()
         if not path.is_file():
-            raise StorageConfigError(f"GOOGLE_OAUTH_TOKEN_FILE não encontrado: {path}")
+            raise StorageConfigError("Arquivo de token OAuth configurado não foi encontrado.")
         try:
             info = json.loads(path.read_text("utf-8"))
         except (ValueError, json.JSONDecodeError) as exc:
-            raise StorageConfigError(
-                "GOOGLE_OAUTH_TOKEN_FILE não contém JSON válido."
-            ) from exc
+            raise StorageConfigError("GOOGLE_OAUTH_TOKEN_FILE não contém JSON válido.") from exc
 
     required = {"refresh_token", "token_uri", "client_id", "client_secret"}
     missing = sorted(key for key in required if not info.get(key))
     if missing:
-        raise StorageConfigError(
-            "Token OAuth incompleto; campos ausentes: " + ", ".join(missing)
-        )
+        raise StorageConfigError("Token OAuth incompleto; campos ausentes: " + ", ".join(missing))
+    validate_declared_scopes(info.get("scopes"))
     return info
 
 
 # ── Fail-closed startup validation (production) ────────────────────────────────
 
 
-def validate_production_storage() -> None:
+def validate_production_storage(*, required_access: str | None = None) -> None:
     """Abort startup in production unless Google Drive is fully configured.
 
-    Requires ``STORAGE_PROVIDER=google_drive``, a folder id and loadable
-    credentials for the selected auth mode. No local fallback is allowed.
+    Requires ``STORAGE_PROVIDER=google_drive`` and loadable credentials for the
+    selected auth mode. The global folder is intentionally optional: new panel
+    emissions supply a validated folder per event; legacy tools still fail at
+    operation time when they call the storage without one.
     """
     if not is_production():
         return
@@ -285,12 +371,30 @@ def validate_production_storage() -> None:
             "Em produção, STORAGE_PROVIDER deve ser 'google_drive' "
             f"(recebido: '{provider}'). O storage local não é permitido em produção."
         )
-    if not get_drive_folder_id():
+    access_mode = get_drive_access_mode()
+    if required_access and access_mode != required_access:
         raise StorageConfigError(
-            "Em produção, GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID é obrigatório."
+            "O perfil de acesso ao Drive não corresponde ao serviço em execução."
         )
     auth_mode = get_drive_auth_mode()
     if auth_mode == "oauth_user":
         load_oauth_token_info()
     else:
         load_service_account_info()
+
+
+def validate_local_server_storage() -> None:
+    """Require an explicit persistent local filesystem for the LAN profile."""
+    if not is_local_server():
+        return
+    provider = get_storage_provider()
+    if provider != "local":
+        raise StorageConfigError(
+            "APP_ENV=local_server exige STORAGE_PROVIDER=local; "
+            "o diretório persistente deve ser protegido e incluído no backup."
+        )
+    path = (os.getenv("LOCAL_STORAGE_PATH") or os.getenv("STORAGE_DIR") or "").strip()
+    if not path:
+        raise StorageConfigError(
+            "APP_ENV=local_server exige LOCAL_STORAGE_PATH em um volume persistente."
+        )

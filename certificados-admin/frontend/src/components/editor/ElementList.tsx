@@ -1,19 +1,57 @@
+/**
+ * Element panel — add fields, and select/reorder what is already on the canvas.
+ *
+ * The list is a listbox rather than a set of clickable <li>s, so arrow keys
+ * move the selection and each row has a real role. Row actions stay visible
+ * (not hover-only) for the selected row and are reachable by keyboard; the old
+ * `opacity-0 group-hover` treatment hid them from touch and keyboard entirely.
+ */
 import { KEY_LABELS, TemplateElement, ElementKey } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
+import Icon from "../../ui/Icon";
+import { IconButton } from "../../ui/Button";
+import { cn } from "../../ui/cn";
 
-const QUICK_KEYS: { key: ElementKey; label: string; title?: string }[] = [
+const QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
   { key: "name", label: "Nome", title: "Nome do participante (vem da planilha)" },
   {
     key: "texto_certificado",
-    label: "Corpo do certificado",
+    label: "Corpo",
     title:
-      "Onde o “Texto padrão do certificado” (escrito na emissão) é impresso. " +
-      "Posicione este bloco onde o parágrafo deve começar.",
+      "Onde o texto padrão escrito na emissão é impresso. Posicione este bloco " +
+      "onde o parágrafo deve começar.",
   },
   { key: "event", label: "Evento", title: "Nome do evento (vem da planilha)" },
-  { key: "date", label: "Data", title: "Data de emissão (vem da planilha)" },
-  { key: "validation_code", label: "Codigo", title: "Código de validação do certificado" },
-  { key: "static", label: "Texto fixo", title: "Texto fixo, igual em todos os certificados" },
+  {
+    key: "certificate_type",
+    label: "Tipo",
+    title: "Tipo do certificado congelado no lote de emissão",
+  },
+  {
+    key: "institution_name",
+    label: "Instituição",
+    title: "Nome definido nas configurações institucionais",
+  },
+  {
+    key: "issue_line",
+    label: "Local/data",
+    title: "Local institucional e data de emissão",
+  },
+  {
+    key: "signatory_name",
+    label: "Assinante",
+    title: "Nome definido nas configurações institucionais",
+  },
+  {
+    key: "validation_code",
+    label: "Código",
+    title: "Código de validação do certificado",
+  },
+  {
+    key: "static",
+    label: "Texto fixo",
+    title: "Texto igual em todos os certificados",
+  },
 ];
 
 interface ElementListProps {
@@ -25,7 +63,7 @@ interface ElementListProps {
   onDuplicate: EditorAPI["duplicateElement"];
 }
 
-function ElementList({
+export default function ElementList({
   elements,
   selectedId,
   onAdd,
@@ -33,99 +71,133 @@ function ElementList({
   onDelete,
   onDuplicate,
 }: ElementListProps) {
-  return (
-    <aside className="flex w-52 shrink-0 flex-col border-r border-slate-200 bg-white">
-      <div className="border-b border-slate-200 px-3 py-3">
-        <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-          Elementos
-        </p>
-      </div>
+  const handleListKeyDown = (event: React.KeyboardEvent) => {
+    if (elements.length === 0) return;
+    const index = elements.findIndex((element) => element.id === selectedId);
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onSelect(elements[Math.min(elements.length - 1, index + 1)].id);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onSelect(elements[Math.max(0, index <= 0 ? 0 : index - 1)].id);
+    } else if (event.key === "Delete" && selectedId) {
+      event.preventDefault();
+      onDelete(selectedId);
+    }
+  };
 
-      <div className="border-b border-slate-100 p-3">
-        <p className="mb-2 text-xs text-slate-400">Adicionar campo:</p>
-        <div className="flex flex-wrap gap-1">
+  return (
+    <div className="flex h-full flex-col bg-[var(--surface)]">
+      <div className="border-b border-[color:var(--line)] px-3 py-2.5">
+        <h2 className="text-[length:var(--text-xs)] font-semibold uppercase tracking-[0.06em] text-[color:var(--ink-muted)]">
+          Adicionar campo
+        </h2>
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {QUICK_KEYS.map(({ key, label, title }) => (
             <button
               key={key}
               type="button"
               onClick={() => onAdd(key)}
               title={title}
-              className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700 transition hover:border-sky-400 hover:bg-sky-50 hover:text-sky-700"
+              className={cn(
+                "inline-flex items-center gap-1 rounded-[var(--radius)] border px-2 py-1.5",
+                "border-[color:var(--line-strong)] bg-[var(--surface)]",
+                "text-[length:var(--text-xs)] font-medium text-[color:var(--ink)]",
+                "hover:border-[color:var(--brand-500)] hover:bg-[var(--brand-50)]",
+              )}
             >
-              + {label}
+              <Icon name="plus" size={12} />
+              {label}
             </button>
           ))}
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="border-b border-[color:var(--line)] px-3 py-2">
+        <h2 className="text-[length:var(--text-xs)] font-semibold uppercase tracking-[0.06em] text-[color:var(--ink-muted)]">
+          Elementos ({elements.length})
+        </h2>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {elements.length === 0 ? (
-          <p className="px-3 py-4 text-xs text-slate-400">
-            Nenhum elemento ainda.
+          <p className="px-3 py-4 text-[length:var(--text-xs)] text-[color:var(--ink-subtle)]">
+            Nenhum elemento no template ainda. Use os botões acima para adicionar
+            campos.
           </p>
         ) : (
-          <ul className="divide-y divide-slate-100">
-            {elements.map((el) => {
-              const isSelected = el.id === selectedId;
-              const icon = el.type === "image" ? "IMG" : "T";
+          <ul
+            role="listbox"
+            aria-label="Elementos do template"
+            tabIndex={0}
+            onKeyDown={handleListKeyDown}
+            className="divide-y divide-[color:var(--line)] outline-none"
+          >
+            {elements.map((element) => {
+              const isSelected = element.id === selectedId;
               const label =
-                el.type === "image"
-                  ? el.label || KEY_LABELS.image
-                  : el.key === "static"
-                    ? el.staticText || "(vazio)"
-                    : KEY_LABELS[el.key] ?? el.key;
+                element.type === "image"
+                  ? element.label || KEY_LABELS.image
+                  : element.key === "static"
+                    ? element.staticText || "(texto vazio)"
+                    : (KEY_LABELS[element.key] ?? element.key);
 
               return (
                 <li
-                  key={el.id}
-                  className={[
-                    "group flex cursor-pointer items-center gap-2 px-3 py-2 transition",
+                  key={element.id}
+                  role="option"
+                  aria-selected={isSelected}
+                  onClick={() => onSelect(element.id)}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-2 px-3 py-2",
                     isSelected
-                      ? "bg-sky-50 text-sky-700"
-                      : "text-slate-700 hover:bg-slate-50",
-                  ].join(" ")}
-                  onClick={() => onSelect(el.id)}
+                      ? "bg-[var(--brand-50)] text-[color:var(--brand-800)]"
+                      : "text-[color:var(--ink)] hover:bg-[var(--surface-sunken)]",
+                  )}
                 >
-                  <span className="shrink-0 text-[10px] font-semibold uppercase">
-                    {icon}
-                  </span>
-
-                  <span className="flex-1 truncate text-xs font-medium">
+                  <Icon
+                    name={element.type === "image" ? "image" : "text"}
+                    size={15}
+                    className="shrink-0 text-[color:var(--ink-muted)]"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[length:var(--text-xs)] font-medium">
                     {label}
                   </span>
 
-                  <div className="flex shrink-0 gap-0.5 opacity-0 transition group-hover:opacity-100">
-                    <button
-                      type="button"
-                      title="Duplicar"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDuplicate(el.id);
+                  {/* Visible for the selected row so touch and keyboard users
+                      can reach them; hover-only controls exclude both. */}
+                  <span
+                    className={cn(
+                      "flex shrink-0 gap-0.5",
+                      isSelected ? "opacity-100" : "opacity-0 focus-within:opacity-100",
+                    )}
+                  >
+                    <IconButton
+                      size="sm"
+                      icon="duplicate"
+                      label={`Duplicar ${label}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDuplicate(element.id);
                       }}
-                      className="rounded p-0.5 text-slate-400 hover:text-sky-600"
-                    >
-                      D
-                    </button>
-                    <button
-                      type="button"
-                      title="Excluir"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete(el.id);
+                    />
+                    <IconButton
+                      size="sm"
+                      icon="trash"
+                      label={`Excluir ${label}`}
+                      variant="danger-quiet"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete(element.id);
                       }}
-                      className="rounded p-0.5 text-slate-400 hover:text-rose-600"
-                    >
-                      X
-                    </button>
-                  </div>
+                    />
+                  </span>
                 </li>
               );
             })}
           </ul>
         )}
       </div>
-    </aside>
+    </div>
   );
 }
-
-export default ElementList;

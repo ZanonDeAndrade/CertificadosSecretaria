@@ -51,3 +51,17 @@ export async function activateVersion(id: number): Promise<TemplateVersion> {
   );
   return res.data;
 }
+
+export async function renameVersion(
+  id: number,
+  name: string,
+): Promise<TemplateVersion> {
+  const res = await api.patch<TemplateVersion>(`/templates/versions/${id}`, {
+    name,
+  });
+  return res.data;
+}
+
+export async function deleteVersion(id: number): Promise<void> {
+  await api.delete(`/templates/versions/${id}`);
+}

@@ -9,7 +9,7 @@ def get_text_size(
     font: ImageFont.FreeTypeFont,
 ) -> tuple[int, int]:
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    return right - left, bottom - top
+    return int(right - left), int(bottom - top)
 
 
 def calculate_centered_x(
@@ -86,6 +86,7 @@ def wrap_hard_breaks(
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
 
 def _split_paragraphs(text: str) -> list[str]:
     """Treat copied line breaks as spaces and blank lines as paragraph breaks."""

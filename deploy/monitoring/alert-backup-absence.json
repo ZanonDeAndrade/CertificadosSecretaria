@@ -1,0 +1,22 @@
+{
+  "displayName": "Certificados | backup ausente",
+  "combiner": "OR",
+  "enabled": true,
+  "documentation": {
+    "content": "Nenhum backup concluido nas ultimas 26 horas. O alerta passa a ter serie depois do primeiro backup de comissionamento.",
+    "mimeType": "text/markdown"
+  },
+  "conditions": [{
+    "displayName": "Sem backup por 26 horas",
+    "conditionAbsent": {
+      "filter": "metric.type=\"logging.googleapis.com/user/certificados_backup_success\" AND resource.type=\"cloud_run_job\"",
+      "duration": "93600s",
+      "aggregations": [{
+        "alignmentPeriod": "3600s",
+        "perSeriesAligner": "ALIGN_SUM",
+        "crossSeriesReducer": "REDUCE_SUM"
+      }],
+      "trigger": {"count": 1}
+    }
+  }]
+}

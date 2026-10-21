@@ -1,40 +1,33 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path as _Path
-
-# When this file is executed directly (python backEnd/services/certificate_service.py),
-# Python puts backEnd/services/ on sys.path, which is one level too deep for
-# bare imports like "from models import ...".  We always want backEnd/ on the path.
-_BACKEND_DIR = str(_Path(__file__).resolve().parent.parent)
-if _BACKEND_DIR not in sys.path:
-    sys.path.insert(0, _BACKEND_DIR)
-
 import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
-from models import ParticipantRegistryRecord
-from services import certificate_store  # generate_code (monkeypatchable in tests)
-from services import template_service
-from services.generator import (
+from certificados_backend.models import ParticipantRegistryRecord
+from certificados_backend.services import (
+    audit_service,
+    certificate_store,  # generate_code (monkeypatchable in tests)
+    template_service,
+)
+from certificados_backend.services.certificate_text import render_certificate_body
+from certificados_backend.services.generator import (
     CertificateGenerator,
     CertificateGeneratorConfig,
     build_pdf_filename,
 )
-from services.spreadsheet import SpreadsheetRow, compute_business_key
-from services.certificate_text import render_certificate_body
-from utils.dates import extenso_from_iso, normalize_date_text, to_iso
+from certificados_backend.services.spreadsheet import SpreadsheetRow, compute_business_key
+from certificados_backend.utils.dates import extenso_from_iso, normalize_date_text, to_iso
 
-# certificate_store (imported above) puts the repo root on sys.path, so the
-# shared storage layer / database resolve here regardless of the working dir.
+import observability
+from database import db
+from database.certificate_types import certificate_type_label, parse_certificate_type
 from storage_service import CertificateStorage, StorageError, get_storage
 from storage_service import config as storage_config
-from database import db
-import observability
 
 LOGGER = logging.getLogger("certificados.saga")
 
@@ -50,10 +43,12 @@ class CertificateBatchConfig:
     bold_font_path: Path
     output_dir: Path
     file_url_prefix: str = "/certificates"
-    # Institution/signatory data — provided via env (see main.create_app).
+    # Institution/signatory data — supplied from the persisted settings snapshot.
     issue_location: str = ""
     signatory_name: str = ""
     signatory_title: str = ""
+    institution_name: str = ""
+    public_validation_base_url: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -66,9 +61,9 @@ class GenerationSummary:
       - ``failed``     → reserved but compensated (status ``failed``, no file).
     """
 
-    generated: list[dict]    # [{"name", "code"}]
-    duplicates: list[dict]   # [{"name", "existing_code", "status"}]
-    failed: list[dict]       # [{"name", "error"}]
+    generated: list[dict]  # [{"name", "code"}]
+    duplicates: list[dict]  # [{"name", "existing_code", "status"}]
+    failed: list[dict]  # [{"name", "error"}]
     total_valid: int
 
 
@@ -98,6 +93,8 @@ class CertificateBatchService:
         config: CertificateBatchConfig,
         storage: CertificateStorage | None = None,
         generator: CertificateGenerator | None = None,
+        *,
+        cache_active_template: bool = False,
     ) -> None:
         self.config = config
         self.generator = generator or CertificateGenerator(
@@ -106,6 +103,7 @@ class CertificateBatchService:
                 regular_font_path=config.regular_font_path,
                 bold_font_path=config.bold_font_path,
                 output_dir=config.output_dir,
+                institution_name=config.institution_name,
                 issue_location=config.issue_location,
                 signatory_name=config.signatory_name,
                 signatory_title=config.signatory_title,
@@ -114,9 +112,13 @@ class CertificateBatchService:
         # When not injected, resolve the configured backend lazily at run time
         # (so STORAGE_PROVIDER is honoured and tests can inject a fake).
         self._storage = storage
+        self._cache_active_template = cache_active_template
+        self._cached_template: _ActiveTemplate | None = None
 
     def _active_template(self, created_by: int | None) -> _ActiveTemplate:
         """Resolve the single global active template version (seed default once)."""
+        if self._cache_active_template and self._cached_template is not None:
+            return self._cached_template
         template_service.ensure_default_version(self.config.template_path, created_by=created_by)
         version = template_service.get_active_version()
         if not version:
@@ -125,13 +127,16 @@ class CertificateBatchService:
             )
         background, _mime = template_service.get_background_bytes(version["id"])
         layout = version["layout"]
-        return _ActiveTemplate(
+        active = _ActiveTemplate(
             version_id=version["id"],
             label=f"v{version['version_number']}",
             layout=layout,
             snapshot_json=json.dumps(layout, ensure_ascii=False),
             background=background,
         )
+        if self._cache_active_template:
+            self._cached_template = active
+        return active
 
     # ── Structured generation (saga: idempotent + QR + global template) ─────────
 
@@ -141,6 +146,11 @@ class CertificateBatchService:
         *,
         issued_by: int | None = None,
         body_template: str | None = None,
+        batch_id: str | None = None,
+        institutional_snapshot: dict | None = None,
+        drive_folder_id: str | None = None,
+        certificate_type: str | None = None,
+        on_progress: Callable[[int, str], None] | None = None,
     ) -> GenerationSummary:
         """Generate certificates for already-validated rows using the single
         active global template version.
@@ -158,10 +168,25 @@ class CertificateBatchService:
         duplicates. Each new certificate records ``template_version_id`` and an
         immutable ``template_snapshot`` so a reissue reproduces it faithfully.
         """
-        storage = self._storage or get_storage()
+        parsed_type = parse_certificate_type(certificate_type, required=False)
+        frozen_type = parsed_type.value if parsed_type else None
+        if drive_folder_id:
+            storage = (self._storage or get_storage(drive_folder_id)).for_folder(drive_folder_id)
+        else:
+            # Compatibility path for direct/legacy callers. Confirmed panel
+            # batches always provide a validated per-event destination.
+            storage = self._storage or get_storage()
         max_bytes = storage_config.get_max_file_size_bytes()
         year = datetime.now().year
         tmpl = self._active_template(created_by=issued_by)
+        institution = institutional_snapshot or {
+            "institution_name": self.config.institution_name,
+            "issue_location": self.config.issue_location,
+            "signatory_name": self.config.signatory_name,
+            "signatory_title": self.config.signatory_title,
+            "public_url": self.config.public_validation_base_url,
+        }
+        institution_json = json.dumps(institution, ensure_ascii=False, sort_keys=True)
 
         if body_template is not None and not _layout_has_body_element(tmpl.layout):
             raise ValueError(
@@ -176,12 +201,14 @@ class CertificateBatchService:
 
         for row in rows:
             if body_template is not None:
-                resolved_body = render_certificate_body(body_template, build_row_variables(row))
+                resolved_body = render_certificate_body(
+                    body_template, build_row_variables(row, frozen_type)
+                )
                 key_body: str | None = resolved_body
             else:
                 resolved_body = _build_body(row)
                 key_body = None
-            business_key = compute_business_key(row, key_body)
+            business_key = compute_business_key(row, key_body, frozen_type)
             fields = {
                 "participant_name": row.nome,
                 "participant_email": row.email or None,
@@ -196,17 +223,20 @@ class CertificateBatchService:
                 # Persist EXACTLY the rendered body (never the {{...}} template),
                 # so the reissue reproduces it faithfully.
                 "certificate_text": resolved_body,
+                "certificate_type": frozen_type,
                 "issued_by": issued_by,
                 "template_used": tmpl.label,
                 "template_version_id": tmpl.version_id,
                 "template_snapshot": tmpl.snapshot_json,
+                "institutional_snapshot": institution_json,
+                "batch_id": batch_id,
             }
 
             def _build(code: str, _row: SpreadsheetRow = row, _body: str = resolved_body):
-                return _row_to_record(_row, code, body=_body)
+                return _row_to_record(_row, code, body=_body, certificate_type=frozen_type)
 
             def _render(record: ParticipantRegistryRecord, code: str):
-                qr_url = storage_config.build_public_validation_url(code)
+                qr_url = _public_validation_url(str(institution.get("public_url") or ""), code)
                 return self.generator.render_pdf_bytes_visual(
                     record, tmpl.layout, qr_url=qr_url, background_bytes=tmpl.background
                 )
@@ -225,6 +255,7 @@ class CertificateBatchService:
                 generated.append({"name": row.nome, "code": outcome.code})
                 _metric(observability.CERTS_GENERATED)
             elif outcome.status == "duplicate":
+                assert outcome.existing is not None
                 duplicates.append(
                     {
                         "name": row.nome,
@@ -236,6 +267,8 @@ class CertificateBatchService:
             else:  # failed
                 failed.append({"name": row.nome, "error": outcome.error})
                 _metric(observability.CERTS_FAILED)
+            if on_progress:
+                on_progress(len(generated) + len(duplicates) + len(failed), outcome.status)
 
         return GenerationSummary(
             generated=generated,
@@ -273,6 +306,7 @@ class CertificateBatchService:
         )
         if existing is not None:
             return _EmitOutcome("duplicate", existing=existing)
+        assert code is not None  # reserve returned a new, database-backed code
 
         stored = None
         try:
@@ -333,22 +367,22 @@ class CertificateBatchService:
                 db.clear_certificate_storage(code)
             except (StorageError, FileNotFoundError, OSError) as del_exc:
                 LOGGER.error(
-                    "Compensação: falha ao excluir arquivo de %s (%s); "
-                    "será tratado pela reconciliação.",
-                    code,
-                    del_exc,
+                    "event=compensation_delete_failed error_type=%s",
+                    type(del_exc).__name__,
                 )
 
         # 3) Audit the failure.
-        db.insert_audit_log(
-            action="generation_failed",
+        audit_service.record(
+            "generation_failed",
             actor_id=actor,
             target_type="certificate",
             target_id=code,
-            details=(reason or "")[:480],
+            details={
+                "status": type(reason).__name__ if not isinstance(reason, str) else "compensated"
+            },
         )
 
-    def reissue_certificate(self, cert: dict) -> None:
+    def reissue_certificate(self, cert: dict, *, reissued_by: int | None = None) -> None:
         """Re-render a certificate FAITHFULLY using its original template version.
 
         Uses the certificate's stored ``template_version_id`` + immutable
@@ -358,10 +392,14 @@ class CertificateBatchService:
         previous file is preserved (no orphans, no data loss).
         """
         if not cert.get("template_version_id") or not cert.get("template_snapshot"):
-            raise ValueError(
-                "Reemissão indisponível: certificado sem versão/snapshot de template."
-            )
-        storage = self._storage or get_storage()
+            raise ValueError("Reemissão indisponível: certificado sem versão/snapshot de template.")
+        original_folder = str(cert.get("drive_folder_id") or "").strip()
+        if cert.get("storage_provider") == "google_drive":
+            if not original_folder:
+                raise ValueError("Reemissão indisponível: certificado remoto sem pasta original.")
+            storage = (self._storage or get_storage(original_folder)).for_folder(original_folder)
+        else:
+            storage = self._storage or get_storage()
         code = cert["unique_code"]
         version_id = int(cert["template_version_id"])
         try:
@@ -371,8 +409,32 @@ class CertificateBatchService:
         background, _mime = template_service.get_background_bytes(version_id)
 
         record = _cert_to_record(cert, code)
-        qr_url = storage_config.build_public_validation_url(code)
-        content = self.generator.render_pdf_bytes_visual(
+        institution: dict = {}
+        try:
+            institution = json.loads(cert.get("institutional_snapshot") or "{}")
+        except (TypeError, ValueError):
+            institution = {}
+        public_url = str(
+            institution.get("public_url") or self.config.public_validation_base_url or ""
+        )
+        qr_url = _public_validation_url(public_url, code)
+        generator = self.generator
+        # Production generators reproduce the original institutional signature;
+        # injected test/custom generators retain their explicit behaviour.
+        if isinstance(generator, CertificateGenerator) and institution:
+            generator = CertificateGenerator(
+                CertificateGeneratorConfig(
+                    template_path=self.config.template_path,
+                    regular_font_path=self.config.regular_font_path,
+                    bold_font_path=self.config.bold_font_path,
+                    output_dir=self.config.output_dir,
+                    institution_name=str(institution.get("institution_name") or ""),
+                    issue_location=str(institution.get("issue_location") or ""),
+                    signatory_name=str(institution.get("signatory_name") or ""),
+                    signatory_title=str(institution.get("signatory_title") or ""),
+                )
+            )
+        content = generator.render_pdf_bytes_visual(
             record, snapshot, qr_url=qr_url, background_bytes=background
         )
 
@@ -391,22 +453,25 @@ class CertificateBatchService:
 
         # 2) Finalize the NEW file in the DB BEFORE deleting the old one.
         try:
-            if not db.update_certificate_file(code, stored.as_db_fields()):
+            if not db.update_certificate_file(code, stored.as_db_fields(), reissued_by=reissued_by):
                 raise RuntimeError("Atualização do certificado não afetou nenhuma linha.")
         except Exception:
             # Rollback: delete the just-uploaded NEW file and PRESERVE the old one
             # (the DB still points at it).
-            self._safe_delete(storage, {
-                "storage_provider": stored.storage_provider,
-                "drive_file_id": stored.drive_file_id,
-                "drive_folder_id": stored.drive_folder_id,
-                "pdf_path": stored.pdf_path,
-            })
-            db.insert_audit_log(
-                action="reissue_failed",
+            self._safe_delete(
+                storage,
+                {
+                    "storage_provider": stored.storage_provider,
+                    "drive_file_id": stored.drive_file_id,
+                    "drive_folder_id": stored.drive_folder_id,
+                    "pdf_path": stored.pdf_path,
+                },
+            )
+            audit_service.record(
+                "reissue_failed",
                 target_type="certificate",
                 target_id=code,
-                details="rollback: arquivo anterior preservado",
+                details={"status": "rolled_back"},
             )
             raise
 
@@ -414,19 +479,16 @@ class CertificateBatchService:
         #    it is the same underlying file (local overwrite of a fixed path).
         if old_has_file and not _same_storage_target(old_locator, stored):
             if not self._safe_delete(storage, old_locator):
-                LOGGER.error(
-                    "Reemissão %s: arquivo anterior não pôde ser removido "
-                    "(será tratado pela reconciliação).",
-                    code,
-                )
+                LOGGER.error("event=reissue_previous_file_delete_failed")
 
     def _safe_delete(self, storage: CertificateStorage, locator: dict) -> bool:
         try:
             storage.delete(locator)
             return True
         except (StorageError, FileNotFoundError, OSError) as exc:
-            LOGGER.error("Falha ao excluir arquivo no storage: %s", exc)
+            LOGGER.error("event=storage_delete_failed error_type=%s", type(exc).__name__)
             return False
+
 
 def _build_body(row: SpreadsheetRow) -> str:
     """Compose the certificate body text from the structured row."""
@@ -441,6 +503,14 @@ def _build_body(row: SpreadsheetRow) -> str:
     elif row.data_fim:
         body += f", realizado em {row.data_fim}"
     return body + "."
+
+
+def _public_validation_url(base_url: str, code: str) -> str:
+    """Build a QR URL from the versioned setting, with legacy env fallback."""
+    if not base_url.strip():
+        return storage_config.build_public_validation_url(code)
+    normalized = storage_config.normalize_public_validation_base_url(base_url)
+    return f"{normalized}/validar/{quote(code.strip(), safe='')}"
 
 
 # Template element keys that render the secretaria-authored certificate body.
@@ -459,7 +529,7 @@ def _layout_has_body_element(layout: dict) -> bool:
     return False
 
 
-def build_row_variables(row: SpreadsheetRow) -> dict[str, str]:
+def build_row_variables(row: SpreadsheetRow, certificate_type: str | None = None) -> dict[str, str]:
     """Map a validated row to the variables allowed in the body template.
 
     ``carga_horaria`` is the number ONLY ("horas" is written by the secretaria);
@@ -473,11 +543,15 @@ def build_row_variables(row: SpreadsheetRow) -> dict[str, str]:
         "data_inicio": row.data_inicio or "",
         "data_fim": row.data_fim or "",
         "data_emissao": row.data_emissao or "",
+        "certificate_type": certificate_type_label(certificate_type),
     }
 
 
 def _row_to_record(
-    row: SpreadsheetRow, code: str, body: str | None = None
+    row: SpreadsheetRow,
+    code: str,
+    body: str | None = None,
+    certificate_type: str | None = None,
 ) -> ParticipantRegistryRecord:
     resolved = body if body is not None else _build_body(row)
     return ParticipantRegistryRecord(
@@ -492,6 +566,7 @@ def _row_to_record(
         texto_certificado=resolved,
         certificate_text=resolved,
         data_emissao=row.data_emissao,
+        certificate_type=certificate_type_label(certificate_type),
     )
 
 
@@ -511,6 +586,7 @@ def _cert_to_record(cert: dict, code: str) -> ParticipantRegistryRecord:
         certificate_text=body,
         # Stored ISO → render 'por extenso' on the reissued PDF.
         data_emissao=extenso_from_iso(cert.get("issue_date")),
+        certificate_type=certificate_type_label(cert.get("certificate_type")),
     )
 
 

@@ -1,147 +1,299 @@
 name: certificados
 
-x-app-base: &app-base
-  build:
-    context: .
-    dockerfile: Dockerfile
-  image: ${APP_IMAGE:-certificados-app:latest}
+x-runtime: &runtime
+  image: ${APP_IMAGE:?Defina APP_IMAGE com tag imutável ou digest}
   env_file:
     - ${PRODUCTION_ENV_FILE:-.env.production}
-  environment:
-    APP_ENV: production
-    DATABASE_URL_FILE: /run/secrets/database_url
-    GOOGLE_OAUTH_TOKEN_FILE: /run/secrets/google_oauth_token
-    DOCUMENT_HASH_SECRET_FILE: /run/secrets/document_hash_secret
-  secrets:
-    - database_url
-    - google_oauth_token
-    - document_hash_secret
-  networks:
-    - backend
+  networks: [backend]
   read_only: true
   tmpfs:
     - /tmp:size=256m,mode=1777
-  security_opt:
-    - no-new-privileges:true
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  pids_limit: 256
+  cpus: 1.0
+  mem_limit: 1g
+
+x-operations: &operations
+  <<: *runtime
+  image: ${OPS_IMAGE:?Defina OPS_IMAGE com tag imutável ou digest}
+
+x-common-env: &common-env
+  APP_ENV: production
+  DATABASE_URL_FILE: /run/secrets/database_url
+  DOCUMENT_HASH_KEYRING_FILE: /run/secrets/document_hash_keyring
+  DOCUMENT_HASH_ACTIVE_KEY_ID: ${DOCUMENT_HASH_ACTIVE_KEY_ID:?Defina DOCUMENT_HASH_ACTIVE_KEY_ID}
+  PUBLIC_VALIDATION_BASE_URL: ${PUBLIC_VALIDATION_BASE_URL:?Defina PUBLIC_VALIDATION_BASE_URL}
+  STORAGE_PROVIDER: google_drive
+  GOOGLE_DRIVE_AUTH_MODE: oauth_user
+  GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID: ${GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID:-}
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:?Defina FORWARDED_ALLOW_IPS}
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?Defina TRUSTED_PROXY_CIDRS}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-3}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-2}
+  DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+  DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-300}
+  DB_POOL_PRE_PING: ${DB_POOL_PRE_PING:-true}
 
 services:
-  # Executar explicitamente uma vez por release:
-  # docker compose --env-file .env.production -f compose.production.yaml \
-  #   --profile tools run --rm migrate
+  # Expand/contract: execute explicitamente antes de trocar o tráfego.
   migrate:
-    <<: *app-base
-    profiles: ["tools"]
+    <<: *runtime
+    profiles: [tools]
     restart: "no"
-    command: >
-      sh -ec "alembic upgrade head &&
-              python certificados-admin/backEnd/seed_template.py"
+    environment:
+      <<: *common-env
+      APP_TARGET: migrate
+    secrets: [database_url, postgres_ca]
 
   admin:
-    <<: *app-base
+    <<: *runtime
     environment:
-      APP_ENV: production
-      DATABASE_URL_FILE: /run/secrets/database_url
-      GOOGLE_OAUTH_TOKEN_FILE: /run/secrets/google_oauth_token
-      DOCUMENT_HASH_SECRET_FILE: /run/secrets/document_hash_secret
+      <<: *common-env
+      APP_TARGET: admin
+      PORT: 8000
+      WEB_CONCURRENCY: ${ADMIN_WORKERS:-1}
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      GOOGLE_ADMIN_OAUTH_TOKEN_FILE: /run/secrets/google_admin_oauth_token
+      GOOGLE_PICKER_CLIENT_ID: ${GOOGLE_PICKER_CLIENT_ID:?Defina GOOGLE_PICKER_CLIENT_ID}
+      GOOGLE_PICKER_CLIENT_SECRET_FILE: /run/secrets/google_picker_client_secret
+      GOOGLE_PICKER_API_KEY: ${GOOGLE_PICKER_API_KEY:?Defina GOOGLE_PICKER_API_KEY}
+      GOOGLE_PICKER_APP_ID: ${GOOGLE_PICKER_APP_ID:-}
+      GOOGLE_DRIVE_OAUTH_REDIRECT_URI: ${GOOGLE_DRIVE_OAUTH_REDIRECT_URI:?Defina GOOGLE_DRIVE_OAUTH_REDIRECT_URI}
+      GOOGLE_DRIVE_UPLOAD_PRINCIPAL_EMAIL: ${GOOGLE_DRIVE_UPLOAD_PRINCIPAL_EMAIL:?Defina GOOGLE_DRIVE_UPLOAD_PRINCIPAL_EMAIL}
+      GOOGLE_DRIVE_PUBLIC_READER_EMAIL: ${GOOGLE_DRIVE_PUBLIC_READER_EMAIL:?Defina GOOGLE_DRIVE_PUBLIC_READER_EMAIL}
       JWT_SECRET_FILE: /run/secrets/jwt_secret
+      BATCH_PAYLOAD_KEYS_FILE: /run/secrets/batch_payload_keyring
+      BATCH_PAYLOAD_ACTIVE_KEY_ID: ${BATCH_PAYLOAD_ACTIVE_KEY_ID:?Defina BATCH_PAYLOAD_ACTIVE_KEY_ID}
+      BATCH_WORKER_MODE: external
+      BATCH_WORKER_DISPATCH_MODE: resident
+      BATCH_MAX_ATTEMPTS: ${BATCH_MAX_ATTEMPTS:-3}
+      BATCH_LEASE_SECONDS: ${BATCH_LEASE_SECONDS:-600}
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: lax
+      ADMIN_FRONTEND_URL: ${ADMIN_FRONTEND_URL:?Defina ADMIN_FRONTEND_URL}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?Defina CORS_ALLOWED_ORIGINS}
+      DOWNLOAD_TEMP_DIR: /tmp/certificados-downloads
+      MAX_SPREADSHEET_SIZE_MB: ${MAX_SPREADSHEET_SIZE_MB:-10}
+      MAX_SPREADSHEET_ROWS: ${MAX_SPREADSHEET_ROWS:-2000}
+      MAX_ZIP_CERTIFICATES: ${MAX_ZIP_CERTIFICATES:-100}
+      MAX_ZIP_TOTAL_BYTES: ${MAX_ZIP_TOTAL_BYTES:-209715200}
+      BULK_DOWNLOAD_REQUESTS_PER_HOUR: ${BULK_DOWNLOAD_REQUESTS_PER_HOUR:-12}
+      DOWNLOAD_REQUESTS_PER_MINUTE: ${DOWNLOAD_REQUESTS_PER_MINUTE:-60}
     secrets:
       - database_url
-      - google_oauth_token
-      - document_hash_secret
+      - postgres_ca
+      - google_admin_oauth_token
+      - google_picker_client_secret
+      - document_hash_keyring
+      - batch_payload_keyring
       - jwt_secret
-    command: >
-      uvicorn main:app --host 0.0.0.0 --port 8000
-      --app-dir certificados-admin/backEnd --workers ${ADMIN_WORKERS:-1}
-      --proxy-headers --forwarded-allow-ips="*"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
       interval: 30s
-      timeout: 10s
+      timeout: 8s
       retries: 5
       start_period: 30s
 
   consulta:
-    <<: *app-base
-    command: >
-      uvicorn app:app --host 0.0.0.0 --port 8001
-      --app-dir certificados-consulta --workers ${CONSULTA_WORKERS:-1}
-      --proxy-headers --forwarded-allow-ips="*"
+    <<: *runtime
+    environment:
+      <<: *common-env
+      APP_TARGET: consulta
+      PORT: 8001
+      WEB_CONCURRENCY: ${CONSULTA_WORKERS:-1}
+      GOOGLE_DRIVE_ACCESS_MODE: read_only
+      GOOGLE_PUBLIC_OAUTH_TOKEN_FILE: /run/secrets/google_public_oauth_token
+    secrets:
+      - database_url
+      - postgres_ca
+      - google_public_oauth_token
+      - document_hash_keyring
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health/ready"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5)"]
       interval: 30s
-      timeout: 10s
+      timeout: 8s
       retries: 5
       start_period: 30s
 
-  web:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.web
-      args:
-        VITE_API_BASE_URL: /api
-    image: ${WEB_IMAGE:-certificados-web:latest}
-    networks:
-      - frontend
-      - backend
-    depends_on:
-      admin:
-        condition: service_healthy
-      consulta:
-        condition: service_healthy
+  worker:
+    <<: *runtime
+    environment:
+      <<: *common-env
+      APP_TARGET: worker
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      GOOGLE_ADMIN_OAUTH_TOKEN_FILE: /run/secrets/google_admin_oauth_token
+      BATCH_PAYLOAD_KEYS_FILE: /run/secrets/batch_payload_keyring
+      BATCH_PAYLOAD_ACTIVE_KEY_ID: ${BATCH_PAYLOAD_ACTIVE_KEY_ID:?Defina BATCH_PAYLOAD_ACTIVE_KEY_ID}
+      BATCH_WORKER_MODE: external
+      BATCH_MAX_ATTEMPTS: ${BATCH_MAX_ATTEMPTS:-3}
+      BATCH_LEASE_SECONDS: ${BATCH_LEASE_SECONDS:-600}
+    secrets:
+      - database_url
+      - postgres_ca
+      - google_admin_oauth_token
+      - document_hash_keyring
+      - batch_payload_keyring
+    command: ["--max-jobs", "1000", "--poll-seconds", "2"]
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    mem_limit: 1g
+    cpus: 1.0
+
+  web:
+    image: ${WEB_IMAGE:?Defina WEB_IMAGE com tag imutável ou digest}
+    networks: [frontend, backend]
+    depends_on:
+      admin: {condition: service_healthy}
+      consulta: {condition: service_healthy}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,mode=0755
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/nginx-health"]
       interval: 30s
       timeout: 5s
       retries: 3
 
   gateway:
-    image: caddy:2.10-alpine
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     env_file:
       - ${PRODUCTION_ENV_FILE:-.env.production}
-    ports:
-      - "80:80"
-      - "443:443"
+    ports: ["80:80", "443:443"]
     volumes:
       - ${CADDY_CONFIG_FILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks:
-      - frontend
+    networks: [frontend]
     depends_on:
-      web:
-        condition: service_healthy
+      web: {condition: service_healthy}
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    read_only: true
+    tmpfs: [/tmp:size=32m,mode=1777]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+
+  # Jobs explícitos/agendáveis. Não executam com `compose up` normal.
+  reconcile:
+    <<: *runtime
+    profiles: [jobs]
+    environment:
+      <<: *common-env
+      APP_TARGET: reconcile
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      GOOGLE_ADMIN_OAUTH_TOKEN_FILE: /run/secrets/google_admin_oauth_token
+    secrets: [database_url, postgres_ca, google_admin_oauth_token, document_hash_keyring]
+    command: ["--max-rows", "10000"]
+    restart: "no"
+
+  integrity:
+    <<: *runtime
+    profiles: [jobs]
+    environment:
+      <<: *common-env
+      APP_TARGET: integrity
+      GOOGLE_DRIVE_ACCESS_MODE: read_only
+      GOOGLE_PUBLIC_OAUTH_TOKEN_FILE: /run/secrets/google_public_oauth_token
+    secrets: [database_url, postgres_ca, google_public_oauth_token, document_hash_keyring]
+    command: ["--limit", "10000"]
+    restart: "no"
+
+  cleanup:
+    <<: *runtime
+    profiles: [jobs]
+    environment:
+      <<: *common-env
+      APP_TARGET: cleanup
+    secrets: [database_url, postgres_ca, document_hash_keyring]
+    restart: "no"
 
   backup:
-    image: postgres:16-alpine
-    profiles: ["tools"]
+    <<: *operations
+    profiles: [jobs]
+    environment:
+      <<: *common-env
+      APP_TARGET: backup
+      GOOGLE_DRIVE_ACCESS_MODE: read_only
+      GOOGLE_PUBLIC_OAUTH_TOKEN_FILE: /run/secrets/google_public_oauth_token
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google_backup_service_account
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      BACKUP_DESTINATION: ${BACKUP_DESTINATION:?Defina BACKUP_DESTINATION gs://bucket/prefixo}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
+      RESTORE_MAX_PDF_MB: ${RESTORE_MAX_PDF_MB:-25}
     secrets:
       - database_url
-    volumes:
-      - ${BACKUP_DIR:-./backups}:/backups
-    entrypoint: ["/bin/sh", "-ec"]
+      - postgres_ca
+      - google_public_oauth_token
+      - document_hash_keyring
+      - google_backup_service_account
+      - backup_encryption_key
+    restart: "no"
+
+  restore-drill:
+    <<: *operations
+    profiles: [restore]
+    entrypoint: ["certificados-backup", "restore-drill"]
+    environment:
+      <<: *common-env
+      GOOGLE_DRIVE_ACCESS_MODE: read_write
+      GOOGLE_ADMIN_OAUTH_TOKEN_FILE: /run/secrets/google_admin_oauth_token
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google_backup_service_account
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      RESTORE_DATABASE_URL_FILE: /run/secrets/restore_database_url
+      GOOGLE_DRIVE_CERTIFICATES_FOLDER_ID: ${RESTORE_DRIVE_FOLDER_ID:?Defina RESTORE_DRIVE_FOLDER_ID separado}
+    secrets:
+      - database_url
+      - postgres_ca
+      - restore_database_url
+      - google_admin_oauth_token
+      - document_hash_keyring
+      - google_backup_service_account
+      - backup_encryption_key
     command:
-      - >-
-        pg_dump "$$(cat /run/secrets/database_url)" |
-        gzip > "/backups/certificados_$$(date +%Y%m%d_%H%M%S).sql.gz"
+      - --database-artifact
+      - ${RESTORE_DATABASE_ARTIFACT:?Defina RESTORE_DATABASE_ARTIFACT}
+      - --pdf-artifact
+      - ${RESTORE_PDF_ARTIFACT:?Defina RESTORE_PDF_ARTIFACT}
+      - --restore-files
+      - --report
+      - /tmp/restore-drill-report.json
     restart: "no"
 
 secrets:
   database_url:
     file: ${DATABASE_URL_SECRET_FILE:?Defina DATABASE_URL_SECRET_FILE}
-  google_oauth_token:
-    file: ${GOOGLE_OAUTH_TOKEN_SECRET_FILE:?Defina GOOGLE_OAUTH_TOKEN_SECRET_FILE}
+  postgres_ca:
+    file: ${POSTGRES_CA_FILE_HOST:?Defina POSTGRES_CA_FILE_HOST}
+  restore_database_url:
+    file: ${RESTORE_DATABASE_URL_SECRET_FILE:-/dev/null}
+  google_admin_oauth_token:
+    file: ${GOOGLE_ADMIN_OAUTH_TOKEN_SECRET_FILE:?Defina GOOGLE_ADMIN_OAUTH_TOKEN_SECRET_FILE}
+  google_public_oauth_token:
+    file: ${GOOGLE_PUBLIC_OAUTH_TOKEN_SECRET_FILE:?Defina GOOGLE_PUBLIC_OAUTH_TOKEN_SECRET_FILE}
+  google_picker_client_secret:
+    file: ${GOOGLE_PICKER_CLIENT_SECRET_FILE:?Defina GOOGLE_PICKER_CLIENT_SECRET_FILE}
+  google_backup_service_account:
+    file: ${GOOGLE_BACKUP_SERVICE_ACCOUNT_FILE:-/dev/null}
   jwt_secret:
     file: ${JWT_SECRET_FILE_HOST:?Defina JWT_SECRET_FILE_HOST}
-  document_hash_secret:
-    file: ${DOCUMENT_HASH_SECRET_FILE_HOST:?Defina DOCUMENT_HASH_SECRET_FILE_HOST}
+  document_hash_keyring:
+    file: ${DOCUMENT_HASH_KEYRING_FILE_HOST:?Defina DOCUMENT_HASH_KEYRING_FILE_HOST}
+  batch_payload_keyring:
+    file: ${BATCH_PAYLOAD_KEYRING_FILE_HOST:?Defina BATCH_PAYLOAD_KEYRING_FILE_HOST}
+  backup_encryption_key:
+    file: ${BACKUP_ENCRYPTION_KEY_FILE_HOST:-/dev/null}
 
 volumes:
   caddy_data:
@@ -149,4 +301,9 @@ volumes:
 
 networks:
   frontend:
+    ipam:
+      config: [{subnet: 172.31.0.0/24}]
   backend:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.0.0/24}]

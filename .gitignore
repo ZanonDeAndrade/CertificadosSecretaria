@@ -1,19 +1,32 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 .venv/
 venv/
+*.egg-info/
 .pytest_cache/
+.cache/
 
 # Variáveis de ambiente
 .env
-.env.production
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!.env.*.example
+!**/.env.example
+!**/.env.*.example
 
 # Credenciais do Google (Service Account) — NUNCA comitar
 service-account*.json
 *service-account*.json
+service_account*.json
+*service_account*.json
+serviceaccount*.json
+*serviceaccount*.json
 *.serviceaccount.json
 credentials*.json
 gcp-*.json
@@ -25,6 +38,12 @@ token.json
 certificados-admin/frontend/node_modules/
 certificados-admin/frontend/dist/
 certificados-admin/frontend/*.tsbuildinfo
+**/node_modules/
+**/dist/
+*.tsbuildinfo
+**/test-results/
+**/playwright-report/
+**/blob-report/
 
 # Banco e storage compartilhados (gerados em runtime) — NUNCA comitar bancos
 *.db
@@ -43,6 +62,7 @@ data/
 
 # PDFs gerados (contêm dados pessoais)
 *.pdf
+!docs/RELATORIO_TECNICO_FINAL.pdf
 
 # Stores/artefatos gerados pelo admin (legado/runtime)
 certificados-admin/backEnd/visual_templates.json
@@ -55,6 +75,7 @@ certificados-admin/backEnd/output/
 *.key
 *.p12
 secrets/
+**/secrets/
 
 # Cobertura / caches de teste e build
 .coverage
@@ -71,3 +92,28 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Entregas e cópias locais/duplicadas
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+backups/
+runtime/
+* (2)*
+artifacts/
+build/
+certificados-admin/frontend/e2e/.tmp/
+certificados-admin/frontend/e2e/screenshots/
+certificados-admin/frontend/e2e/screenshots-publico/
+certificados-admin/frontend/e2e/debug-*.mjs
+certificados-admin/frontend/e2e/diagnose.mjs
+certificados-admin/frontend/e2e/inspect.mjs
+docs/screenshots/01-login.png
+
+# Configurações locais de IDE/agentes
+.idea/
+.vscode/
+.agents/
+.codex/
+.claude/

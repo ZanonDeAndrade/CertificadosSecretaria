@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import Historico from "./Historico";
+import { renderWithProviders } from "../test/renderWithProviders";
 import {
   downloadCertificatesZip,
   listCertificates,
@@ -13,18 +14,28 @@ vi.mock("../services/api", () => ({
   revokeCertificate: vi.fn(),
   downloadCertificatesZip: vi.fn(),
   downloadCertificateFile: vi.fn(),
+  getCertificate: vi.fn(),
+  reissueCertificate: vi.fn(),
+  classifyError: () => "server",
   getApiErrorMessage: (error: unknown, fallback: string) =>
     error instanceof Error ? error.message : fallback,
 }));
+
+/** The screen now lives inside the app shell's router + auth providers. */
+const render = (role = "admin") => renderWithProviders(<Historico />, { role });
 
 const active = {
   unique_code: "CERT-2026-ACTIVE",
   participant_name: "Ana Ativa",
   course_name: "Direito",
   event_name: "Evento",
+  certificate_type: "speaker",
+  certificate_type_label: "Palestrante",
   issue_date: "10/06/2026",
   status: "ativo",
   download_available: true,
+  integrity_status: "verified",
+  integrity_blocked: false,
 };
 const revoked = {
   ...active,
@@ -56,8 +67,9 @@ beforeEach(() => {
 
 test("seleciona apenas disponíveis e informa download ZIP parcial", async () => {
   const user = userEvent.setup();
-  render(<Historico />);
+  render();
   await screen.findByText("Ana Ativa");
+  expect(screen.getAllByText("Palestrante").length).toBeGreaterThan(0);
 
   expect((screen.getByRole("checkbox", { name: /Rita Revogada/ }) as HTMLInputElement).disabled).toBe(true);
   expect((screen.getByRole("checkbox", { name: /Ivo Indisponível/ }) as HTMLInputElement).disabled).toBe(true);
@@ -71,7 +83,7 @@ test("seleciona apenas disponíveis e informa download ZIP parcial", async () =>
 test("exige motivo e preserva erro específico ao revogar", async () => {
   const user = userEvent.setup();
   vi.mocked(revokeCertificate).mockRejectedValueOnce(new Error("Conflito específico do backend."));
-  render(<Historico />);
+  render();
   await screen.findByText("Ana Ativa");
   await user.click(screen.getAllByRole("button", { name: "Revogar" })[0]);
 
@@ -83,4 +95,21 @@ test("exige motivo e preserva erro específico ao revogar", async () => {
   expect(confirm.disabled).toBe(false);
   await user.click(confirm);
   expect(await screen.findByText("Conflito específico do backend.")).not.toBeNull();
+});
+
+test("filtra pelo tipo controlado e envia o identificador interno à API", async () => {
+  const user = userEvent.setup();
+  render();
+  await screen.findByText("Ana Ativa");
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Tipo do certificado" }),
+    "speaker",
+  );
+  await user.click(screen.getByRole("button", { name: "Buscar" }));
+
+  await waitFor(() =>
+    expect(listCertificates).toHaveBeenLastCalledWith(
+      expect.objectContaining({ certificate_type: "speaker" }),
+    ),
+  );
 });

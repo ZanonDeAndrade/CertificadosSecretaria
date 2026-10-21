@@ -1,0 +1,699 @@
+/* ============================================================================
+ * Consulta pública de certificados — folha de estilo
+ * ----------------------------------------------------------------------------
+ * Área pública, usada por estudantes e por quem recebe um certificado e quer
+ * conferir se é verdadeiro. Prioridades, nesta ordem: clareza da resposta,
+ * confiança institucional, e funcionamento em celular.
+ *
+ * A logo institucional é empacotada com a aplicação. As cores continuam
+ * centralizadas no bloco IDENTIDADE para permitir ajustes futuros sem espalhar
+ * valores pelos componentes.
+ *
+ * Os tokens espelham os do painel administrativo (certificados-admin), para que
+ * as duas faces do sistema pareçam o mesmo sistema.
+ * ========================================================================== */
+
+:root {
+  /* ── IDENTIDADE ──────────────────────────────────────────────────────── */
+  --brand-50: #eef4f8;
+  --brand-100: #d6e5ef;
+  --brand-200: #b0cde0;
+  --brand-600: #235571;
+  --brand-700: #1c455c;
+  --brand-800: #16374a;
+
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* ── NEUTROS ─────────────────────────────────────────────────────────── */
+  --surface: #ffffff;
+  --surface-sunken: #f6f8fa;
+  --surface-inset: #eef1f4;
+
+  --ink: #1a2129;
+  --ink-muted: #556170;
+  --ink-subtle: #667381; /* 4.6:1 — piso para texto de apoio */
+  --ink-inverse: #ffffff;
+
+  --line: #e0e5ea;
+  --line-strong: #cbd2da;
+
+  /* ── ESTADOS ─────────────────────────────────────────────────────────── */
+  --ok-fg: #16613c;
+  --ok-bg: #e9f5ee;
+  --ok-line: #b6ddc6;
+
+  --warn-fg: #7a4a06;
+  --warn-bg: #fdf3e2;
+  --warn-line: #e8cd9b;
+
+  --danger-fg: #a32020;
+  --danger-bg: #fdeded;
+  --danger-line: #f0bfbf;
+
+  --focus-ring: #1d70b8;
+
+  /* ── FORMA ───────────────────────────────────────────────────────────── */
+  --radius-sm: 2px;
+  --radius: 4px;
+  --radius-md: 6px;
+
+  --shadow-sm: 0 1px 2px rgba(20, 32, 43, 0.06);
+  --shadow: 0 1px 3px rgba(20, 32, 43, 0.09), 0 1px 2px rgba(20, 32, 43, 0.05);
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+
+  --target-min: 44px;
+  --content-max: 46rem;
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  /* 16px base: this is public-facing prose read on phones, not dense UI. */
+  font-size: 1rem;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: 1.25;
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--brand-700);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  color: var(--brand-800);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 20;
+  transform: translateY(-200%);
+  background: var(--surface);
+  color: var(--brand-700);
+  border: 1px solid var(--brand-700);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Cabeçalho institucional ──────────────────────────────────────────── */
+
+.site-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.site-header__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.site-header__mark {
+  width: 3.25rem;
+  height: 3.25rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  object-fit: contain;
+}
+
+.site-header__title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.site-header__org {
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+}
+
+/* ── Layout ───────────────────────────────────────────────────────────── */
+
+.shell {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-10);
+}
+
+@media (min-width: 640px) {
+  .shell {
+    padding-inline: var(--space-6);
+  }
+}
+
+.page-intro {
+  margin-bottom: var(--space-6);
+}
+
+.page-intro h1 {
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.page-intro p {
+  margin-top: var(--space-2);
+  color: var(--ink-muted);
+  max-width: 60ch;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.card + .card {
+  margin-top: var(--space-4);
+}
+
+.card__header {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.card__header h2 {
+  font-size: 1.0625rem;
+}
+
+.card__header p {
+  margin-top: var(--space-1);
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+.card__body {
+  padding: var(--space-4);
+}
+
+/* ── Formulários ──────────────────────────────────────────────────────── */
+
+.field-label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: var(--ink);
+  margin-bottom: var(--space-1);
+}
+
+.field-hint {
+  font-size: 0.8125rem;
+  color: var(--ink-subtle);
+  margin-bottom: var(--space-2);
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.search-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+  color: var(--ink-subtle);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+}
+
+.search-divider::before,
+.search-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+
+@media (min-width: 480px) {
+  .field-row {
+    flex-direction: row;
+  }
+
+  .field-row input {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+input[type="text"],
+input[type="password"],
+input[type="search"] {
+  width: 100%;
+  min-height: var(--target-min);
+  padding: 0 var(--space-3);
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+input::placeholder {
+  color: var(--ink-subtle);
+}
+
+input:hover {
+  border-color: #9aa5b1;
+}
+
+/* ── Botões ───────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--target-min);
+  padding: 0 var(--space-4);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.9375rem;
+  text-decoration: none;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.btn-primary {
+  background: var(--brand-700);
+  border-color: var(--brand-700);
+  color: var(--ink-inverse);
+}
+
+.btn-primary:hover {
+  background: var(--brand-800);
+  border-color: var(--brand-800);
+  color: var(--ink-inverse);
+}
+
+.btn-download {
+  background: var(--brand-700);
+  border-color: var(--brand-700);
+  color: var(--ink-inverse);
+}
+
+.btn-download:hover {
+  background: var(--brand-800);
+  color: var(--ink-inverse);
+}
+
+.btn-page {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.btn-page:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+/* ── Alertas ──────────────────────────────────────────────────────────── */
+
+.alert {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-4);
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-4);
+  font-size: 0.9375rem;
+}
+
+.alert svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.alert-warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn-fg);
+}
+
+.alert-empty {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--ink-muted);
+}
+
+.alert-info {
+  background: var(--brand-50);
+  border-color: var(--brand-200);
+  color: var(--brand-800);
+}
+
+/* ── Resultados ───────────────────────────────────────────────────────── */
+
+.results-head {
+  margin-bottom: var(--space-3);
+}
+
+.results-head h2 {
+  font-size: 1.125rem;
+}
+
+.results-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.result-item {
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.result-item + .result-item {
+  border-top: 1px solid var(--line);
+}
+
+@media (min-width: 640px) {
+  .result-item {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .result-info {
+    min-width: 0;
+    flex: 1;
+  }
+}
+
+.result-info h3 {
+  font-size: 1rem;
+}
+
+.result-event,
+.result-course,
+.result-date {
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+  margin-top: 2px;
+}
+
+.result-code {
+  margin-top: var(--space-2);
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+}
+
+/* ── Selos de situação ────────────────────────────────────────────────── */
+/* Situação nunca é indicada só pela cor: cada selo tem ícone + palavra.   */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: 1px solid;
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge-valid {
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+  color: var(--ok-fg);
+}
+
+.badge-revoked {
+  background: var(--danger-bg);
+  border-color: var(--danger-line);
+  color: var(--danger-fg);
+}
+
+/* ── Confirmação de download por nome ─────────────────────────────────── */
+
+.download-confirmation {
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+@media (min-width: 640px) {
+  .download-confirmation {
+    min-width: 17rem;
+  }
+}
+
+.download-confirmation .field-label {
+  font-size: 0.875rem;
+  margin-bottom: 0;
+}
+
+/* ── Paginação ────────────────────────────────────────────────────────── */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.pagination form {
+  margin: 0;
+}
+
+.page-info {
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+/* ── Página de validação ──────────────────────────────────────────────── */
+
+.validation-status {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-5);
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-4);
+}
+
+.validation-status h2 {
+  font-size: 1.25rem;
+}
+
+.validation-status p {
+  margin-top: var(--space-2);
+  font-size: 0.9375rem;
+  color: var(--ink);
+}
+
+.validation-status .status-icon {
+  flex-shrink: 0;
+}
+
+.validation-valid {
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+  color: var(--ok-fg);
+}
+
+.validation-revoked {
+  background: var(--danger-bg);
+  border-color: var(--danger-line);
+  color: var(--danger-fg);
+}
+
+.validation-missing {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.validation-error {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn-fg);
+}
+
+/* Dados públicos do certificado */
+
+.public-details {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.public-details > div {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-3) var(--space-4);
+}
+
+.public-details > div + div {
+  border-top: 1px solid var(--line);
+}
+
+@media (min-width: 480px) {
+  .public-details > div {
+    grid-template-columns: 12rem 1fr;
+    gap: var(--space-4);
+    align-items: baseline;
+  }
+}
+
+.public-details dt {
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+.public-details dd {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.validation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+/* ── Nota de privacidade ──────────────────────────────────────────────── */
+
+.privacy-note {
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: 0.875rem;
+  color: var(--ink-muted);
+}
+
+.privacy-note h2 {
+  font-size: 0.9375rem;
+  color: var(--ink);
+  margin-bottom: var(--space-1);
+}
+
+/* ── Rodapé ───────────────────────────────────────────────────────────── */
+
+.site-footer {
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.site-footer__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+}

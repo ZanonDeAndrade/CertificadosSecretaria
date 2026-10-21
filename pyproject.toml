@@ -1,0 +1,143 @@
+[build-system]
+requires = ["setuptools==82.0.0", "wheel==0.46.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "certificados-secretaria"
+version = "2.1.0"
+description = "Emissão, consulta e auditoria institucional de certificados"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic==1.19.1",
+    "bcrypt==4.3.0",
+    "cryptography==50.0.0",
+    "fastapi==0.141.1",
+    "google-api-python-client==2.198.0",
+    "google-auth==2.56.3",
+    "jinja2==3.1.6",
+    "openpyxl==3.1.5",
+    "pandas==2.3.3",
+    "pillow==12.3.0",
+    "psycopg[binary]==3.3.4",
+    "pyjwt==2.13.0",
+    "python-multipart==0.0.32",
+    "qrcode==8.2",
+    "sqlalchemy==2.0.52",
+    "uvicorn==0.52.1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "mypy==2.3.0",
+    "pip-audit==2.10.1",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.2",
+]
+ops = [
+    "google-auth-oauthlib==1.4.0",
+    "google-cloud-storage==3.13.1",
+]
+
+[project.scripts]
+certificados-admin = "certificados_backend.main:run"
+certificados-consulta = "certificados_consulta.app:run"
+certificados-reconcile = "certificados_backend.reconcile:main"
+certificados-integrity = "certificados_backend.verify_integrity:main"
+certificados-worker = "certificados_backend.job_worker:main"
+certificados-maintenance = "certificados_backend.maintenance:main"
+certificados-backup = "certificados_backend.backup:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "certificados_backend",
+    "certificados_backend.fonts",
+    "certificados_backend.routers",
+    "certificados_backend.schemas",
+    "certificados_backend.services",
+    "certificados_backend.utils",
+    "certificados_backend.templates",
+    "certificados_consulta",
+    "certificados_consulta.static",
+    "certificados_consulta.templates",
+    "database",
+    "observability",
+    "scripts",
+    "storage_service",
+]
+
+[tool.setuptools.package-dir]
+certificados_backend = "certificados-admin/backEnd"
+
+[tool.setuptools.package-data]
+"certificados_backend.fonts" = ["*.ttf"]
+"certificados_backend.templates" = ["*.png"]
+"certificados_consulta.static" = ["*.css", "*.jpg"]
+"certificados_consulta.templates" = ["*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["certificados-admin/backEnd/tests"]
+addopts = "-p no:randomly --strict-config --strict-markers"
+markers = [
+    "postgres: requires TEST_DATABASE_URL pointing to a disposable PostgreSQL database",
+    "load: bounded load and memory contract",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "database/migrations",
+    "certificados-admin/frontend",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+pretty = true
+ignore_missing_imports = true
+exclude = [
+    "database/migrations/",
+    "certificados-admin/backEnd/tests/",
+]
+
+[tool.coverage.run]
+branch = true
+source = [
+    "certificados_backend",
+    "certificados_consulta",
+    "database",
+    "observability",
+    "storage_service",
+]
+omit = [
+    "*/tests/*",
+    # Thin interactive/CLI adapters are compile-checked; their services are
+    # included in this coverage gate and exercised directly.
+    "certificados-admin/backEnd/authorize_google_drive.py",
+    "certificados-admin/backEnd/create_admin.py",
+    "certificados-admin/backEnd/job_worker.py",
+    "certificados-admin/backEnd/maintenance.py",
+    "certificados-admin/backEnd/migrate_dates.py",
+    "certificados-admin/backEnd/migrate_sqlite_to_postgres.py",
+    "certificados-admin/backEnd/migrate_to_drive.py",
+    "certificados-admin/backEnd/reconcile.py",
+    "certificados-admin/backEnd/reconcile_drive.py",
+    "certificados-admin/backEnd/seed_template.py",
+    "certificados-admin/backEnd/verify_integrity.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 70

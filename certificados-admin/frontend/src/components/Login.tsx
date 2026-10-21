@@ -1,13 +1,32 @@
+/**
+ * Sign-in.
+ *
+ * A single centred panel on the institutional ground — no marketing, no
+ * imagery. Deliberate details: the error is a live region so it is announced,
+ * autocomplete hints let the browser and password managers do their job, and
+ * the submit button keeps its label while loading rather than swapping to a
+ * spinner-only state.
+ *
+ * The 429 case is called out explicitly because the backend throttles repeated
+ * failures, and "usuário ou senha inválidos" would send the operator hunting
+ * for a typo that is not there.
+ */
 import { FormEvent, useState } from "react";
 import axios from "axios";
 import { AdminUser, API_BASE_URL, login } from "../services/api";
+import { APP_NAME } from "../app/AppShell";
+import { useInstitution } from "../app/InstitutionContext";
+import Button from "../ui/Button";
+import Alert from "../ui/Alert";
+import { Field, TextInput } from "../ui/Field";
 
 type LoginProps = {
   onLoggedIn: (user: AdminUser) => void;
   notice?: string;
 };
 
-function Login({ onLoggedIn, notice = "" }: LoginProps) {
+export default function Login({ onLoggedIn, notice = "" }: LoginProps) {
+  const { institution_name: institutionName } = useInstitution();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,89 +40,119 @@ function Login({ onLoggedIn, notice = "" }: LoginProps) {
     try {
       const user = await login(username.trim(), password);
       onLoggedIn(user);
-    } catch (err) {
-      setError(getErrorMessage(err));
+    } catch (requestError) {
+      setError(getErrorMessage(requestError));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-12">
-      <div className="w-full max-w-md rounded-[2rem] border border-white/60 bg-white/70 p-8 shadow-[0_30px_120px_rgba(15,23,42,0.12)] backdrop-blur">
-        <div className="mb-6 space-y-1">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-sky-700">
-            Secretaria Acadêmica
-          </p>
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-950">
-            Entrar
-          </h1>
-          <p className="text-sm text-slate-500">
-            Acesse o painel de emissão de certificados.
+    <div className="flex min-h-screen flex-col bg-[var(--surface-sunken)]">
+      <main
+        id="conteudo"
+        className="flex flex-1 items-center justify-center px-4 py-10 sm:px-6"
+      >
+        <div className="w-full max-w-[26rem]">
+          <div className="mb-6 flex items-center gap-3">
+            <img
+              src="/logo-amf.jpg"
+              alt=""
+              aria-hidden="true"
+              className="h-16 w-16 shrink-0 rounded-[var(--radius-sm)] bg-white object-contain"
+            />
+            <div className="min-w-0">
+              <p className="text-[length:var(--text-lg)] font-semibold leading-tight text-[color:var(--ink)]">
+                {APP_NAME}
+              </p>
+              <p className="text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
+                {institutionName}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-[var(--radius-md)] border border-[color:var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow-sm)] sm:p-6">
+            <h1 className="text-[length:var(--text-xl)] font-semibold text-[color:var(--ink)]">
+              Entrar no sistema
+            </h1>
+            <p className="mt-1.5 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
+              Acesso restrito aos servidores da secretaria acadêmica.
+            </p>
+
+            <form onSubmit={handleSubmit} className="mt-5 space-y-4" noValidate>
+              {notice && <Alert tone="warn">{notice}</Alert>}
+
+              <Field label="Usuário">
+                {(props) => (
+                  <TextInput
+                    {...props}
+                    value={username}
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    disabled={loading}
+                    onChange={(event) => setUsername(event.target.value)}
+                  />
+                )}
+              </Field>
+
+              <Field label="Senha">
+                {(props) => (
+                  <TextInput
+                    {...props}
+                    type="password"
+                    value={password}
+                    autoComplete="current-password"
+                    disabled={loading}
+                    onChange={(event) => setPassword(event.target.value)}
+                  />
+                )}
+              </Field>
+
+              {error && <Alert tone="danger">{error}</Alert>}
+
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                block
+                loading={loading}
+                disabled={!username.trim() || !password}
+              >
+                {loading ? "Entrando…" : "Entrar"}
+              </Button>
+            </form>
+          </div>
+
+          <p className="mt-4 text-center text-[length:var(--text-xs)] text-[color:var(--ink-subtle)]">
+            Esqueceu a senha? A redefinição é feita pela equipe de TI da
+            instituição.
           </p>
         </div>
+      </main>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {notice && (
-            <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900">
-              {notice}
-            </div>
-          )}
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-slate-700">Usuário</span>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              disabled={loading}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium text-slate-700">Senha</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              disabled={loading}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
-            />
-          </label>
-
-          {error && (
-            <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50/90 p-3 text-sm font-medium text-rose-800">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={loading || !username.trim() || !password}
-            className="inline-flex w-full items-center justify-center rounded-full bg-slate-950 px-6 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
-            {loading ? "Entrando..." : "Entrar"}
-          </button>
-        </form>
-      </div>
-    </main>
+      <footer className="px-4 py-5 text-center text-[length:var(--text-xs)] text-[color:var(--ink-subtle)]">
+        Sistema de emissão e validação de certificados.
+      </footer>
+    </div>
   );
 }
 
 function getErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
-    if (error.response?.status === 401) {
+    if (!error.response) {
+      return typeof navigator !== "undefined" && navigator.onLine === false
+        ? "Sem conexão com a rede. Verifique a conexão da máquina e tente novamente."
+        : `Não foi possível falar com o servidor em ${API_BASE_URL}. Avise a equipe de TI.`;
+    }
+    if (error.response.status === 401) {
       return "Usuário ou senha inválidos.";
     }
-    if (!error.response) {
-      return `Não foi possível conectar ao backend em ${API_BASE_URL}.`;
+    if (error.response.status === 429) {
+      return "Muitas tentativas seguidas. Aguarde alguns minutos antes de tentar novamente.";
     }
-    const detail = error.response?.data?.detail;
+    const detail = error.response.data?.detail;
     if (typeof detail === "string" && detail.trim()) return detail;
   }
   return "Não foi possível entrar. Tente novamente.";
 }
-
-export default Login;

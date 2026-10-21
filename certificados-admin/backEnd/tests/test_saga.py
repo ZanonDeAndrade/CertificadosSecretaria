@@ -4,30 +4,22 @@ Covers: reservation idempotency, code collision retry, simultaneous business_key
 upload failure, finalize failure, compensation, reconciliation, real-thread
 concurrency, and that the API summary reflects exactly what was persisted.
 """
+
 from __future__ import annotations
 
-import sys
 import threading
-from pathlib import Path
 
-
-_BACKEND_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _BACKEND_DIR.parent.parent
-for _p in (str(_BACKEND_DIR), str(_REPO_ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
-from sqlalchemy import func, select  # noqa: E402
-
-from services import certificate_store  # noqa: E402
-from services.certificate_service import (  # noqa: E402
+from certificados_backend.services import certificate_store
+from certificados_backend.services.certificate_service import (
     CertificateBatchConfig,
     CertificateBatchService,
 )
-from services.spreadsheet import SpreadsheetRow, compute_business_key  # noqa: E402
-from storage_service import StorageError  # noqa: E402
-from storage_service.base import CertificateStorage, StoredFile, sha256_hex, utc_now_iso  # noqa: E402
-from storage_service.local import LocalStorage  # noqa: E402
+from certificados_backend.services.spreadsheet import SpreadsheetRow, compute_business_key
+from sqlalchemy import func, select
+
+from storage_service import StorageError
+from storage_service.base import CertificateStorage, StoredFile, sha256_hex, utc_now_iso
+from storage_service.local import LocalStorage
 
 PDF_BYTES = b"%PDF-1.4\nsaga\n%%EOF"
 
@@ -114,9 +106,7 @@ def _service(tmp_path, storage=None, generator=None):
         output_dir=tmp_path / "pdfs",
     )
     storage = storage or LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
-    return CertificateBatchService(
-        config, storage=storage, generator=generator or FakeGenerator()
-    )
+    return CertificateBatchService(config, storage=storage, generator=generator or FakeGenerator())
 
 
 def _row(nome="Ana Souza", evento="Semana Jurídica"):
@@ -310,7 +300,7 @@ def test_finalize_failure_compensates_uploaded_file(monkeypatch, tmp_path):
 
 def test_reconcile_marks_stale_pending_failed(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
-    from services.reconciliation import run_reconciliation
+    from certificados_backend.services.reconciliation import run_reconciliation
 
     code, existing = db.reserve_certificate(
         business_key=None,
@@ -331,7 +321,7 @@ def test_reconcile_marks_stale_pending_failed(monkeypatch, tmp_path):
 
 def test_reconcile_marks_active_without_file_failed(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
-    from services.reconciliation import run_reconciliation
+    from certificados_backend.services.reconciliation import run_reconciliation
 
     db.insert_certificates(
         [
@@ -354,7 +344,7 @@ def test_reconcile_marks_active_without_file_failed(monkeypatch, tmp_path):
 
 def test_reconcile_compensates_failed_orphan_file(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
-    from services.reconciliation import run_reconciliation
+    from certificados_backend.services.reconciliation import run_reconciliation
 
     # A real local file that a 'failed' row still points at (orphan).
     storage = LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
@@ -389,7 +379,7 @@ def test_concurrent_generation_same_business_key(monkeypatch, tmp_path):
     service = _service(tmp_path)
     # Seed the global template once up front (production seeds at startup), so the
     # threads race only on the certificate business_key, not on template seeding.
-    from services import template_service
+    from certificados_backend.services import template_service
 
     template_service.ensure_default_version(tmp_path / "missing.png")
     row = _row()

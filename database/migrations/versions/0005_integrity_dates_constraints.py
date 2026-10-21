@@ -94,9 +94,8 @@ def _convert_dates(bind) -> None:
             )
     if unconvertible:
         LOGGER.warning(
-            "0005: %d issue_date não convertíveis para ISO (mantidas como estão): %s",
+            "0005: %d issue_date não convertíveis para ISO (mantidas como estão)",
             len(unconvertible),
-            ", ".join(unconvertible[:50]),
         )
 
 

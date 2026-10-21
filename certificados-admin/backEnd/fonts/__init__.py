@@ -1,0 +1,1 @@
+"""Bundled institutional font assets."""

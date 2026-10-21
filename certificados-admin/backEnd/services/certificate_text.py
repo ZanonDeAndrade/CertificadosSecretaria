@@ -10,6 +10,7 @@ Interpolation is intentionally minimal and safe:
     or any HTML/templating engine;
   - unknown or malformed variables are rejected with a clear message.
 """
+
 from __future__ import annotations
 
 import re
@@ -24,6 +25,7 @@ MAX_BODY_LENGTH = 3000
 ALLOWED_VARIABLES: tuple[str, ...] = (
     "nome",
     "carga_horaria",
+    "certificate_type",
 )
 
 # A well-formed token: {{ name }} with optional inner spaces.

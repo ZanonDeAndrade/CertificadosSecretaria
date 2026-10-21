@@ -11,6 +11,7 @@ no ``drive_file_id`` it serves the old local file under ``storage/pdfs/``.
 
 Concrete providers are never imported by the rest of the app directly.
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,7 +50,7 @@ LOGGER = logging.getLogger("certificados.storage")
 
 
 @lru_cache(maxsize=None)
-def get_storage() -> CertificateStorage:
+def get_storage(folder_id: str | None = None) -> CertificateStorage:
     """Return the storage backend selected by ``STORAGE_PROVIDER`` (cached).
 
     In production the only accepted backend is ``google_drive`` — there is no
@@ -59,7 +60,7 @@ def get_storage() -> CertificateStorage:
     provider = config.get_storage_provider()
     if provider == "google_drive":
         LOGGER.info("Storage provider: google_drive")
-        return GoogleDriveStorage()
+        return GoogleDriveStorage(folder_id=folder_id)
     if config.is_production():
         raise StorageConfigError(
             "Em produção, STORAGE_PROVIDER deve ser 'google_drive' "
@@ -84,9 +85,7 @@ def _fallback_filename(cert_row: Mapping[str, Any]) -> str:
     return f"{code}.pdf"
 
 
-def download_certificate(
-    cert_row: Mapping[str, Any], *, verify: bool = False
-) -> RetrievedFile:
+def download_certificate(cert_row: Mapping[str, Any], *, verify: bool = False) -> RetrievedFile:
     """Fetch a certificate's bytes, provider-aware, with local fallback.
 
     - If the row carries a ``drive_file_id`` → download from Google Drive.
@@ -103,9 +102,13 @@ def download_certificate(
     mime_type = cert_row.get("mime_type") or "application/pdf"
 
     if (cert_row.get("drive_file_id") or "").strip():
-        content = GoogleDriveStorage().download(cert_row)
+        content = GoogleDriveStorage(folder_id=cert_row.get("drive_folder_id")).download(cert_row)
     else:
         # Legacy / local provider fallback.
+        if config.is_production():
+            raise StorageConfigError(
+                "Certificado legado sem referência remota; execute reconciliação autorizada."
+            )
         content = LocalStorage().download(cert_row)
 
     if verify:
@@ -126,6 +129,10 @@ def delete_certificate(cert_row: Mapping[str, Any]) -> None:
     Idempotent: deleting an already-absent file is a no-op.
     """
     if (cert_row.get("drive_file_id") or "").strip():
-        GoogleDriveStorage().delete(cert_row)
+        GoogleDriveStorage(folder_id=cert_row.get("drive_folder_id")).delete(cert_row)
         return
+    if config.is_production():
+        raise StorageConfigError(
+            "Certificado legado sem referência remota; execute reconciliação autorizada."
+        )
     LocalStorage().delete(cert_row)

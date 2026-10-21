@@ -8,9 +8,7 @@ DEFAULT_FILENAME = "certificado"
 
 
 def sanitize_filename(value: str, replacement: str = "_") -> str:
-    normalized = (
-        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    )
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", replacement, normalized).strip("._-")
     sanitized = re.sub(rf"{re.escape(replacement)}+", replacement, sanitized)
     return sanitized or DEFAULT_FILENAME

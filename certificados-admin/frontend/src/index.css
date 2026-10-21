@@ -1,43 +1,248 @@
 @import "tailwindcss";
+@import "./styles/tokens.css";
 
-:root {
-  font-family: "Aptos", "Segoe UI", Tahoma, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color: #0f172a;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+/* ----------------------------------------------------------------------------
+ * Expose the design tokens as Tailwind utilities.
+ * `inline` keeps the utility pointing at the original custom property, so
+ * overriding --brand-700 (see tokens.css) re-themes every utility at runtime.
+ * -------------------------------------------------------------------------- */
+@theme inline {
+  --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-inset: var(--surface-inset);
+  --color-surface-nav: var(--surface-nav);
+  --color-surface-nav-hover: var(--surface-nav-hover);
+  --color-surface-nav-active: var(--surface-nav-active);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-ink-inverse: var(--ink-inverse);
+  --color-ink-nav: var(--ink-nav);
+  --color-ink-nav-muted: var(--ink-nav-muted);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-line-nav: var(--line-nav);
+
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+
+  --color-ok-fg: var(--ok-fg);
+  --color-ok-bg: var(--ok-bg);
+  --color-ok-line: var(--ok-line);
+  --color-warn-fg: var(--warn-fg);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-line: var(--warn-line);
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-line: var(--danger-line);
+  --color-danger-solid: var(--danger-solid);
+  --color-info-fg: var(--info-fg);
+  --color-info-bg: var(--info-bg);
+  --color-info-line: var(--info-line);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --text-2xs: var(--text-2xs);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-md: var(--text-md);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+
+  --radius-sm: var(--radius-sm);
+  --radius-DEFAULT: var(--radius);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-DEFAULT: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
 }
 
-* {
-  box-sizing: border-box;
+/* ----------------------------------------------------------------------------
+ * Base
+ *
+ * These MUST live in `@layer base`. Unlayered CSS outranks every layered rule
+ * regardless of specificity, so an unlayered `a { color: … }` silently beats
+ * every Tailwind text-colour utility — which rendered the sidebar links and the
+ * primary action (an <a>) as dark-on-dark, invisible. Keeping element defaults
+ * in the base layer lets utilities win, as intended.
+ * -------------------------------------------------------------------------- */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--surface-sunken);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  /* Headings carry their own weight; no eyebrow labels above them anywhere. */
+  h1,
+  h2,
+  h3,
+  h4 {
+    margin: 0;
+    font-weight: 600;
+    line-height: var(--leading-tight);
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  p {
+    margin: 0;
+  }
+
+  a {
+    color: var(--brand-700);
+    text-underline-offset: 0.2em;
+  }
+
+  a:hover {
+    color: var(--brand-800);
+  }
+
+  /* Inherit the UI face into form controls — browsers otherwise substitute
+   * their own, which is the most common source of "subtly-off" product UI. */
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
 }
 
-html,
-body,
-#root {
-  min-height: 100%;
+/* ----------------------------------------------------------------------------
+ * Focus: one visible treatment everywhere.
+ * :focus-visible only, so pointer users don't see rings, but every keyboard
+ * path does. Never removed without an equally visible replacement.
+ * -------------------------------------------------------------------------- */
+:focus-visible {
+  outline: var(--focus-width) solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--radius-sm);
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
-  background:
-    radial-gradient(circle at top, rgba(14, 165, 233, 0.14), transparent 30%),
-    radial-gradient(circle at 85% 18%, rgba(217, 119, 6, 0.14), transparent 20%),
-    linear-gradient(180deg, #f8fafc 0%, #eef2ff 45%, #f8f5ef 100%);
+.on-dark :focus-visible {
+  outline-color: var(--focus-ring-inverse);
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+/* Skip link — visually hidden until focused, then pinned to the top-left. */
+.skip-link {
+  position: fixed;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 100;
+  transform: translateY(-200%);
+  background: var(--surface);
+  color: var(--brand-700);
+  border: 1px solid var(--brand-700);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  font-weight: 600;
+  box-shadow: var(--shadow-md);
+  transition: transform var(--duration) var(--ease-out);
 }
 
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* Screen-reader-only text that is still focusable when it needs to be. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * Reduced motion: honour the OS setting for everything, including scrolling.
+ * -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Body copy of a generated certificate, shown in previews. */
 .certificate-text {
-  margin-top: 12px;
-  line-height: 1.6;
+  margin-top: var(--space-3);
+  line-height: var(--leading-relaxed);
   text-align: justify;
-  font-size: 15px;
+  font-size: var(--text-md);
+  max-width: var(--prose-max);
+}
+
+/* Table wrappers scroll horizontally on narrow viewports; this keeps the
+ * scroll affordance visible instead of silently clipping columns.
+ *
+ * `position: relative` is load-bearing, not cosmetic: visually-hidden spans
+ * (.sr-only) inside header cells are absolutely positioned, and without a
+ * positioned ancestor they resolve against the initial containing block. Their
+ * static position sits inside the *unscrolled* table width, so they land far to
+ * the right and drag the whole document's scrollWidth with them — which showed
+ * up as the page scrolling sideways at 320px and 768px even though the table
+ * itself was scrolling correctly. Anchoring them here keeps them inside the
+ * scroll container where they belong. */
+.table-scroll {
+  position: relative;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
 }

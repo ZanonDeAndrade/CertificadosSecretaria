@@ -1,6 +1,9 @@
 .git
 **/__pycache__/
 **/*.pyc
+**/*.pyo
+**/*.tsbuildinfo
+.cache/
 .venv/
 venv/
 .pytest_cache/
@@ -10,6 +13,11 @@ venv/
 # Frontend (é buildado na imagem web)
 certificados-admin/frontend/node_modules/
 certificados-admin/frontend/dist/
+**/node_modules/
+**/dist/
+**/test-results/
+**/playwright-report/
+**/blob-report/
 
 # Dados/artefatos (PII e gerados em runtime) — nunca vão para a imagem
 data/
@@ -20,16 +28,36 @@ storage/pdfs/
 *.pdf
 *.xlsx
 *.log
+*.sqlite
+*.sqlite3
+*.db-journal
+*.xls
+*.csv
 certificados-admin/backEnd/output/
 certificados-admin/backEnd/visual_template_backgrounds/
 
 # Segredos — NUNCA vão para a imagem
-.env
-.env.production
+.env*
+**/.env*
 secrets/
+**/secrets/
 *service-account*.json
 *service_account*.json
+*serviceaccount*.json
 credentials*.json
 client_secret*.json
 *oauth*token*.json
 token.json
+*.pem
+*.key
+*.p12
+* (2)*
+.idea/
+.vscode/
+.agents/
+.codex/
+.claude/
+backups/
+runtime/
+*.zip
+*.tar*

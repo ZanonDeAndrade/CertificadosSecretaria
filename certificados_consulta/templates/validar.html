@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{# Página canônica de validação — é o destino do QR Code impresso no
+   certificado. Quem chega aqui quer uma resposta inequívoca.
+
+   Estados cobertos (definidos em app.py):
+     valid         — certificado autêntico e ativo
+     revoked       — existe, mas foi cancelado
+     not_found     — código inexistente
+     rate_limited  — consultas bloqueadas temporariamente
+     error         — serviço indisponível no momento
+
+   A situação nunca é comunicada só pela cor: cada estado tem ícone próprio,
+   título em palavras e uma frase explicando o que aquilo significa. #}
+
+{% block title %}{% if state == "valid" %}Certificado válido{% elif state == "revoked" %}Certificado revogado{% else %}Validação de certificado{% endif %} · {{ app_name }}{% endblock %}
+
+{% block content %}
+  <div class="page-intro">
+    <h1>Validação de certificado</h1>
+    <p>
+      Conferência oficial junto ao registro da secretaria acadêmica.
+    </p>
+  </div>
+
+  <section aria-labelledby="validation-title">
+    {% if state == "valid" %}
+      <div class="validation-status validation-valid" role="status">
+        <svg class="status-icon" viewBox="0 0 24 24" width="28" height="28" fill="none"
+             stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm-3.5-9.2L11 14.5l4.8-5" />
+        </svg>
+        <div>
+          <h2 id="validation-title">Certificado válido</h2>
+          <p>
+            Este certificado consta no registro oficial da instituição e está
+            ativo. Os dados abaixo são os que constam no registro.
+          </p>
+        </div>
+      </div>
+
+    {% elif state == "revoked" %}
+      <div class="validation-status validation-revoked" role="alert">
+        <svg class="status-icon" viewBox="0 0 24 24" width="28" height="28" fill="none"
+             stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM5.6 5.6l12.8 12.8" />
+        </svg>
+        <div>
+          <h2 id="validation-title">Certificado revogado</h2>
+          <p>
+            Este registro existe, mas o certificado foi cancelado pela secretaria
+            e <strong>não é mais válido</strong>. O arquivo não pode ser baixado.
+            Em caso de dúvida, procure a secretaria acadêmica.
+          </p>
+        </div>
+      </div>
+
+    {% elif state == "rate_limited" %}
+      <div class="validation-status validation-error" role="alert">
+        <svg class="status-icon" viewBox="0 0 24 24" width="28" height="28" fill="none"
+             stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-13.5V12l3 2" />
+        </svg>
+        <div>
+          <h2 id="validation-title">Consulta bloqueada temporariamente</h2>
+          <p>
+            Foram feitas muitas consultas em pouco tempo a partir desta conexão.
+            Aguarde alguns instantes e tente novamente — o certificado não foi
+            avaliado nesta tentativa.
+          </p>
+        </div>
+      </div>
+
+    {% elif state == "error" %}
+      <div class="validation-status validation-error" role="alert">
+        <svg class="status-icon" viewBox="0 0 24 24" width="28" height="28" fill="none"
+             stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 3l18 18M8.5 16.4a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 4-2.4m3-.6a10 10 0 0 1 7 3M12 20h.01" />
+        </svg>
+        <div>
+          <h2 id="validation-title">Serviço temporariamente indisponível</h2>
+          <p>
+            Não foi possível consultar o registro agora. Isto <strong>não</strong>
+            significa que o certificado seja inválido — nenhum dado foi
+            verificado. Tente novamente em alguns minutos.
+          </p>
+        </div>
+      </div>
+
+    {% else %}
+      <div class="validation-status validation-missing" role="alert">
+        <svg class="status-icon" viewBox="0 0 24 24" width="28" height="28" fill="none"
+             stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Zm5.2-1.8L21 21" />
+        </svg>
+        <div>
+          <h2 id="validation-title">Certificado inexistente</h2>
+          <p>
+            Não há certificado público para o código informado. Confira a
+            digitação — o formato é CERT-ANO-XXXXXX. Se o código foi copiado de
+            um documento impresso e continua não sendo encontrado, procure a
+            secretaria acadêmica.
+          </p>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if certificate %}
+      <dl class="public-details" aria-label="Dados públicos do certificado">
+        <div>
+          <dt>Participante</dt>
+          <dd>{{ certificate.participant_name }}</dd>
+        </div>
+        {% if certificate.event_name %}
+          <div><dt>Evento</dt><dd>{{ certificate.event_name }}</dd></div>
+        {% endif %}
+        {% if certificate.course_name %}
+          <div><dt>Curso</dt><dd>{{ certificate.course_name }}</dd></div>
+        {% endif %}
+        <div><dt>Tipo do certificado</dt><dd>{{ certificate.certificate_type_label }}</dd></div>
+        {% if certificate.workload_hours %}
+          <div><dt>Carga horária</dt><dd>{{ certificate.workload_hours }} horas</dd></div>
+        {% endif %}
+        {% if certificate.issue_date %}
+          <div><dt>Data de emissão</dt><dd>{{ certificate.issue_date }}</dd></div>
+        {% endif %}
+        <div>
+          <dt>Código de validação</dt>
+          <dd class="mono">{{ certificate.unique_code }}</dd>
+        </div>
+      </dl>
+    {% endif %}
+
+    <div class="validation-actions">
+      {% if download_url %}
+        <a class="btn btn-download" href="{{ download_url }}">Baixar PDF</a>
+      {% endif %}
+      <a class="btn btn-page" href="{{ public_base_path }}/">Consultar outro certificado</a>
+    </div>
+  </section>
+
+  {% if certificate %}
+    <section class="privacy-note" aria-labelledby="privacidade-validacao">
+      <h2 id="privacidade-validacao">Sobre os dados exibidos</h2>
+      <p>
+        São mostrados apenas os dados necessários para confirmar a autenticidade
+        do documento. Documento de identidade, matrícula e e-mail do participante
+        não são divulgados nesta página.
+      </p>
+    </section>
+  {% endif %}
+{% endblock %}

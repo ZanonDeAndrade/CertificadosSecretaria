@@ -1,0 +1,25 @@
+{
+  "completed_at": "2026-08-13T13:20:49.366515+00:00",
+  "database_backup_created_at": "2026-08-13T13:19:18.957724+00:00",
+  "duration_seconds": 0.297,
+  "environment": "local-disposable-postgresql-16.10",
+  "pdfs_already_available": 0,
+  "pdfs_restored": 1,
+  "pdfs_verified": 1,
+  "row_counts": {
+    "admin_users": 0,
+    "audit_log": 0,
+    "certificates": 1,
+    "emission_batches": 0
+  },
+  "started_at": "2026-08-13T13:20:49.069195+00:00",
+  "status": "passed",
+  "synthetic_data_only": true,
+  "verified_invariants": [
+    "alembic_revision_0008_restored",
+    "database_restored_to_distinct_disposable_target",
+    "pdf_sha256_matches_restored_metadata",
+    "reissue_count_remained_zero",
+    "encrypted_artifacts_contained_no_plaintext_certificate_payload"
+  ]
+}
