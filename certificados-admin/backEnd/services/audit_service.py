@@ -29,6 +29,7 @@ CATEGORY_ACTIONS: dict[str, tuple[str, ...]] = {
         "user_activated",
         "user_deactivated",
         "user_password_reset",
+        "user_password_reset_cli",
         "password_changed",
         "user_sessions_revoked",
         "sessions_revoke_all",

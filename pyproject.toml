@@ -49,6 +49,7 @@ certificados-integrity = "certificados_backend.verify_integrity:main"
 certificados-worker = "certificados_backend.job_worker:main"
 certificados-maintenance = "certificados_backend.maintenance:main"
 certificados-backup = "certificados_backend.backup:main"
+certificados-reset-password = "certificados_backend.reset_password_cli:main"
 
 [tool.setuptools]
 include-package-data = true

@@ -56,6 +56,7 @@ const ACTION_LABELS: Record<string, { label: string; icon: IconName }> = {
   user_activated: { label: "Usuário reativado", icon: "users" },
   user_deactivated: { label: "Usuário inativado", icon: "lock" },
   user_password_reset: { label: "Senha redefinida", icon: "lock" },
+  user_password_reset_cli: { label: "Senha redefinida por linha de comando", icon: "lock" },
   password_changed: { label: "Senha própria alterada", icon: "lock" },
   user_sessions_revoked: { label: "Sessões revogadas", icon: "lock" },
   institutional_settings_updated: { label: "Configurações alteradas", icon: "settings" },
