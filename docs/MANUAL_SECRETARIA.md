@@ -17,10 +17,14 @@ o modelo e participantes sintéticos.
    lote; assim o redirect não interrompe uma planilha já selecionada.
 2. Baixe a planilha modelo.
 3. Preencha ao menos `nome` e `carga_horaria`; revise curso, evento e datas.
-   Na Mostra de Iniciação Científica sai um certificado por trabalho: use as
-   colunas `autor1` a `autor8` (só `autor1` é obrigatória), `titulo_trabalho` e
-   `equipe`; a carga horária é opcional. Baixe o modelo com o tipo já
-   selecionado para receber as colunas certas.
+   Na Mostra de Iniciação Científica sai um certificado por trabalho, válido
+   para todos os autores: use as colunas `autor1` a `autor8` (só `autor1` é
+   obrigatória), `evento` e `titulo_trabalho` (obrigatórias) e, se quiser,
+   `equipe` e `carga_horaria`. Baixe o modelo com o tipo já selecionado para
+   receber as colunas certas; a aba `Instruções` explica cada uma. Deixe o
+   texto padrão em branco para usar o texto automático da Mostra. A Mostra
+   precisa de um template próprio ativo, sem o nome do participante e com o
+   bloco Autores; sem ele, a Conferência bloqueia o lote.
 4. Preencha `registro_academico` quando o participante precisar pesquisar ou
    liberar certificados pelo RA na consulta pública.
 5. Salve como `.xlsx` e envie por seletor ou arrastar/soltar.

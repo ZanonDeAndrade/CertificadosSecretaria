@@ -336,19 +336,21 @@ def test_blank_team_used_by_the_body_lists_its_rows(client, auth_headers):
     ]
 
 
-def test_blank_team_warning_also_covers_per_work_batches(client, auth_headers):
+def test_blank_team_warning_also_covers_per_work_batches(client, auth_headers, mostra_template):
     _put_settings(client)
+    work = {"evento": "Mostra 2026", "titulo_trabalho": "Horta vertical"}
     works = [
-        {"autor1": "Pessoa Exemplo Alfa", "evento": "Mostra 2026", "equipe": "Equipe Azul"},
-        {"autor1": "Pessoa Exemplo Beta", "evento": "Mostra 2026", "equipe": ""},
+        {"autor1": "Pessoa Exemplo Alfa", **work, "equipe": "Equipe Azul"},
+        {"autor1": "Pessoa Exemplo Beta", **work, "equipe": ""},
     ]
     preview = _preview_with(
         client, works, "{{titulo_trabalho}}, da {{equipe}}.", "scientific_initiation"
     )
+    assert preview["template_problem"] is None
     by_key = {field["key"]: field for field in preview["empty_fields"]}
     assert by_key["equipe"]["rows"] == [{"row_number": 3, "nome": "Pessoa Exemplo Beta"}]
-    # Neither work has a title: both rows are listed under it.
-    assert by_key["titulo_trabalho"]["row_count"] == 2
+    # The title is required for a per-work type, so it is never blank here.
+    assert "titulo_trabalho" not in by_key
 
 
 def test_blank_event_is_listed_once_when_template_and_body_both_use_it(client, auth_headers):

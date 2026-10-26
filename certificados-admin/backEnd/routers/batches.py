@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from io import BytesIO
+from typing import NamedTuple
 
 from certificados_backend.policies import Permission, require_permission
 from certificados_backend.schemas.batches import (
@@ -10,8 +11,9 @@ from certificados_backend.schemas.batches import (
     EmissionBatchResponse,
     SpreadsheetPreviewResponse,
 )
-from certificados_backend.services import batch_service, job_dispatch
+from certificados_backend.services import batch_service, job_dispatch, per_work
 from certificados_backend.services.certificate_text import BODY_VARIABLES
+from certificados_backend.services.spreadsheet import INSTRUCTIONS_SHEET_TITLE
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -35,6 +37,85 @@ from database.certificate_types import MAX_WORK_AUTHORS, is_per_work_type
 router = APIRouter(tags=["emission-batches"])
 
 
+class _ModelColumn(NamedTuple):
+    """A column of the model workbook and how the "Instruções" sheet explains it.
+
+    The example lives only in that sheet: an example left in a data row would
+    print on the certificate.
+    """
+
+    name: str
+    required: bool
+    help: str
+    example: str
+    width: int
+
+
+_PER_WORK_MODEL: tuple[_ModelColumn, ...] = (
+    _ModelColumn("autor1", True, "Nome completo do primeiro autor.", "Maria Oliveira", 28),
+    *(
+        _ModelColumn(
+            f"autor{index}",
+            False,
+            "Outro autor do mesmo trabalho. Colunas vazias são ignoradas.",
+            "João Silva" if index == 2 else "",
+            28,
+        )
+        for index in range(2, MAX_WORK_AUTHORS + 1)
+    ),
+    _ModelColumn(
+        "evento",
+        True,
+        "Evento em que o trabalho foi apresentado.",
+        "Mostra de Iniciação Científica 2026",
+        32,
+    ),
+    _ModelColumn("titulo_trabalho", True, "Título do trabalho.", "Horta vertical automatizada", 36),
+    _ModelColumn("equipe", False, "Nome da equipe, se houver.", "Equipe Verde", 24),
+    _ModelColumn(
+        "carga_horaria",
+        False,
+        "Horas, só o número. Vazia, o texto automático não cita carga horária.",
+        "20",
+        16,
+    ),
+    _ModelColumn(
+        "data_emissao",
+        False,
+        "Data do certificado. Vazia, vale a data informada na tela de emissão.",
+        "10/06/2026",
+        16,
+    ),
+    _ModelColumn("data_inicio", False, "Início do evento, se o texto do certificado usar.", "", 16),
+    _ModelColumn("data_fim", False, "Fim do evento, se o texto do certificado usar.", "", 16),
+)
+_ORDINARY_MODEL: tuple[_ModelColumn, ...] = (
+    _ModelColumn("nome", True, "Nome completo do participante.", "Maria Oliveira", 32),
+    _ModelColumn("carga_horaria", True, "Horas, só o número.", "8", 18),
+    _ModelColumn("curso", False, "Curso do participante.", "Sistemas de Informação", 28),
+    _ModelColumn("evento", False, "Evento ou atividade.", "Semana Acadêmica 2026", 32),
+    _ModelColumn(
+        "data_emissao",
+        False,
+        "Data do certificado. Vazia, vale a data informada na tela de emissão.",
+        "10/06/2026",
+        18,
+    ),
+    _ModelColumn("data_inicio", False, "Início do evento, se o texto do certificado usar.", "", 18),
+    _ModelColumn("data_fim", False, "Fim do evento, se o texto do certificado usar.", "", 18),
+    _ModelColumn("email", False, "E-mail do participante.", "", 32),
+    _ModelColumn("documento", False, "Registro Acadêmico (RA) do participante.", "", 20),
+    _ModelColumn("equipe", False, "Nome da equipe, se houver.", "", 24),
+    _ModelColumn("titulo_trabalho", False, "Título do trabalho, se houver.", "", 36),
+)
+
+
+def _header_style(cells) -> None:
+    for cell in cells:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E78")
+
+
 @router.get(
     "/certificates/spreadsheet-template",
     operation_id="download_spreadsheet_template",
@@ -46,69 +127,41 @@ def spreadsheet_template(
     certificate_type: str | None = None,
     _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
 ) -> StreamingResponse:
-    """Model workbook for a batch; per-work types get the authors columns."""
+    """Model workbook for a batch; per-work types get the authors columns.
+
+    The data sheet holds only the header, so nothing in it can reach a
+    certificate; the "Instruções" sheet (never read) explains each column.
+    """
+    per_work_type = is_per_work_type(certificate_type)
+    model = _PER_WORK_MODEL if per_work_type else _ORDINARY_MODEL
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "certificados"
-    if is_per_work_type(certificate_type):
-        columns = [f"autor{index}" for index in range(1, MAX_WORK_AUTHORS + 1)] + [
-            "evento",
-            "titulo_trabalho",
-            "equipe",
-            "carga_horaria",
-            "data_emissao",
-            "data_inicio",
-            "data_fim",
-        ]
-        example: list[object] = [
-            "Nome do primeiro autor",
-            "Segundo autor (opcional)",
-            *([""] * (MAX_WORK_AUTHORS - 2)),
-            "Nome da mostra",
-            "Título do trabalho (opcional)",
-            "Equipe (opcional)",
-            "",
-            "10/06/2026",
-            "",
-            "",
-        ]
-        widths = (28,) * MAX_WORK_AUTHORS + (32, 36, 24, 16, 16, 16, 16)
-    else:
-        columns = [
-            "nome",
-            "carga_horaria",
-            "curso",
-            "evento",
-            "data_emissao",
-            "data_inicio",
-            "data_fim",
-            "email",
-            "documento",
-            "equipe",
-            "titulo_trabalho",
-        ]
-        example = [
-            "Nome completo",
-            8,
-            "Curso (opcional)",
-            "Evento (opcional)",
-            "10/06/2026",
-            "",
-            "",
-            "",
-            "",
-            "Equipe (opcional)",
-            "Título do trabalho (opcional)",
-        ]
-        widths = (32, 18, 28, 32, 18, 18, 18, 32, 20, 24, 36)
-    sheet.append(columns)
-    sheet.append(example)
-    for cell in sheet[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="1F4E78")
-    for index, width in enumerate(widths, start=1):
-        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.append([column.name for column in model])
+    _header_style(sheet[1])
+    for index, column in enumerate(model, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = column.width
     sheet.freeze_panes = "A2"
+
+    guide = workbook.create_sheet(INSTRUCTIONS_SHEET_TITLE)
+    guide.append(
+        [
+            "Preencha a aba “certificados”, uma linha por certificado a partir da linha 2. "
+            "Esta aba não é lida na emissão."
+        ]
+    )
+    if per_work_type:
+        guide.append(["Um certificado por trabalho, válido para todos os autores."])
+    guide.append([])
+    guide.append(["Coluna", "Obrigatória", "O que preencher", "Exemplo"])
+    _header_style(guide[guide.max_row])
+    for column in model:
+        guide.append(
+            [column.name, "Sim" if column.required else "Não", column.help, column.example]
+        )
+    for letter, width in zip("ABCD", (18, 12, 72, 36)):
+        guide.column_dimensions[letter].width = width
+
     buffer = BytesIO()
     workbook.save(buffer)
     workbook.close()
@@ -128,12 +181,22 @@ def spreadsheet_template(
 def body_variables(
     _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
 ) -> dict:
-    """Variables the body text accepts; the emission screen builds its buttons from it."""
+    """Variables the body text accepts; the emission screen builds its buttons from it.
+
+    ``per_work`` says whether a per-work type accepts the variable, and
+    ``per_work_automatic_text`` is the body such a type prints without a text.
+    """
     return {
         "variables": [
-            {"name": name, "token": "{{%s}}" % name, "label": label}
+            {
+                "name": name,
+                "token": "{{%s}}" % name,
+                "label": label,
+                "per_work": name not in per_work.EXCLUDED_BODY_VARIABLES,
+            }
             for name, label in BODY_VARIABLES
-        ]
+        ],
+        "per_work_automatic_text": per_work.AUTOMATIC_BODY_DESCRIPTION,
     }
 
 

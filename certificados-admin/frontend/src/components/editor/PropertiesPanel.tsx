@@ -241,8 +241,9 @@ export default function PropertiesPanel({
               </label>
               {element.key === "authors" && (
                 <p className="text-[length:var(--text-2xs)] text-[color:var(--ink-subtle)]">
-                  A prévia mostra oito autores, o caso mais alto. Deixe espaço acima
-                  do bloco para o corpo do texto.
+                  Sai como “Autores:” e um nome por linha (“Autor:” com um só). A
+                  prévia mostra oito autores, o caso mais alto. Deixe espaço acima do
+                  bloco para o corpo do texto.
                 </p>
               )}
               {layout?.overflow && element.height !== undefined && (

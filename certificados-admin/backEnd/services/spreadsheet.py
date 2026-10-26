@@ -16,6 +16,10 @@ Rules enforced here:
   the official list (kept as-is otherwise), dates are normalised when parseable,
   and unknown/extra columns are ignored.
 - ``evento`` is a distinct column (never the course).
+- Per-work types require ``autor1``, ``evento`` and ``titulo_trabalho``; the
+  workload is optional.
+- A cell still holding an example text of the model workbook ("Equipe
+  (opcional)", ...) invalidates its row: it would print on the certificate.
 - invalid rows (missing name or workload) never produce a certificate.
 """
 
@@ -94,8 +98,25 @@ _COLUMN_SYNONYMS: dict[str, set[str]] = {
 }
 
 REQUIRED_COLUMNS = ("nome", "carga_horaria")
-# Per-work certificates need the first author; the workload may be blank.
-PER_WORK_REQUIRED_COLUMNS = ("autor1",)
+# Per-work certificates name the work and its event; the workload may be blank.
+PER_WORK_REQUIRED_COLUMNS = ("autor1", "evento", "titulo_trabalho")
+
+# Texts the example row of earlier model workbooks carried. Those models are
+# still in circulation, and a cell left unchanged would print on the
+# certificate, so such a cell invalidates its row. Today's model has no
+# example row: its "Instruções" sheet explains each column instead.
+TEMPLATE_EXAMPLE_TEXTS = (
+    "Nome completo",
+    "Nome do primeiro autor",
+    "Segundo autor (opcional)",
+    "Nome da mostra",
+    "Curso (opcional)",
+    "Evento (opcional)",
+    "Equipe (opcional)",
+    "Título do trabalho (opcional)",
+)
+# The model's instructions sheet is never read as data.
+INSTRUCTIONS_SHEET_TITLE = "Instruções"
 _AUTHOR_HEADER_RE = re.compile(r"^(?:co)?aut(?:h)?or0*(\d+)$")
 
 
@@ -250,6 +271,19 @@ def compute_business_key(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+_EXAMPLE_TEXTS_NORM = frozenset(_norm_text(text) for text in TEMPLATE_EXAMPLE_TEXTS)
+
+
+def example_text_errors(values: dict[str, str]) -> list[str]:
+    """Cells of a row that still hold an example text of the model workbook."""
+    return [
+        f'{column} contém o texto de exemplo do modelo ("{value}"); '
+        "substitua pelo dado real ou apague"
+        for column, value in values.items()
+        if value and _norm_text(value) in _EXAMPLE_TEXTS_NORM
+    ]
+
+
 # ── Reader ──────────────────────────────────────────────────────────────────────
 
 
@@ -270,10 +304,13 @@ def enforce_xlsx_limits(
     max_cols: int = DEFAULT_MAX_COLS,
     max_cell_len: int = DEFAULT_MAX_CELL_LEN,
     max_seconds: float = DEFAULT_MAX_SECONDS,
-) -> None:
+) -> str:
     """Validate the REAL .xlsx structure and enforce hard limits BEFORE the
     spreadsheet is fully loaded into pandas — guarding against malformed files,
     decompression bombs, and oversized rows/columns/cells/processing time.
+
+    Returns the title of the data sheet: the first one that is not the model's
+    instructions sheet. The limits apply to that sheet, the one pandas reads.
     """
     # 1) Real OOXML/ZIP structure + decompression-bomb guard (no XML parsed yet).
     try:
@@ -300,7 +337,12 @@ def enforce_xlsx_limits(
     started = time.monotonic()
     workbook = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
     try:
-        worksheet = workbook.active
+        sheets = workbook.worksheets
+        instructions = _norm_header(INSTRUCTIONS_SHEET_TITLE)
+        worksheet = next(
+            (sheet for sheet in sheets if _norm_header(sheet.title) != instructions),
+            sheets[0] if sheets else None,
+        )
         if worksheet is None:
             raise SpreadsheetError("Planilha sem aba ativa.")
         row_count = 0
@@ -317,6 +359,7 @@ def enforce_xlsx_limits(
                     )
             if time.monotonic() - started > max_seconds:
                 raise SpreadsheetError("Tempo de processamento da planilha excedido.")
+        return str(worksheet.title)
     finally:
         workbook.close()
 
@@ -335,19 +378,20 @@ def read_and_validate(
 
     ``certificate_type`` selects the column contract: per-work types take the
     authors columns (``autor1`` required, ``nome`` standing in for it only when
-    ``autor1`` is absent) and may leave the workload blank.
+    ``autor1`` is absent), require the event and the work title, and may leave
+    the workload blank.
     """
     traits = certificate_type_traits(certificate_type)
     per_work = traits.per_work_authors
     data = _materialize_bytes(source)
-    enforce_xlsx_limits(
+    sheet_name = enforce_xlsx_limits(
         data,
         max_rows=max_rows,
         max_cols=max_cols,
         max_cell_len=max_cell_len,
         max_seconds=max_seconds,
     )
-    dataframe = pd.read_excel(BytesIO(data), engine="openpyxl", dtype=object)
+    dataframe = pd.read_excel(BytesIO(data), sheet_name=sheet_name, engine="openpyxl", dtype=object)
 
     colmap: dict[str, object] = {}
     for column in dataframe.columns:
@@ -397,13 +441,18 @@ def read_and_validate(
         elif not values.get("nome") and not values.get("carga_horaria"):
             continue  # skip fully empty rows
 
-        errors: list[str] = []
+        errors: list[str] = example_text_errors(values)
 
         # ── Required: name (or first author) + workload ───────────────────────
         if per_work:
             nome = autores[0] if autores else ""
             if not nome:
                 errors.append("autor1 é obrigatório")
+            # The certificate names the work and the event it was presented at.
+            if not values.get("titulo_trabalho"):
+                errors.append("titulo_trabalho é obrigatório")
+            if not values.get("evento"):
+                errors.append("evento é obrigatório")
         else:
             nome = values.get("nome", "")
             if not nome:

@@ -21,7 +21,7 @@ from io import BytesIO
 from pathlib import Path
 
 from database import db
-from database.certificate_types import parse_certificate_type
+from database.certificate_types import is_per_work_type, parse_certificate_type
 
 MAX_BACKGROUND_BYTES = 10 * 1024 * 1024  # 10 MB
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -185,9 +185,13 @@ def get_version(version_id: int) -> dict | None:
 
 
 def get_active_version(certificate_type: str | None = None) -> dict | None:
-    """The active version for a batch type, falling back to the generic one."""
+    """The active version for a batch type, falling back to the generic one.
+
+    Per-work types never fall back: the generic template highlights a
+    participant name, which a certificate shared by every author must not do.
+    """
     version = db.get_active_template_version(certificate_type) if certificate_type else None
-    if not version:
+    if not version and not is_per_work_type(certificate_type):
         # No version dedicated to this type: the generic one applies.
         version = db.get_active_template_version(None)
     return serialize_version(version) if version else None

@@ -114,3 +114,41 @@ def auth_headers(client) -> dict:
     assert resp.status_code == 200, resp.text
     assert "access_token" not in resp.json()
     return {}
+
+
+MOSTRA_TYPE = "scientific_initiation"
+
+
+@pytest.fixture
+def mostra_template(client) -> dict:
+    """An active template fit for a per-work type: no participant name, a body,
+    and the authors block whose base sits above the QR code."""
+    import base64
+    from io import BytesIO
+
+    from certificados_backend.services import template_service
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1414, 1000), "white").save(buffer, "PNG")
+
+    def text(key: str, **extra) -> dict:
+        return {"type": "text", "key": key, "fontFamily": "Times New Roman", **extra}
+
+    layout = {
+        "background": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(),
+        "image_width": 1414,
+        "image_height": 1000,
+        "elements": [
+            text("static", staticText="CERTIFICADO", x=707, y=120, fontSize=50, align="center"),
+            text("texto_certificado", x=70, y=300, fontSize=24, align="left", width=1000),
+            text("authors", x=70, y=800, fontSize=20, align="left", anchorY="bottom"),
+            {"type": "qr", "key": "qr", "x": 70, "y": 820, "width": 120, "height": 120},
+            text("validation_code", x=707, y=920, fontSize=14, align="center"),
+        ],
+    }
+    version = template_service.create_version(
+        name="Mostra", layout=layout, certificate_type=MOSTRA_TYPE
+    )
+    assert template_service.activate_version(version["id"])
+    return version

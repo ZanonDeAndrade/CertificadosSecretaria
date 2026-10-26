@@ -19,8 +19,10 @@ import EditorCanvas from "../components/editor/EditorCanvas";
 import EditorTopbar from "../components/editor/EditorTopbar";
 import ElementList from "../components/editor/ElementList";
 import PropertiesPanel from "../components/editor/PropertiesPanel";
+import PerWorkNotice from "../components/editor/PerWorkNotice";
 import SettingsNotice from "../components/editor/SettingsNotice";
-import { certificateTypeLabel } from "../domain/certificateTypes";
+import { certificateTypeLabel, isPerWorkType } from "../domain/certificateTypes";
+import { perWorkStartingPoint } from "../domain/perWorkTemplate";
 import { getTemplateSampleData, TemplateSampleData } from "../services/templateApi";
 import AccessibleModal from "../components/AccessibleModal";
 import ConfirmDialog from "../ui/ConfirmDialog";
@@ -233,6 +235,21 @@ export default function TemplateEditor() {
         failureMessage(error, "Não foi possível carregar esta versão para edição."),
       );
     }
+  };
+
+  /* Choosing a per-work type turns the layout being edited (usually a copy of
+   * the generic template) into that type's starting point: no participant
+   * name, the body moved up, the authors block above the QR code. It is an
+   * ordinary edit, so Ctrl+Z brings the previous layout back. */
+  const handleCertificateTypeChange = (next: string | null) => {
+    const entering = isPerWorkType(next) && !isPerWorkType(templateType);
+    setTemplateType(next);
+    if (!entering) return;
+    const current = editor.getLayout();
+    const start = perWorkStartingPoint(current);
+    if (JSON.stringify(start) === JSON.stringify(current)) return;
+    noteUserEdit();
+    editor.loadTemplate(start);
   };
 
   const handleSave = async () => {
@@ -825,7 +842,7 @@ export default function TemplateEditor() {
         <EditorTopbar
           templateName={templateName}
           certificateType={templateType}
-          onCertificateTypeChange={setTemplateType}
+          onCertificateTypeChange={handleCertificateTypeChange}
           saving={saving}
           hasBackground={Boolean(editor.backgroundUrl)}
           isDirty={history.isDirty}
@@ -871,6 +888,8 @@ export default function TemplateEditor() {
             {editor.canvasError}
           </Alert>
         )}
+
+        <PerWorkNotice certificateType={templateType} elements={editor.elements} />
 
         <SettingsNotice
           emptySettings={sample?.empty_settings ?? []}

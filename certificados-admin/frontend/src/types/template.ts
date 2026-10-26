@@ -179,15 +179,17 @@ export const MOCK_DATA: Record<string, string> = {
   autor6: "Beatriz Lima",
   autor7: "Rafael Souza",
   autor8: "Carla Dias",
-  // Eight authors on purpose: the block is previewed at its tallest.
+  // Eight authors on purpose: the block is previewed at its tallest. Same
+  // format as the PDF (backend `generator.authors_block`).
   authors: [
-    "Autor 1: Joao Silva",
-    "Autor 2: Maria Oliveira",
-    "Autor 3: Pedro Santos",
-    "Autor 4: Ana Costa",
-    "Autor 5: Lucas Pereira",
-    "Autor 6: Beatriz Lima",
-    "Autor 7: Rafael Souza",
-    "Autor 8: Carla Dias",
+    "Autores:",
+    "Joao Silva",
+    "Maria Oliveira",
+    "Pedro Santos",
+    "Ana Costa",
+    "Lucas Pereira",
+    "Beatriz Lima",
+    "Rafael Souza",
+    "Carla Dias",
   ].join("\n"),
 };

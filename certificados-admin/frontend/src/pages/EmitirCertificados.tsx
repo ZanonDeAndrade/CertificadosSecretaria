@@ -48,6 +48,9 @@ const STEPS = [
   { id: "done", label: "Resultado" },
 ];
 
+/* Pre-filled for ordinary types. A per-work type (the Mostra) starts blank:
+ * its automatic body applies, and this text would print the certificate as an
+ * ordinary one ("participou da atividade…"). */
 const DEFAULT_BODY_TEXT =
   "participou da atividade descrita neste certificado, com carga horária total de " +
   "{{carga_horaria}} horas.";
@@ -82,6 +85,48 @@ function exportInvalidRows(preview: SpreadsheetPreview) {
   saveBlob(
     new Blob(["\ufeff", rows.join("\n")], { type: "text/csv;charset=utf-8" }),
     "relatorio-erros-emissao.csv",
+  );
+}
+
+/* Per-work batches: one row per work, with every author it will list. */
+function WorkRowsTable({ rows }: { rows: SpreadsheetPreview["valid"] }) {
+  return (
+    <Table caption="Trabalhos aptos para emissão">
+      <Thead>
+        <Tr>
+          <Th>Linha</Th>
+          <Th>Trabalho</Th>
+          <Th>Autores</Th>
+          <Th>Carga</Th>
+          <Th>Emissão</Th>
+        </Tr>
+      </Thead>
+      <Tbody>
+        {rows.map((row) => {
+          const authors = row.autores?.length ? row.autores : [row.nome];
+          return (
+            <Tr key={row.row_number}>
+              <Td>{row.row_number}</Td>
+              <TdHeader>
+                {row.titulo_trabalho}
+                <span className="block text-[length:var(--text-xs)] font-normal text-[color:var(--ink-muted)]">
+                  {row.evento}
+                </span>
+              </TdHeader>
+              <Td>
+                <ul aria-label={`Autores do trabalho da linha ${row.row_number}`}>
+                  {authors.map((name, index) => (
+                    <li key={`${index}-${name}`}>{name}</li>
+                  ))}
+                </ul>
+              </Td>
+              <Td>{row.carga_horaria == null ? "—" : `${row.carga_horaria}h`}</Td>
+              <Td>{row.data_emissao}</Td>
+            </Tr>
+          );
+        })}
+      </Tbody>
+    </Table>
   );
 }
 
@@ -343,6 +388,26 @@ export default function EmitirCertificados() {
     setError("");
   };
 
+  const perWork = isPerWorkType(certificateType);
+  const hasBodyText = textoPadrao.trim() !== "";
+  const canValidate = Boolean(file) && (perWork || hasBodyText);
+  const offeredVariables = (bodyVariables.data?.variables ?? []).filter(
+    (variable) => !perWork || variable.per_work !== false,
+  );
+
+  const changeCertificateType = (next: string) => {
+    const untouched = textoPadrao.trim() === DEFAULT_BODY_TEXT;
+    if (isPerWorkType(next) && !isPerWorkType(certificateType) && untouched) {
+      // The ordinary pre-filled text gives way to the automatic body.
+      setTextoPadrao("");
+    } else if (!isPerWorkType(next) && isPerWorkType(certificateType) && !hasBodyText) {
+      // Ordinary types require a text: offer the usual one again.
+      setTextoPadrao(DEFAULT_BODY_TEXT);
+    }
+    setCertificateType(next);
+    setCertificateTypeError("");
+  };
+
   const insertVariable = (token: string) => {
     const element = textareaRef.current;
     const start = element ? element.selectionStart : textoPadrao.length;
@@ -362,7 +427,7 @@ export default function EmitirCertificados() {
   };
 
   const handleValidate = async () => {
-    if (!file || !textoPadrao.trim() || validating) return;
+    if (!file || !canValidate || validating) return;
     if (!certificateType) {
       setCertificateTypeError("Selecione o tipo do certificado.");
       return;
@@ -491,8 +556,8 @@ export default function EmitirCertificados() {
             <PanelHeader
               title="1. Planilha do lote"
               description={
-                isPerWorkType(certificateType)
-                  ? `Um certificado por trabalho, válido para todos os autores. Coluna obrigatória: autor1; use autor1 a autor${MAX_WORK_AUTHORS} (colunas vazias são ignoradas). Evento, titulo_trabalho, equipe, carga_horaria e datas são opcionais.`
+                perWork
+                  ? `Um certificado por trabalho, válido para todos os autores. Colunas obrigatórias: autor1, evento e titulo_trabalho; use autor1 a autor${MAX_WORK_AUTHORS} (colunas vazias são ignoradas). Equipe, carga_horaria e datas são opcionais.`
                   : "Colunas obrigatórias: nome e carga_horaria. Curso, evento, datas, e-mail, Registro Acadêmico (RA), equipe e titulo_trabalho são opcionais."
               }
               actions={
@@ -519,10 +584,7 @@ export default function EmitirCertificados() {
                   <Select
                     {...props}
                     value={certificateType}
-                    onChange={(event) => {
-                      setCertificateType(event.target.value);
-                      setCertificateTypeError("");
-                    }}
+                    onChange={(event) => changeCertificateType(event.target.value)}
                   >
                     <option value="">Selecione o tipo do certificado</option>
                     {CERTIFICATE_TYPES.map((option) => (
@@ -557,7 +619,26 @@ export default function EmitirCertificados() {
               description="Os dados institucionais, assinatura, QR Code e código vêm das configurações e do template ativo."
             />
             <PanelBody className="space-y-3">
-              <Field label="Texto padrão do certificado" required>
+              <Field
+                label="Texto padrão do certificado"
+                required={!perWork}
+                hint={
+                  perWork ? (
+                    <>
+                      Opcional. Em branco, vale o texto automático
+                      {bodyVariables.data?.per_work_automatic_text ? (
+                        <>
+                          : <q>{bodyVariables.data.per_work_automatic_text}</q> A carga
+                          horária só aparece quando preenchida.
+                        </>
+                      ) : (
+                        ", que cita o título do trabalho, o evento e a carga horária quando preenchida."
+                      )}{" "}
+                      Sem nome: os autores saem no bloco Autores do template.
+                    </>
+                  ) : undefined
+                }
+              >
                 {(props) => (
                   <Textarea
                     {...props}
@@ -569,6 +650,13 @@ export default function EmitirCertificados() {
                   />
                 )}
               </Field>
+              {perWork && hasBodyText && (
+                <Alert tone="warn" live={false}>
+                  Este texto será impresso no lugar do texto automático de{" "}
+                  {certificateTypeLabel(certificateType)}. Confira se ele fala do trabalho
+                  e não de um participante; para usar o texto automático, apague o campo.
+                </Alert>
+              )}
               <div className="rounded-[var(--radius)] border border-[color:var(--line)] bg-[var(--surface-sunken)] p-3">
                 <p className="mb-2 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
                   Inserir variável na posição do cursor:
@@ -590,7 +678,7 @@ export default function EmitirCertificados() {
                   </p>
                 )}
                 <div className="flex flex-wrap gap-2">
-                  {(bodyVariables.data ?? []).map(({ token, label }) => (
+                  {offeredVariables.map(({ token, label }) => (
                     <button
                       key={token}
                       type="button"
@@ -616,7 +704,7 @@ export default function EmitirCertificados() {
               size="lg"
               iconAfter="arrow-right"
               onClick={handleValidate}
-              disabled={!file || !textoPadrao.trim()}
+              disabled={!canValidate}
               loading={validating}
             >
               {validating ? "Validando planilha…" : "Validar planilha"}
@@ -645,7 +733,11 @@ export default function EmitirCertificados() {
             <Panel>
               <PanelHeader
                 title="Prévia do texto gerado"
-                description="Variáveis resolvidas para a primeira linha válida."
+                description={
+                  perWork && !hasBodyText
+                    ? "Texto automático, resolvido para a primeira linha válida."
+                    : "Variáveis resolvidas para a primeira linha válida."
+                }
               />
               <PanelBody><p className="certificate-text whitespace-pre-wrap">{preview.resolved_text_preview}</p></PanelBody>
             </Panel>
@@ -658,6 +750,17 @@ export default function EmitirCertificados() {
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
+            </Alert>
+          )}
+
+          {preview.template_problem && (
+            <Alert tone="danger" title="Não é possível confirmar este lote" live={false}>
+              <p>{preview.template_problem}</p>
+              {preview.can_manage_templates && (
+                <LinkButton to="/template" size="sm" className="mt-2">
+                  Abrir Template
+                </LinkButton>
+              )}
             </Alert>
           )}
 
@@ -747,31 +850,35 @@ export default function EmitirCertificados() {
                 description={preview.valid.length > 50 ? "Mostrando as 50 primeiras." : undefined}
               />
               <TableScroll label="Linhas válidas" className="rounded-none border-0 border-t">
-                <Table caption="Participantes aptos para emissão">
-                  <Thead><Tr><Th>Linha</Th><Th>Participante</Th><Th className="hidden md:table-cell">Curso/evento</Th><Th>Carga</Th><Th>Emissão</Th></Tr></Thead>
-                  <Tbody>
-                    {preview.valid.slice(0, 50).map((row) => (
-                      <Tr key={row.row_number}>
-                        <Td>{row.row_number}</Td>
-                        <TdHeader>
-                          {row.autores && row.autores.length > 1 ? (
-                            <span title={row.autores.join(", ")}>
-                              {row.nome}{" "}
-                              <span className="text-[color:var(--ink-muted)]">
-                                +{row.autores.length - 1} autor(es)
+                {perWork ? (
+                  <WorkRowsTable rows={preview.valid.slice(0, 50)} />
+                ) : (
+                  <Table caption="Participantes aptos para emissão">
+                    <Thead><Tr><Th>Linha</Th><Th>Participante</Th><Th className="hidden md:table-cell">Curso/evento</Th><Th>Carga</Th><Th>Emissão</Th></Tr></Thead>
+                    <Tbody>
+                      {preview.valid.slice(0, 50).map((row) => (
+                        <Tr key={row.row_number}>
+                          <Td>{row.row_number}</Td>
+                          <TdHeader>
+                            {row.autores && row.autores.length > 1 ? (
+                              <span title={row.autores.join(", ")}>
+                                {row.nome}{" "}
+                                <span className="text-[color:var(--ink-muted)]">
+                                  +{row.autores.length - 1} autor(es)
+                                </span>
                               </span>
-                            </span>
-                          ) : (
-                            row.nome
-                          )}
-                        </TdHeader>
-                        <Td className="hidden text-[color:var(--ink-muted)] md:table-cell">{row.titulo_trabalho || row.evento || row.curso || "—"}</Td>
-                        <Td>{row.carga_horaria == null ? "—" : `${row.carga_horaria}h`}</Td>
-                        <Td>{row.data_emissao}</Td>
-                      </Tr>
-                    ))}
-                  </Tbody>
-                </Table>
+                            ) : (
+                              row.nome
+                            )}
+                          </TdHeader>
+                          <Td className="hidden text-[color:var(--ink-muted)] md:table-cell">{row.titulo_trabalho || row.evento || row.curso || "—"}</Td>
+                          <Td>{row.carga_horaria == null ? "—" : `${row.carga_horaria}h`}</Td>
+                          <Td>{row.data_emissao}</Td>
+                        </Tr>
+                      ))}
+                    </Tbody>
+                  </Table>
+                )}
               </TableScroll>
             </Panel>
           ) : (
@@ -795,6 +902,7 @@ export default function EmitirCertificados() {
                   disabled={
                     preview.valid_count === 0 ||
                     startLockRef.current ||
+                    Boolean(preview.template_problem) ||
                     (preview.missing_settings?.length ?? 0) > 0
                   }
                 >

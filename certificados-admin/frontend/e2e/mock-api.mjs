@@ -207,6 +207,76 @@ function sendBinary(res, status, body, contentType, filename) {
   res.end(body);
 }
 
+async function readText(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/* Same elements as the backend's default template (`_default_layout`) for a
+ * 3508×2480 art, so the editor works on a realistic generic layout. */
+function defaultLayout(id) {
+  const text = (key, y, fontSize, extra = {}) => ({
+    type: "text", key, x: 1754, y, fontSize, fontFamily: "Times New Roman",
+    color: "#000000", align: "center", bold: false, italic: false, ...extra,
+  });
+  return {
+    background: `/templates/versions/${id}/background`,
+    image_width: 3508,
+    image_height: 2480,
+    elements: [
+      text("static", 297, 124, { staticText: "CERTIFICADO", bold: true }),
+      text("static", 744, 54, { staticText: "Certificamos, para os devidos fins, que" }),
+      text("name", 880, 111, { bold: true }),
+      text("texto_certificado", 1140, 59, { x: 175, align: "left" }),
+      text("issue_line", 1785, 54),
+      text("signatory_name", 1959, 44),
+      text("signatory_title", 2046, 39),
+      text("validation_code", 2281, 34),
+      { type: "qr", key: "qr", x: 175, y: 2033, width: 297, height: 297 },
+    ],
+  };
+}
+
+/* A Mostra batch: one certificate per work, every author on it. */
+function workPreview(problem) {
+  const works = [
+    ["Horta vertical automatizada", ["Ana Carolina Souza", "João Pedro Lima", "Mariana Alves Ferreira"], 60],
+    ["Robô seguidor de linha", ["Carlos Eduardo Nunes"], null],
+  ];
+  return {
+    total: 2,
+    valid_count: 2,
+    invalid_count: 0,
+    valid: works.map(([title, authors, hours], index) => ({
+      row_number: index + 2,
+      nome: authors[0],
+      curso: "",
+      evento: "Mostra de Iniciação Científica 2026",
+      carga_horaria: hours,
+      data_emissao: "10 de junho de 2026",
+      data_inicio: "",
+      data_fim: "",
+      autores: authors,
+      equipe: "",
+      titulo_trabalho: title,
+    })),
+    invalid: [],
+    events: [{ key: "Mostra de Iniciação Científica 2026", label: "Mostra de Iniciação Científica 2026", count: 2 }],
+    resolved_text_preview:
+      'Certificamos que o trabalho "Horta vertical automatizada" foi apresentado no evento ' +
+      "Mostra de Iniciação Científica 2026, com carga horária de 60 horas.",
+    warnings: [],
+    layout_warnings: [],
+    missing_settings: [],
+    missing_settings_message: null,
+    empty_fields: [],
+    can_manage_settings: true,
+    template_problem: problem,
+    can_manage_templates: true,
+  };
+}
+
 async function readJson(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -375,8 +445,13 @@ const server = createServer(async (req, res) => {
       ["evento", "Evento"],
       ["equipe", "Equipe"],
       ["titulo_trabalho", "Título do trabalho"],
-    ].map(([name, label]) => ({ name, token: `{{${name}}}`, label }));
-    return send(res, 200, { variables });
+    ].map(([name, label]) => ({ name, token: `{{${name}}}`, label, per_work: name !== "nome" }));
+    return send(res, 200, {
+      variables,
+      per_work_automatic_text:
+        'Certificamos que o trabalho "{{titulo_trabalho}}" foi apresentado no evento ' +
+        "{{evento}}, com carga horária de {{carga_horaria}} horas.",
+    });
   }
   if (path === "/certificates/spreadsheet-template") {
     return sendBinary(res, 200, Buffer.from("PK\u0003\u0004mock-xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "modelo-certificados.xlsx");
@@ -403,6 +478,14 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { disconnected: true, existing_certificates_unchanged: true });
   }
   if (path === "/certificates/validate-spreadsheet") {
+    const form = await readText(req);
+    if (/name="certificate_type"\r\n\r\nscientific_initiation/.test(form)) {
+      return send(res, 200, workPreview(
+        scenario === "mostra-sem-template"
+          ? "Não há template ativo do tipo Mostra de Iniciação Científica. Este tipo não usa o template genérico, porque o certificado vale para todos os autores e não destaca nenhum nome. Em Template, use “Editar (nova versão)”, escolha o tipo Mostra de Iniciação Científica (o editor monta o ponto de partida sem o nome e com o bloco Autores), ajuste, salve e ative a versão."
+          : null,
+      ));
+    }
     return send(res, 200, {
       total: 44,
       valid_count: 42,
@@ -554,7 +637,7 @@ const server = createServer(async (req, res) => {
   if (/^\/templates\/versions\/\d+$/.test(path)) {
     const id = Number(path.split("/").pop());
     const version = TEMPLATE_VERSIONS.find((entry) => entry.id === id);
-    return send(res, 200, { ...version, layout: { background: "", image_width: 3508, image_height: 2480, elements: [] } });
+    return send(res, 200, { ...version, layout: defaultLayout(id) });
   }
 
   return send(res, 404, { detail: "Rota não encontrada no mock." });

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import EmitirCertificados from "./EmitirCertificados";
@@ -60,14 +60,71 @@ const PREVIEW = {
 };
 
 /** What GET /certificates/body-variables answers (the backend allowlist). */
-const BODY_VARIABLES = [
-  { name: "nome", token: "{{nome}}", label: "Nome" },
-  { name: "carga_horaria", token: "{{carga_horaria}}", label: "Carga horária" },
-  { name: "certificate_type", token: "{{certificate_type}}", label: "Tipo do certificado" },
-  { name: "evento", token: "{{evento}}", label: "Evento" },
-  { name: "equipe", token: "{{equipe}}", label: "Equipe" },
-  { name: "titulo_trabalho", token: "{{titulo_trabalho}}", label: "Título do trabalho" },
+const VARIABLES = [
+  { name: "nome", token: "{{nome}}", label: "Nome", per_work: false },
+  { name: "carga_horaria", token: "{{carga_horaria}}", label: "Carga horária", per_work: true },
+  {
+    name: "certificate_type",
+    token: "{{certificate_type}}",
+    label: "Tipo do certificado",
+    per_work: true,
+  },
+  { name: "evento", token: "{{evento}}", label: "Evento", per_work: true },
+  { name: "equipe", token: "{{equipe}}", label: "Equipe", per_work: true },
+  {
+    name: "titulo_trabalho",
+    token: "{{titulo_trabalho}}",
+    label: "Título do trabalho",
+    per_work: true,
+  },
 ];
+const AUTOMATIC_TEXT =
+  'Certificamos que o trabalho "{{titulo_trabalho}}" foi apresentado no evento ' +
+  "{{evento}}, com carga horária de {{carga_horaria}} horas.";
+const BODY_VARIABLES = { variables: VARIABLES, per_work_automatic_text: AUTOMATIC_TEXT };
+const DEFAULT_TEXT =
+  "participou da atividade descrita neste certificado, com carga horária total de " +
+  "{{carga_horaria}} horas.";
+
+/** A Mostra batch: one work per row, every author listed. */
+const WORK_PREVIEW = {
+  ...PREVIEW,
+  total: 2,
+  valid_count: 2,
+  valid: [
+    {
+      row_number: 2,
+      nome: "Pessoa Exemplo Alfa",
+      curso: "",
+      evento: "Mostra 2026",
+      carga_horaria: 60,
+      data_emissao: "10 de junho de 2026",
+      data_inicio: "",
+      data_fim: "",
+      autores: ["Pessoa Exemplo Alfa", "Pessoa Exemplo Beta", "Pessoa Exemplo Gama"],
+      equipe: "",
+      titulo_trabalho: "Horta vertical automatizada",
+    },
+    {
+      row_number: 3,
+      nome: "Pessoa Exemplo Delta",
+      curso: "",
+      evento: "Mostra 2026",
+      carga_horaria: null,
+      data_emissao: "10 de junho de 2026",
+      data_inicio: "",
+      data_fim: "",
+      autores: ["Pessoa Exemplo Delta"],
+      equipe: "",
+      titulo_trabalho: "Robô seguidor de linha",
+    },
+  ],
+  events: [{ key: "Mostra 2026", label: "Mostra 2026", count: 2 }],
+  resolved_text_preview:
+    'Certificamos que o trabalho "Horta vertical automatizada" foi apresentado no ' +
+    "evento Mostra 2026, com carga horária de 60 horas.",
+  template_problem: null,
+};
 
 const SUMMARY = {
   batch_id: "11111111-1111-4111-8111-111111111111",
@@ -291,9 +348,9 @@ test("inserir variável não duplica espaços que já existem", async () => {
   expect(field.value).toBe("nos dias {{carga_horaria}}");
 });
 
-test("os botões de variável são exatamente os que a API informa, para qualquer tipo", async () => {
+test("os botões de variável são os que a API informa; a Mostra não oferece {{nome}}", async () => {
   render();
-  const tokens = BODY_VARIABLES.map((variable) => variable.token);
+  const tokens = VARIABLES.map((variable) => variable.token);
   for (const token of tokens) {
     expect(await screen.findByRole("button", { name: `Inserir ${token}` })).toBeTruthy();
   }
@@ -309,6 +366,8 @@ test("os botões de variável são exatamente os que a API informa, para qualque
   for (const token of ["{{titulo_trabalho}}", "{{evento}}", "{{equipe}}"]) {
     expect(screen.getByRole("button", { name: `Inserir ${token}` })).toBeTruthy();
   }
+  // The certificate is valid for every author: {{nome}} would print only the first.
+  expect(screen.queryByRole("button", { name: "Inserir {{nome}}" })).toBeNull();
   fireEvent.change(textarea(), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Inserir {{equipe}}" }));
   expect(textarea().value).toBe("{{equipe}}");
@@ -499,4 +558,127 @@ test("apresenta erro compreensível quando o Picker falha", async () => {
   expect(
     await screen.findByText("Não foi possível validar a pasta selecionada."),
   ).not.toBeNull();
+});
+
+
+function chooseType(value: string) {
+  fireEvent.change(screen.getByRole("combobox", { name: /Tipo do certificado/i }), {
+    target: { value },
+  });
+}
+
+async function reachWorkPreview() {
+  vi.mocked(validateSpreadsheet).mockResolvedValue(WORK_PREVIEW);
+  render();
+  const file = selectFile();
+  chooseType("scientific_initiation");
+  fireEvent.click(validateButton());
+  await screen.findByText(WORK_PREVIEW.resolved_text_preview);
+  return file;
+}
+
+test("na Mostra o texto pré-preenchido dá lugar ao texto automático", async () => {
+  render();
+  const file = selectFile();
+  expect(textarea().value).toBe(DEFAULT_TEXT);
+
+  chooseType("scientific_initiation");
+  expect(textarea().value).toBe("");
+  expect(await screen.findByText(AUTOMATIC_TEXT)).toBeTruthy();
+  expect(screen.queryByText(/será impresso no lugar do texto automático/)).toBeNull();
+  // Blank is allowed: the backend prints the automatic body.
+  expect(validateButton().disabled).toBe(false);
+  fireEvent.click(validateButton());
+  await waitFor(() =>
+    expect(validateSpreadsheet).toHaveBeenCalledWith(
+      file,
+      undefined,
+      "",
+      "scientific_initiation",
+    ),
+  );
+
+  // Back to an ordinary type, which requires a text: the usual one returns.
+  fireEvent.click(await screen.findByRole("button", { name: /Trocar arquivo/i }));
+  selectFile();
+  chooseType("scientific_initiation");
+  chooseType("listener");
+  expect(textarea().value).toBe(DEFAULT_TEXT);
+});
+
+test("texto já editado é mantido ao escolher a Mostra, com aviso", async () => {
+  render();
+  selectFile();
+  fireEvent.change(textarea(), { target: { value: "apresentou {{titulo_trabalho}}." } });
+  chooseType("scientific_initiation");
+
+  expect(textarea().value).toBe("apresentou {{titulo_trabalho}}.");
+  expect(screen.getByText(/será impresso no lugar do texto automático/)).toBeTruthy();
+
+  // Clearing it removes the warning: the automatic body applies.
+  fireEvent.change(textarea(), { target: { value: "" } });
+  expect(screen.queryByText(/será impresso no lugar do texto automático/)).toBeNull();
+});
+
+test("a conferência da Mostra mostra o título e todos os autores de cada linha", async () => {
+  await reachWorkPreview();
+
+  const table = screen.getByRole("table", { name: "Trabalhos aptos para emissão" });
+  expect(within(table).getByText("Horta vertical automatizada")).toBeTruthy();
+  expect(within(table).getByText("Robô seguidor de linha")).toBeTruthy();
+  const first = within(table).getByRole("list", { name: "Autores do trabalho da linha 2" });
+  expect(within(first).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "Pessoa Exemplo Alfa",
+    "Pessoa Exemplo Beta",
+    "Pessoa Exemplo Gama",
+  ]);
+  const second = within(table).getByRole("list", { name: "Autores do trabalho da linha 3" });
+  expect(within(second).getAllByRole("listitem")).toHaveLength(1);
+  expect(screen.getByText("Texto automático, resolvido para a primeira linha válida.")).toBeTruthy();
+  const next = screen.getByRole("button", {
+    name: /Definir destino no Google Drive/i,
+  }) as HTMLButtonElement;
+  expect(next.disabled).toBe(false);
+});
+
+test("template da Mostra ausente ou inadequado bloqueia a confirmação", async () => {
+  vi.mocked(validateSpreadsheet).mockResolvedValue({
+    ...WORK_PREVIEW,
+    template_problem:
+      "Não há template ativo do tipo Mostra de Iniciação Científica. Em Template, crie e ative a versão.",
+    can_manage_templates: true,
+  });
+  render();
+  selectFile();
+  chooseType("scientific_initiation");
+  fireEvent.click(validateButton());
+
+  expect(await screen.findByText(/Não há template ativo do tipo Mostra/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Abrir Template" }).getAttribute("href")).toBe(
+    "/template",
+  );
+  const next = screen.getByRole("button", {
+    name: /Definir destino no Google Drive/i,
+  }) as HTMLButtonElement;
+  expect(next.disabled).toBe(true);
+});
+
+test("sem permissão de Template, o bloqueio não oferece o link", async () => {
+  vi.mocked(validateSpreadsheet).mockResolvedValue({
+    ...WORK_PREVIEW,
+    template_problem:
+      "O template ativo do tipo Mostra de Iniciação Científica não tem o bloco Autores. Peça a um administrador para corrigir o template em Template.",
+    can_manage_templates: false,
+  });
+  render();
+  selectFile();
+  chooseType("scientific_initiation");
+  fireEvent.click(validateButton());
+
+  expect(await screen.findByText(/Peça a um administrador para corrigir/)).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "Abrir Template" })).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: /Definir destino no Google Drive/i }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
 });

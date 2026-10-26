@@ -25,11 +25,13 @@ const TOPICS: Topic[] = [
         preencha uma linha por participante. As colunas <code>nome</code> e{" "}
         <code>carga_horaria</code> são obrigatórias; as demais podem ficar em
         branco. Na Mostra de Iniciação Científica sai um certificado por
-        trabalho: preencha <code>autor1</code> a <code>autor8</code> (só{" "}
-        <code>autor1</code> é obrigatório) e, se quiser,{" "}
-        <code>titulo_trabalho</code> e <code>equipe</code>. Envie a planilha,
-        confira a prévia do texto e a lista de linhas com erro, e só então
-        confirme a emissão.
+        trabalho, válido para todos os autores: preencha <code>autor1</code> a{" "}
+        <code>autor8</code> (só <code>autor1</code> é obrigatório),{" "}
+        <code>evento</code> e <code>titulo_trabalho</code> (obrigatórios) e, se
+        quiser, <code>equipe</code> e <code>carga_horaria</code>. A aba
+        “Instruções” do modelo explica cada coluna. Envie a planilha, confira a
+        prévia do texto e a lista de linhas com erro, e só então confirme a
+        emissão.
       </>
     ),
   },
@@ -76,7 +78,10 @@ const TOPICS: Topic[] = [
         versão e a versão anterior é preservada — nada é sobrescrito. Uma versão
         só passa a valer para novas emissões depois de ser ativada, e a ativação
         pede confirmação porque afeta todos os certificados emitidos a partir
-        daquele momento.
+        daquele momento. A Mostra de Iniciação Científica precisa de uma versão
+        própria, sem o nome do participante e com o bloco Autores acima do QR
+        Code: escolher esse tipo no editor já monta o ponto de partida. Sem ela,
+        a emissão da Mostra fica bloqueada.
       </>
     ),
   },

@@ -12,6 +12,7 @@ from certificados_backend.models import ParticipantRegistryRecord
 from certificados_backend.services import (
     audit_service,
     certificate_store,  # generate_code (monkeypatchable in tests)
+    per_work,
     template_service,
 )
 from certificados_backend.services.certificate_text import render_certificate_body
@@ -25,7 +26,11 @@ from certificados_backend.utils.dates import extenso_from_iso, normalize_date_te
 
 import observability
 from database import db
-from database.certificate_types import certificate_type_label, parse_certificate_type
+from database.certificate_types import (
+    certificate_type_label,
+    is_per_work_type,
+    parse_certificate_type,
+)
 from database.repositories import authors_from_json
 from storage_service import CertificateStorage, StorageError, get_storage
 from storage_service import config as storage_config
@@ -120,11 +125,18 @@ class CertificateBatchService:
     def _active_template(
         self, created_by: int | None, certificate_type: str | None = None
     ) -> _ActiveTemplate:
-        """Resolve the active template for a type: its own, else the generic one."""
+        """Resolve the active template for a type: its own, else the generic one.
+
+        A per-work type has no fallback and its template must fit it; otherwise
+        nothing is issued, even if the batch was confirmed before a change.
+        """
         if self._cache_active_template and certificate_type in self._cached_templates:
             return self._cached_templates[certificate_type]
         template_service.ensure_default_version(self.config.template_path, created_by=created_by)
         version = template_service.get_active_version(certificate_type)
+        problem = per_work.template_problem(version, certificate_type, can_manage=True)
+        if problem:
+            raise ValueError(problem)
         if not version:
             raise ValueError(
                 "Nenhum template global ativo. Configure e ative um template antes de emitir."
@@ -166,7 +178,9 @@ class CertificateBatchService:
         ``texto_certificado``/``certificate_text`` element to render it (otherwise
         generation is blocked) and the resolved body is folded into the
         idempotency key. When omitted (direct/legacy callers), the body falls
-        back to the auto-composed text and the historical key is kept.
+        back to the auto-composed text and the historical key is kept. A
+        per-work type with no text (blank or omitted) prints its automatic body,
+        which is folded into the key like a written one.
 
         Idempotent: rows whose business_key already exists are reported as
         duplicates. Each new certificate records ``template_version_id`` and an
@@ -174,6 +188,7 @@ class CertificateBatchService:
         """
         parsed_type = parse_certificate_type(certificate_type, required=False)
         frozen_type = parsed_type.value if parsed_type else None
+        uses_automatic_body = is_per_work_type(frozen_type) and not body_template
         if drive_folder_id:
             storage = (self._storage or get_storage(drive_folder_id)).for_folder(drive_folder_id)
         else:
@@ -204,10 +219,8 @@ class CertificateBatchService:
         failed: list[dict] = []
 
         for row in rows:
-            if body_template is not None:
-                resolved_body = render_certificate_body(
-                    body_template, build_row_variables(row, frozen_type)
-                )
+            if body_template is not None or uses_automatic_body:
+                resolved_body = resolve_batch_body(row, body_template or "", frozen_type)
                 key_body: str | None = resolved_body
             else:
                 resolved_body = _build_body(row)
@@ -561,6 +574,16 @@ def build_row_variables(row: SpreadsheetRow, certificate_type: str | None = None
         "equipe": row.equipe or "",
         "titulo_trabalho": row.titulo_trabalho or "",
     }
+
+
+def resolve_batch_body(
+    row: SpreadsheetRow, body_template: str, certificate_type: str | None
+) -> str:
+    """Body a batch prints for a row: the secretaria's text interpolated, or the
+    automatic body of a per-work type when the batch brings no text."""
+    if not body_template and is_per_work_type(certificate_type):
+        return per_work.automatic_body(row)
+    return render_certificate_body(body_template, build_row_variables(row, certificate_type))
 
 
 def _row_to_record(

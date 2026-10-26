@@ -365,9 +365,12 @@ test("o bloco de autores tem base fixa: Y é a borda de baixo e sobrevive ao sal
     | undefined;
   expect(object?.anchorBottom).toBe(true);
   expect(object?.originY).toBe("bottom");
-  // Sample data lists eight authors, one per line, so the tallest case is previewed.
-  expect(object?.text?.split("\n")).toHaveLength(8);
-  expect(object?.text).toContain("Autor 8: Carla Dias");
+  // Sample data lists eight authors, one per line under the heading, so the
+  // tallest case is previewed.
+  const lines = object?.text?.split("\n");
+  expect(lines).toHaveLength(9);
+  expect(lines?.[0]).toBe("Autores:");
+  expect(lines?.[8]).toBe("Carla Dias");
 
   // Pulling the top handle makes the box taller; the base keeps Y = 620.
   act(() => {

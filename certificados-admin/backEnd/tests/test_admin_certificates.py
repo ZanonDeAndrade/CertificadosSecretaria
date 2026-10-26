@@ -12,6 +12,7 @@ from zipfile import ZipFile
 import pandas as pd
 
 from database import db
+from database.certificate_types import is_per_work_type
 from storage_service import config as storage_config
 from storage_service.filenames import content_disposition
 
@@ -221,7 +222,9 @@ def test_batch_persists_type_per_certificate_and_serializes_it(client, auth_head
     )
 
 
-def test_every_controlled_type_can_be_issued_and_is_part_of_idempotency(client, auth_headers):
+def test_every_controlled_type_can_be_issued_and_is_part_of_idempotency(
+    client, auth_headers, mostra_template
+):
     expected = {
         "listener": "Ouvinte",
         "speaker": "Palestrante",
@@ -233,7 +236,9 @@ def test_every_controlled_type_can_be_issued_and_is_part_of_idempotency(client, 
     }
     issued_codes = []
     for value, label in expected.items():
-        result = _emit(client, auth_headers, [VALID], certificate_type=value)
+        # A per-work certificate names the work it was issued for.
+        row = {**VALID, "titulo_trabalho": "Trabalho Exemplo"} if is_per_work_type(value) else VALID
+        result = _emit(client, auth_headers, [row], certificate_type=value)
         assert result["generated_count"] == 1
         code = result["generated"][0]["code"]
         issued_codes.append(code)

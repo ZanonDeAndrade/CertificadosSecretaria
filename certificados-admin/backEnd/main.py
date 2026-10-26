@@ -293,7 +293,8 @@ def create_app() -> FastAPI:
         certificate_type: str | None = None,
         _: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
     ) -> dict:
-        """Active version for a type (its own, else the generic one)."""
+        """Active version for a type (its own, else the generic one; per-work types
+        have no fallback)."""
         version = template_service.get_active_version(certificate_type or None)
         if not version:
             raise HTTPException(status_code=404, detail="Nenhum template ativo.")

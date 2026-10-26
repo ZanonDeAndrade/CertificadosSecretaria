@@ -25,6 +25,7 @@ from certificados_backend.services.certificate_text import (
 from certificados_backend.services.generator import (
     CertificateGenerator,
     CertificateGeneratorConfig,
+    authors_block,
     measuring_draw,
 )
 from certificados_backend.services.spreadsheet import (
@@ -151,8 +152,8 @@ def _text(key: str, **overrides) -> dict:
     return element
 
 
+# Fit for a per-work type: no participant name, a body, the authors block.
 MOSTRA_ELEMENTS = [
-    _text("name", y=200, fontSize=36),
     _text("texto_certificado", y=320, width=1000),
     _text("authors", y=900, anchorY="bottom"),
     {"type": "qr", "key": "qr", "x": 1200, "y": 820, "width": 140, "height": 140},
@@ -194,25 +195,35 @@ def test_autor9_column_is_ignored_with_a_warning():
 
 
 def test_header_variations_map_to_the_author_columns():
-    rows = [{"Autor 1": AUTHORS[0], "autor_2": AUTHORS[1], "AUTOR03": AUTHORS[2]}]
+    rows = [
+        {
+            "Autor 1": AUTHORS[0],
+            "autor_2": AUTHORS[1],
+            "AUTOR03": AUTHORS[2],
+            "Evento": "Mostra",
+            "Título do trabalho": "Horta",
+        }
+    ]
     report = read_and_validate(BytesIO(_xlsx(rows)), certificate_type=MOSTRA)
     assert report.valid[0].autores == AUTHORS[:3]
 
 
 def test_nome_stands_in_for_autor1_only_when_autor1_is_absent():
+    work = {"evento": "Mostra", "titulo_trabalho": "Horta"}
     only_name = read_and_validate(
-        BytesIO(_xlsx([{"nome": AUTHORS[0], "evento": "Mostra"}])), certificate_type=MOSTRA
+        BytesIO(_xlsx([{"nome": AUTHORS[0], **work}])), certificate_type=MOSTRA
     )
     assert only_name.valid[0].autores == (AUTHORS[0],)
     assert only_name.valid[0].nome == AUTHORS[0]
 
     both = read_and_validate(
-        BytesIO(_xlsx([{"nome": "Ignorado", "autor1": AUTHORS[0]}])), certificate_type=MOSTRA
+        BytesIO(_xlsx([{"nome": "Ignorado", "autor1": AUTHORS[0], **work}])),
+        certificate_type=MOSTRA,
     )
     assert both.valid[0].nome == AUTHORS[0]
 
-    with pytest.raises(SpreadsheetError, match="autor1"):
-        read_and_validate(BytesIO(_xlsx([{"evento": "Mostra"}])), certificate_type=MOSTRA)
+    with pytest.raises(SpreadsheetError, match="ausentes na planilha: autor1$"):
+        read_and_validate(BytesIO(_xlsx([work])), certificate_type=MOSTRA)
 
 
 def test_work_without_first_author_is_invalid_and_other_types_are_unchanged():
@@ -255,12 +266,8 @@ def test_authors_block_grows_upward_from_a_fixed_base(tmp_path, monkeypatch):
     draw = measuring_draw()
     element = _text("authors", y=900, anchorY="bottom")
 
-    three = generator.layout_text_box(
-        draw, IMAGE_W, "\n".join(f"Autor {i}: x" for i in range(1, 4)), element
-    )
-    eight = generator.layout_text_box(
-        draw, IMAGE_W, "\n".join(f"Autor {i}: x" for i in range(1, 9)), element
-    )
+    three = generator.layout_text_box(draw, IMAGE_W, authors_block(list(AUTHORS[:3])), element)
+    eight = generator.layout_text_box(draw, IMAGE_W, authors_block(list(AUTHORS)), element)
     assert eight.text_height > three.text_height
 
     layout = {"image_width": IMAGE_W, "image_height": IMAGE_H, "elements": [element]}
@@ -268,10 +275,9 @@ def test_authors_block_grows_upward_from_a_fixed_base(tmp_path, monkeypatch):
     generator._compose_visual_image(_record(AUTHORS[:3]), layout, background_bytes=_png_bytes())
     generator._compose_visual_image(_record(AUTHORS), layout, background_bytes=_png_bytes())
 
-    assert calls[0]["text"] == "\n".join(
-        f"Autor {i}: {name}" for i, name in enumerate(AUTHORS[:3], 1)
-    )
-    assert calls[1]["text"].count("\n") == 7
+    assert calls[0]["text"] == "Autores:\n" + "\n".join(AUTHORS[:3])
+    # Heading plus eight authors, unnumbered.
+    assert calls[1]["text"].split("\n") == ["Autores:", *AUTHORS]
     # The base stays at Y = 900; more authors push the first line further up.
     assert calls[0]["xy"][1] == 900 - three.text_height
     assert calls[1]["xy"][1] == 900 - eight.text_height
@@ -283,7 +289,9 @@ def test_participant_data_exposes_authors_team_and_title(tmp_path):
     data = generator.participant_data(_record(AUTHORS[:2]))
     assert data["autor1"] == AUTHORS[0] and data["autor2"] == AUTHORS[1]
     assert data["autor3"] == "" and data["autor8"] == ""
-    assert data["authors"] == f"Autor 1: {AUTHORS[0]}\nAutor 2: {AUTHORS[1]}"
+    assert data["authors"] == f"Autores:\n{AUTHORS[0]}\n{AUTHORS[1]}"
+    # A single author gets the singular heading.
+    assert generator.participant_data(_record(AUTHORS[:1]))["authors"] == f"Autor:\n{AUTHORS[0]}"
     assert data["equipe"] == "Equipe Verde"
     assert data["work_title"] == "Horta vertical automatizada"
 

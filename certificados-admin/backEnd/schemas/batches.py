@@ -75,10 +75,14 @@ class BodyVariableResponse(BaseModel):
     name: str
     token: str
     label: str
+    #: Whether per-work types accept it (``{{nome}}`` is the first author only).
+    per_work: bool = True
 
 
 class BodyVariablesResponse(BaseModel):
     variables: list[BodyVariableResponse]
+    #: Body a per-work type prints when the batch brings no text of its own.
+    per_work_automatic_text: str = ""
 
 
 class SpreadsheetPreviewResponse(BaseModel):
@@ -98,6 +102,9 @@ class SpreadsheetPreviewResponse(BaseModel):
     #: Warns only: those rows print without the field.
     empty_fields: list[EmptyFieldResponse] = Field(default_factory=list)
     can_manage_settings: bool = False
+    #: Blocks confirmation: the active template cannot serve this per-work type.
+    template_problem: str | None = None
+    can_manage_templates: bool = False
 
 
 class EmissionBatchResponse(BaseModel):

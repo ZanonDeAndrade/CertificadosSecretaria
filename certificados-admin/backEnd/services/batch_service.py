@@ -19,6 +19,7 @@ from certificados_backend.policies import Permission, is_allowed
 from certificados_backend.services import (
     audit_service,
     job_crypto,
+    per_work,
     settings_service,
     spreadsheet,
     template_fields,
@@ -28,12 +29,13 @@ from certificados_backend.services.certificate_service import (
     CertificateBatchService,
     _row_to_record,
     build_row_variables,
+    resolve_batch_body,
 )
 from certificados_backend.services.certificate_text import (
     BODY_VARIABLE_LABELS,
     CertificateTextError,
     body_template_variables,
-    render_certificate_body,
+    normalize_body_text,
     validate_body_template,
 )
 from certificados_backend.services.generator import (
@@ -53,7 +55,11 @@ from sqlalchemy.exc import IntegrityError
 import observability
 from database import config as db_config
 from database import db
-from database.certificate_types import certificate_type_label, parse_certificate_type
+from database.certificate_types import (
+    certificate_type_label,
+    is_per_work_type,
+    parse_certificate_type,
+)
 
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 # Pre-check of the active template's sized text boxes. Measuring every row of
@@ -160,11 +166,30 @@ def _parse(
         raise HTTPException(status_code=400, detail="Não foi possível ler a planilha.") from exc
 
 
-def _body(value: str | None) -> str:
+def _body(value: str | None, certificate_type: str | None) -> str:
+    """The batch's body text, validated for its type.
+
+    A per-work type may leave it blank (``""``): its automatic body applies.
+    """
+    if is_per_work_type(certificate_type) and not normalize_body_text(value).strip():
+        return ""
     try:
-        return validate_body_template(value)
+        text = validate_body_template(value)
+        per_work.check_body_variables(text, certificate_type)
     except CertificateTextError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return text
+
+
+def _template_problem(
+    version: dict | None, certificate_type: str | None, *, actor: dict | None
+) -> str | None:
+    """Why a per-work batch cannot use the active template (``None`` if it can)."""
+    return per_work.template_problem(
+        version,
+        certificate_type,
+        can_manage=bool(actor and is_allowed(actor, Permission.TEMPLATES_MANAGE)),
+    )
 
 
 @dataclass
@@ -202,7 +227,7 @@ def _review_context(
     rows: list[tuple[SpreadsheetRow, dict[str, str]]] = []
     for row in checked:
         body = (
-            render_certificate_body(body_template, build_row_variables(row, certificate_type))
+            resolve_batch_body(row, body_template, certificate_type)
             if body_template is not None
             else None
         )
@@ -340,9 +365,13 @@ def serialize_report(
     missing_settings_message: str | None = None,
     empty_fields: list[dict[str, Any]] | None = None,
     can_manage_settings: bool = False,
+    template_problem: str | None = None,
+    can_manage_templates: bool = False,
 ) -> dict:
     """Preview projection without document/e-mail or unnecessary row content."""
     return {
+        "template_problem": template_problem,
+        "can_manage_templates": can_manage_templates,
         "layout_warnings": layout_warnings or [],
         "missing_settings": missing_settings or [],
         "missing_settings_message": missing_settings_message,
@@ -374,9 +403,7 @@ def serialize_report(
         ],
         "events": event_groups(report.valid),
         "resolved_text_preview": (
-            render_certificate_body(
-                body_template, build_row_variables(report.valid[0], certificate_type)
-            )
+            resolve_batch_body(report.valid[0], body_template, certificate_type)
             if body_template is not None and report.valid
             else None
         ),
@@ -392,12 +419,12 @@ async def preview(
     actor: dict | None = None,
 ) -> dict:
     content = await read_upload(file)
-    body_template = _body(texto_padrao)
     try:
         parsed_type = parse_certificate_type(certificate_type, required=False)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     frozen_type = parsed_type.value if parsed_type else None
+    body_template = _body(texto_padrao, frozen_type)
     report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
     context = _review_context(report, body_template=body_template, certificate_type=frozen_type)
     active = template_service.get_active_version(frozen_type)
@@ -413,6 +440,8 @@ async def preview(
             template_fields.missing_settings_message(missing, actor=actor) if missing else None
         ),
         can_manage_settings=bool(actor and is_allowed(actor, Permission.SETTINGS_MANAGE)),
+        template_problem=_template_problem(active, frozen_type, actor=actor),
+        can_manage_templates=bool(actor and is_allowed(actor, Permission.TEMPLATES_MANAGE)),
     )
 
 
@@ -478,11 +507,16 @@ async def prepare_batch(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     content = await read_upload(file)
-    body_template = _body(texto_padrao)
+    body_template = _body(texto_padrao, frozen_type)
     report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
+    # A per-work type never falls back to the generic template, and its own
+    # must fit it; the review screen says the same, this guards the API.
+    active = template_service.get_active_version(frozen_type)
+    template_problem = _template_problem(active, frozen_type, actor=actor)
+    if template_problem:
+        raise HTTPException(status_code=422, detail=template_problem)
     # A template that prints an empty setting would issue incomplete
     # certificates; the review screen says the same, this guards the API.
-    active = template_service.get_active_version(frozen_type)
     missing = template_fields.missing_settings((active or {}).get("layout") or {})
     if missing:
         raise HTTPException(
@@ -539,9 +573,7 @@ async def prepare_batch(
         )
         items: list[dict[str, Any]] = []
         for row in report.valid:
-            resolved_body = render_certificate_body(
-                body_template, build_row_variables(row, frozen_type)
-            )
+            resolved_body = resolve_batch_body(row, body_template, frozen_type)
             business_key = compute_business_key(row, resolved_body, frozen_type)
             payload = job_crypto.encrypt_json(
                 asdict(row),

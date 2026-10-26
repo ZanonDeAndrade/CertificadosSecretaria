@@ -141,6 +141,17 @@ DATE_MIN_Y_RATIO = 0.62  # date never placed above this (when body is short)
 PREAMBLE_TEXT = "Certificamos, para os devidos fins, que"
 
 
+def authors_block(authors: list[str]) -> str:
+    """The authors of a work under a heading, one per line and unnumbered.
+
+    Empty without authors, so ordinary certificates print nothing here.
+    """
+    if not authors:
+        return ""
+    heading = "Autor:" if len(authors) == 1 else "Autores:"
+    return "\n".join([heading, *authors])
+
+
 @dataclass(slots=True, frozen=True)
 class CertificateGeneratorConfig:
     template_path: Path
@@ -757,15 +768,13 @@ class CertificateGenerator:
             "certificate_type": participant.certificate_type,
             "equipe": participant.equipe,
             "work_title": participant.titulo_trabalho,
-            # Per-work certificates: one key per author plus the numbered block
-            # ("Autor 1: …"), which lists only the authors present.
+            # Per-work certificates: one key per author plus the authors block,
+            # which lists only the authors present.
             **{
                 f"autor{index}": (authors[index - 1] if index <= len(authors) else "")
                 for index in range(1, MAX_WORK_AUTHORS + 1)
             },
-            "authors": "\n".join(
-                f"Autor {index}: {name}" for index, name in enumerate(authors, start=1)
-            ),
+            "authors": authors_block(authors),
         }
 
     def _open_background_bytes(self, background_bytes: bytes | None) -> Image.Image:

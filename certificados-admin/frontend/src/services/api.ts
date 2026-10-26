@@ -178,6 +178,12 @@ export interface SpreadsheetPreview {
   missing_settings_message?: string | null;
   empty_fields?: EmptyField[];
   can_manage_settings?: boolean;
+  /**
+   * Blocks confirmation: a per-work type has no active template of its own,
+   * or it prints the participant name, or lacks the authors block or body.
+   */
+  template_problem?: string | null;
+  can_manage_templates?: boolean;
 }
 
 export interface GenerationSummary {
@@ -725,15 +731,23 @@ export interface BodyVariable {
   name: string;
   token: string;
   label: string;
+  /** Whether per-work types accept it (`{{nome}}` is the first author only). */
+  per_work?: boolean;
+}
+
+export interface BodyVariables {
+  variables: BodyVariable[];
+  /** Body a per-work type prints when the batch brings no text of its own. */
+  per_work_automatic_text?: string;
 }
 
 /**
  * The body-text variables, read from the backend's own allowlist so the insert
  * buttons can never offer a variable the validation rejects, nor miss one.
  */
-export async function listBodyVariables(): Promise<BodyVariable[]> {
-  const response = await api.get<{ variables: BodyVariable[] }>("/certificates/body-variables");
-  return response.data.variables;
+export async function listBodyVariables(): Promise<BodyVariables> {
+  const response = await api.get<BodyVariables>("/certificates/body-variables");
+  return response.data;
 }
 
 /**

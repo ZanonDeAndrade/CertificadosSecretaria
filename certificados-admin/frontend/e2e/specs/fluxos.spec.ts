@@ -104,6 +104,47 @@ test.describe("emissão em lote", () => {
     await expect(page.getByRole("link", { name: "Abrir histórico deste lote" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Emitir outra planilha" })).toBeVisible();
   });
+
+  test("Mostra: texto automático e conferência com título e autores de cada trabalho", async ({ page }) => {
+    await scenario(page, "default", "secretaria");
+    await page.goto("/emitir");
+    await page.setInputFiles("#spreadsheet-upload", FIXTURE);
+
+    // The ordinary pre-filled text would print the certificate as an ordinary one.
+    const text = page.getByLabel("Texto padrão do certificado");
+    await expect(text).toHaveValue(/participou da atividade/);
+    await page.getByRole("combobox", { name: /Tipo do certificado/ }).selectOption("scientific_initiation");
+    await expect(text).toHaveValue("");
+    await expect(page.locator("q", { hasText: "foi apresentado no evento" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Inserir {{titulo_trabalho}}" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Inserir {{nome}}" })).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Validar planilha/ }).click();
+    await expect(page.getByRole("heading", { name: "Conferência do lote" })).toBeVisible();
+    await expect(page.getByText('Certificamos que o trabalho "Horta vertical automatizada" foi apresentado', { exact: false })).toBeVisible();
+    const table = page.getByRole("table", { name: "Trabalhos aptos para emissão" });
+    await expect(table.getByText("Horta vertical automatizada")).toBeVisible();
+    await expect(table.getByText("Robô seguidor de linha")).toBeVisible();
+    await expect(
+      table.getByRole("list", { name: "Autores do trabalho da linha 2" }).getByRole("listitem"),
+    ).toHaveText(["Ana Carolina Souza", "João Pedro Lima", "Mariana Alves Ferreira"]);
+    await expect(
+      table.getByRole("list", { name: "Autores do trabalho da linha 3" }).getByRole("listitem"),
+    ).toHaveText(["Carlos Eduardo Nunes"]);
+    await expect(page.getByRole("button", { name: "Definir destino no Google Drive" })).toBeEnabled();
+  });
+
+  test("Mostra sem template do tipo: a conferência bloqueia e explica como corrigir", async ({ page }) => {
+    await scenario(page, "mostra-sem-template", "admin");
+    await page.goto("/emitir");
+    await page.setInputFiles("#spreadsheet-upload", FIXTURE);
+    await page.getByRole("combobox", { name: /Tipo do certificado/ }).selectOption("scientific_initiation");
+    await page.getByRole("button", { name: /Validar planilha/ }).click();
+
+    await expect(page.getByText(/Não há template ativo do tipo Mostra de Iniciação Científica/)).toBeVisible();
+    await expect(page.getByRole("link", { name: "Abrir Template" })).toHaveAttribute("href", "/template");
+    await expect(page.getByRole("button", { name: "Definir destino no Google Drive" })).toBeDisabled();
+  });
 });
 
 test.describe("fluxos por perfil", () => {
@@ -265,7 +306,7 @@ test.describe("editor de template", () => {
     // Toolbar is present and the canvas region rendered.
     await expect(page.getByRole("button", { name: "Salvar versão" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Desfazer/ })).toBeVisible();
-    await expect(page.getByLabel("Nome")).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Nome" })).toBeVisible();
 
     // Add an element, which makes the draft dirty.
     await page.getByRole("button", { name: "Nome", exact: true }).click();
@@ -295,6 +336,36 @@ test.describe("editor de template", () => {
 
     await typeSelect.selectOption("");
     await expect(page.getByRole("button", { name: "Autores", exact: true })).toHaveCount(0);
+  });
+
+  test("escolher a Mostra monta o ponto de partida: sem o nome, Autores acima do QR", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "editor é uma tela de desktop");
+    await scenario(page, "default");
+    await page.goto("/template");
+    await page.getByRole("button", { name: /Editar \(nova versão\)/ }).click();
+
+    const list = page.getByRole("listbox", { name: "Elementos do template" });
+    const option = (text: string) => list.getByRole("option").filter({ hasText: text });
+    await expect(option("Nome do participante")).toHaveCount(1);
+    await expect(option("Certificamos, para os devidos fins, que")).toHaveCount(1);
+    // The history takes the loaded copy as its baseline once the layout settles.
+    await page.waitForTimeout(600);
+
+    await page.getByLabel("Tipo", { exact: true }).selectOption("scientific_initiation");
+    await expect(option("Autores")).toHaveCount(1);
+    await expect(option("Nome do participante")).toHaveCount(0);
+    await expect(option("Certificamos, para os devidos fins, que")).toHaveCount(0);
+    await expect(option("Corpo do certificado")).toHaveCount(1);
+    await expect(option("QR Code")).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Nome", exact: true })).toHaveCount(0);
+    await expect(page.getByText(/um certificado por trabalho, válido para todos os autores/)).toBeVisible();
+
+    // An ordinary edit: undo brings the copy back, and the editor says what is missing.
+    const undo = page.getByRole("button", { name: /Desfazer/ });
+    await expect(undo).toBeEnabled();
+    await undo.click();
+    await expect(option("Nome do participante")).toHaveCount(1);
+    await expect(page.getByText(/remova o Nome do participante/)).toBeVisible();
   });
 
   test("ativar versão pede confirmação digitada", async ({ page }, testInfo) => {

@@ -19,10 +19,13 @@ const PER_WORK_QUICK_KEYS: { key: ElementKey; label: string; title: string }[] =
     key: "authors",
     label: "Autores",
     title:
-      "Lista “Autor N: Nome” só com os autores preenchidos. A base do bloco " +
-      "fica fixa e ele cresce para cima.",
+      "“Autores:” e um nome por linha (“Autor:” com um só), só os autores " +
+      "preenchidos. A base do bloco fica fixa e ele cresce para cima.",
   },
 ];
+
+/* A per-work certificate is valid for every author: no name is highlighted. */
+const NOT_PER_WORK_KEYS = new Set<ElementKey>(["name"]);
 
 const QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
   { key: "name", label: "Nome", title: "Nome do participante (vem da planilha)" },
@@ -93,7 +96,7 @@ export default function ElementList({
   onDuplicate,
 }: ElementListProps) {
   const quickKeys = isPerWorkType(certificateType)
-    ? [...QUICK_KEYS, ...PER_WORK_QUICK_KEYS]
+    ? [...QUICK_KEYS.filter(({ key }) => !NOT_PER_WORK_KEYS.has(key)), ...PER_WORK_QUICK_KEYS]
     : QUICK_KEYS;
   const handleListKeyDown = (event: React.KeyboardEvent) => {
     if (elements.length === 0) return;
