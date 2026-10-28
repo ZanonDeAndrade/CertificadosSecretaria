@@ -483,6 +483,7 @@ input:hover {
   font-size: 1rem;
 }
 
+.result-authors,
 .result-event,
 .result-course,
 .result-date {

@@ -151,7 +151,12 @@
           {% for cert in results %}
             <li class="result-item">
               <div class="result-info">
-                {% if cert.per_work and cert.authors %}
+                {% if cert.per_work and cert.authors and cert.work_title %}
+                  <h3>{{ cert.work_title }}</h3>
+                  <p class="result-authors">
+                    {% if cert.authors|length == 1 %}Autor{% else %}Autores{% endif %}: {{ cert.authors|join(', ') }}
+                  </p>
+                {% elif cert.per_work and cert.authors %}
                   <h3>{{ cert.authors|join(', ') }}</h3>
                   <p class="result-authors">Trabalho com {{ cert.authors|length }} autor(es)</p>
                 {% else %}

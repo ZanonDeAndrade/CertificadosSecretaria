@@ -356,7 +356,7 @@ def by_idempotency_key(
         current.get("role") != "admin" and int(row.get("created_by") or 0) != int(current["id"])
     ):
         raise HTTPException(status_code=404, detail="Lote não encontrado.")
-    return batch_service.serialize_batch(row)
+    return batch_service.with_work_details(batch_service.serialize_batch(row))
 
 
 @router.get(

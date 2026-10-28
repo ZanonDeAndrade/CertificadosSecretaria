@@ -115,3 +115,56 @@ def test_mostra_on_postgres_never_falls_back_and_stores_every_author(
         assert total == 1 and found[0]["unique_code"] == stored["unique_code"]
     finally:
         storage_service.reset_storage_cache()
+
+
+EIGHT_AUTHORS = (
+    "Pessoa Exemplo Alfa",
+    "Pessoa Exemplo Beta",
+    "Pessoa Exemplo Gama",
+    "Pessoa Exemplo Delta",
+    "Pessoa Exemplo Épsilon",
+    "Pessoa Exemplo Zeta",
+    "Pessoa Exemplo Eta",
+    "Pessoa Exemplo Teta",
+)
+
+
+def test_postgres_name_search_finds_a_work_by_any_author(postgres_engine):
+    import json
+
+    db.insert_certificates(
+        [
+            {
+                "unique_code": f"CERT-2026-PGW{len(authors)}",
+                "participant_name": authors[0],
+                "event_name": EVENT,
+                "certificate_type": MOSTRA,
+                "work_title": title,
+                "authors_json": json.dumps(list(authors), ensure_ascii=False),
+                "issue_date": "2026-06-10",
+                "status": "ativo",
+            }
+            for title, authors in (
+                ("Compostagem doméstica", EIGHT_AUTHORS[:1]),
+                (TITLE, EIGHT_AUTHORS[:3]),
+                ("Robô seguidor de linha", EIGHT_AUTHORS),
+            )
+        ]
+    )
+
+    def codes(name: str) -> set[str]:
+        found, _ = db.list_certificates(name=name, limit=10, offset=0)
+        return {row["unique_code"] for row in found}
+
+    every = {"CERT-2026-PGW1", "CERT-2026-PGW3", "CERT-2026-PGW8"}
+    assert codes(EIGHT_AUTHORS[0]) == every
+    assert codes(EIGHT_AUTHORS[2]) == {"CERT-2026-PGW3", "CERT-2026-PGW8"}
+    for name in EIGHT_AUTHORS[3:]:
+        assert codes(name) == {"CERT-2026-PGW8"}, name
+    assert codes("exemplo teta") == {"CERT-2026-PGW8"}
+    assert codes("PESSOA EXEMPLO EPSILON") == {"CERT-2026-PGW8"}
+    assert codes("Alfa Pessoa Exemplo Beta") == set()
+
+    by_code = {row["unique_code"]: row for row in db.get_certificates_by_codes([*every, "X"])}
+    assert set(by_code) == every
+    assert authors_from_json(by_code["CERT-2026-PGW8"]["authors_json"]) == list(EIGHT_AUTHORS)

@@ -112,6 +112,58 @@ function certificate(index) {
 
 const ALL = Array.from({ length: 137 }, (_, index) => certificate(index + 1));
 
+/* Per-work (Mostra) certificates with 1, 3 and 8 authors. Synthetic names. */
+const WORK_AUTHORS = [
+  "Pessoa Exemplo Alfa",
+  "Pessoa Exemplo Beta",
+  "Pessoa Exemplo Gama",
+  "Pessoa Exemplo Delta",
+  "Pessoa Exemplo Épsilon",
+  "Pessoa Exemplo Zeta",
+  "Pessoa Exemplo Eta",
+  "Pessoa Exemplo Teta",
+];
+function workCertificate(code, title, authorCount) {
+  return {
+    ...certificate(1),
+    unique_code: code,
+    participant_name: WORK_AUTHORS[0],
+    event_name: "Mostra de Iniciação Científica 2026",
+    course_name: null,
+    certificate_type: "scientific_initiation",
+    certificate_type_label: "Mostra de Iniciação Científica",
+    workload_hours: null,
+    status: "ativo",
+    download_available: true,
+    integrity_status: "verified",
+    integrity_blocked: false,
+    batch_id: "batch-e2e-mostra",
+    authors: WORK_AUTHORS.slice(0, authorCount),
+    team_name: "Equipe Verde",
+    work_title: title,
+    revoked_at: null,
+    revoke_reason: null,
+  };
+}
+/* What the history and the dashboard list: the works first, then ALL. */
+const LISTED = [
+  workCertificate("CERT-2026-9001A", "Compostagem doméstica", 1),
+  workCertificate("CERT-2026-9003A", "Horta vertical automatizada", 3),
+  workCertificate("CERT-2026-9008A", "Robô seguidor de linha", 8),
+  ...ALL,
+];
+
+/** Search form of a name, as the backend normalises it: no accents or case. */
+function foldName(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(" ");
+}
+
 const USERS = [
   { id: 1, name: "Administrador da Secretaria", username: "secretaria", role: "admin", is_active: true, must_change_password: false, password_changed_at: "2026-05-01T10:00:00Z", created_at: "2026-01-15T10:00:00Z", updated_at: "2026-05-01T10:00:00Z" },
   { id: 2, name: "Marina Oliveira", username: "m.oliveira", role: "secretaria", is_active: true, must_change_password: false, password_changed_at: "2026-05-02T10:00:00Z", created_at: "2026-02-03T10:00:00Z", updated_at: "2026-05-02T10:00:00Z" },
@@ -372,7 +424,7 @@ const server = createServer(async (req, res) => {
       : { total: 137, active: 124, revoked: 9, failed: 4, pending: 0, recent: 42, recent_days: 30, integrity_blocked: 2, active_without_file: 3 });
   }
   if (path === "/admin/recent-certificates") {
-    return send(res, 200, empty ? [] : ALL.slice(0, 8));
+    return send(res, 200, empty ? [] : LISTED.slice(0, 8));
   }
 
   if (path === "/admin/users" && req.method === "GET") {
@@ -551,8 +603,9 @@ const server = createServer(async (req, res) => {
   }
   if (path.startsWith("/certificate-file/") && req.method === "GET") {
     const code = decodeURIComponent(path.slice("/certificate-file/".length));
-    const row = ALL.find((item) => item.unique_code === code);
-    const filename = row ? `${row.participant_name} - ${row.event_name} - ${code}.pdf` : `${code}.pdf`;
+    const row = LISTED.find((item) => item.unique_code === code);
+    const holder = row?.work_title && row.certificate_type === "scientific_initiation" ? row.work_title : row?.participant_name;
+    const filename = row ? `${holder} - ${row.event_name} - ${code}.pdf` : `${code}.pdf`;
     return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", filename);
   }
   if (path === "/certificates" && req.method === "GET") {
@@ -560,18 +613,23 @@ const server = createServer(async (req, res) => {
     const offset = Number(url.searchParams.get("offset") ?? 0);
     const filters = {
       status: url.searchParams.get("status") ?? "",
-      name: (url.searchParams.get("name") ?? "").toLowerCase(),
+      name: foldName(url.searchParams.get("name")),
       code: (url.searchParams.get("code") ?? "").toLowerCase(),
       course: (url.searchParams.get("course") ?? "").toLowerCase(),
       event: (url.searchParams.get("event") ?? "").toLowerCase(),
       certificateType: url.searchParams.get("certificate_type") ?? "",
       batch: url.searchParams.get("batch_id") ?? "",
     };
-    let rows = empty ? [] : ALL;
+    let rows = empty ? [] : LISTED;
     if (filters.status) rows = rows.filter((row) => row.status === filters.status);
-    if (filters.name) rows = rows.filter((row) => row.participant_name.toLowerCase().includes(filters.name));
+    // Like the backend: the holder or any author of a per-work certificate.
+    if (filters.name) {
+      rows = rows.filter((row) =>
+        [row.participant_name, ...(row.authors ?? [])].some((name) => foldName(name).includes(filters.name)),
+      );
+    }
     if (filters.code) rows = rows.filter((row) => row.unique_code.toLowerCase().includes(filters.code));
-    if (filters.course) rows = rows.filter((row) => row.course_name.toLowerCase().includes(filters.course));
+    if (filters.course) rows = rows.filter((row) => (row.course_name ?? "").toLowerCase().includes(filters.course));
     if (filters.event) rows = rows.filter((row) => row.event_name.toLowerCase().includes(filters.event));
     if (filters.certificateType) rows = rows.filter((row) => row.certificate_type === filters.certificateType);
     if (filters.batch) rows = rows.filter((row) => row.batch_id === filters.batch);
@@ -580,7 +638,7 @@ const server = createServer(async (req, res) => {
   const certificateAction = path.match(/^\/certificates\/([^/]+)(?:\/(revoke|reissue))?$/);
   if (certificateAction) {
     const code = decodeURIComponent(certificateAction[1]);
-    const found = ALL.find((row) => row.unique_code === code);
+    const found = LISTED.find((row) => row.unique_code === code);
     if (!found) return send(res, 404, { detail: "Certificado não encontrado." });
     if (req.method === "GET" && !certificateAction[2]) return send(res, 200, found);
     if (req.method === "POST" && certificateAction[2] === "revoke") {

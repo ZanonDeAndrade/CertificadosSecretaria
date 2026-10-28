@@ -182,6 +182,7 @@ def _public_view(cert: dict) -> dict:
 
 def _public_name_view(cert: dict) -> dict:
     """Minimal name-search projection with a non-authorizing result selector."""
+    per_work = is_per_work_type(cert.get("certificate_type"))
     return {
         "participant_name": _mask_name(cert["participant_name"]),
         "course_name": cert.get("course_name"),
@@ -192,8 +193,10 @@ def _public_name_view(cert: dict) -> dict:
         "issue_date": _format_issue_date(cert.get("issue_date")),
         "status": cert.get("status") or "ativo",
         "result_ref": public_result_reference(cert["unique_code"]),
-        "per_work": is_per_work_type(cert.get("certificate_type")),
+        "per_work": per_work,
         "authors": [_mask_name(name) for name in authors_from_json(cert.get("authors_json"))],
+        # A per-work result is named by its work; the authors stay masked.
+        "work_title": cert.get("work_title") if per_work else None,
     }
 
 

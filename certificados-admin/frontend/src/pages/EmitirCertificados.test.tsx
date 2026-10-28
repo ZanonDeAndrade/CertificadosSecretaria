@@ -682,3 +682,137 @@ test("sem permissão de Template, o bloqueio não oferece o link", async () => {
       .disabled,
   ).toBe(true);
 });
+
+const EIGHT_AUTHORS = [
+  "Pessoa Exemplo Alfa",
+  "Pessoa Exemplo Beta",
+  "Pessoa Exemplo Gama",
+  "Pessoa Exemplo Delta",
+  "Pessoa Exemplo Épsilon",
+  "Pessoa Exemplo Zeta",
+  "Pessoa Exemplo Eta",
+  "Pessoa Exemplo Teta",
+];
+
+/** A finished Mostra batch, as GET /emission-batches answers it. */
+const WORK_BATCH = {
+  ...COMPLETED_BATCH,
+  total_rows: 3,
+  valid_count: 3,
+  processed_count: 3,
+  duplicate_count: 1,
+  failed_count: 1,
+  certificate_type: "scientific_initiation",
+  certificate_type_label: "Mostra de Iniciação Científica",
+  result: {
+    ...SUMMARY,
+    generated: [
+      {
+        row_number: 2,
+        name: EIGHT_AUTHORS[0],
+        code: "CERT-2026-MOSTRA8",
+        work_title: "Horta vertical automatizada",
+        authors: EIGHT_AUTHORS,
+      },
+    ],
+    duplicates: [
+      {
+        row_number: 3,
+        name: "Pessoa Exemplo Delta",
+        existing_code: "CERT-2026-MOSTRA1",
+        work_title: "Robô seguidor de linha",
+        authors: ["Pessoa Exemplo Delta"],
+      },
+    ],
+    duplicate_count: 1,
+    failed: [{ row_number: 4, name: "Pessoa Exemplo Eta", error: "Não foi possível gerar esta linha." }],
+    failed_count: 1,
+    total_rows: 3,
+  },
+};
+
+function resumeSavedBatch() {
+  localStorage.setItem(
+    "certificados:emission-batch:1",
+    JSON.stringify({ idempotencyKey: "batch-key-1234567890" }),
+  );
+  render();
+}
+
+test("Resumo final da Mostra nomeia cada trabalho pelo título e por todos os autores", async () => {
+  const user = userEvent.setup();
+  vi.mocked(resumeEmissionBatch).mockResolvedValue(WORK_BATCH);
+  resumeSavedBatch();
+  expect(await screen.findByText("Resumo final")).not.toBeNull();
+
+  const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
+  expect(
+    within(generated).getAllByRole("columnheader").map((cell) => cell.textContent),
+  ).toEqual(["Trabalho", "Código"]);
+  const work = within(generated).getByRole("rowheader");
+  expect(work.textContent).toContain("Horta vertical automatizada");
+  expect(work.textContent).toContain(`Autores: ${EIGHT_AUTHORS.slice(0, 3).join(", ")} +5`);
+  await user.click(within(work).getByRole("button", { name: "+5 autores; mostrar todos" }));
+  expect(work.textContent).toContain(`Autores: ${EIGHT_AUTHORS.join(", ")}`);
+
+  const duplicates = screen.getByRole("table", { name: "Duplicados mantidos (1)" });
+  expect(within(duplicates).getByRole("rowheader").textContent).toBe(
+    "Robô seguidor de linhaAutor: Pessoa Exemplo Delta",
+  );
+
+  // A failed row has no certificate, so it is named by its line and first author.
+  const failed = screen.getByRole("table", { name: "Falhas (1)" });
+  expect(
+    within(failed).getAllByRole("columnheader").map((cell) => cell.textContent),
+  ).toEqual(["Linha e primeiro autor", "Motivo"]);
+  expect(within(failed).getByRole("rowheader").textContent).toBe("Linha 4 — Pessoa Exemplo Eta");
+});
+
+test("Resumo final de um tipo comum continua pelo participante", async () => {
+  resumeSavedBatch();
+  expect(await screen.findByText("Resumo final")).not.toBeNull();
+
+  const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
+  expect(
+    within(generated).getAllByRole("columnheader").map((cell) => cell.textContent),
+  ).toEqual(["Participante", "Código"]);
+  expect(within(generated).getByRole("rowheader").textContent).toBe("Ana");
+});
+
+test("avisos da conferência da Mostra citam a linha pelo título do trabalho", async () => {
+  vi.mocked(validateSpreadsheet).mockResolvedValue({
+    ...WORK_PREVIEW,
+    empty_fields: [
+      {
+        key: "equipe",
+        label: "Equipe",
+        row_count: 1,
+        rows: [{ row_number: 3, nome: "Pessoa Exemplo Delta" }],
+        checked_rows: 2,
+        truncated: false,
+      },
+    ],
+    layout_warnings: [
+      {
+        key: "work_title",
+        label: "Título do trabalho",
+        height: 40,
+        row_count: 1,
+        rows: [{ row_number: 2, nome: "Pessoa Exemplo Alfa" }],
+        applies_to_all: false,
+        checked_rows: 2,
+        truncated: false,
+      },
+    ],
+  });
+  render();
+  selectFile();
+  chooseType("scientific_initiation");
+  fireEvent.click(validateButton());
+  await screen.findByText(WORK_PREVIEW.resolved_text_preview);
+
+  expect(screen.getByText(/linha 3: “Robô seguidor de linha”/)).toBeTruthy();
+  expect(screen.getByText(/1 trabalho\(s\) — linha 2: “Horta vertical automatizada”/)).toBeTruthy();
+  expect(screen.queryByText(/linha 3: Pessoa Exemplo Delta/)).toBeNull();
+  expect(screen.queryByText(/linha 2: Pessoa Exemplo Alfa/)).toBeNull();
+});

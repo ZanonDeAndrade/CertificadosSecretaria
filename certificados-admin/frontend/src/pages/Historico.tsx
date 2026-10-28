@@ -11,6 +11,9 @@
  *  - Below `md` the table becomes a list of records, because a seven-column
  *    table at 320px is unusable no matter how it scrolls.
  *
+ *  - A per-work certificate (Mostra) is listed by its work and every author,
+ *    never by the first author alone — see CertificateSubject.
+ *
  * Accessible names pinned by the existing tests are preserved verbatim:
  * checkbox names containing the participant, "Selecionar página", "Baixar ZIP
  * (n)", "Revogar", "Motivo", "Confirmar revogação".
@@ -25,6 +28,13 @@ import Icon from "../ui/Icon";
 import Pagination from "../ui/Pagination";
 import StatusBadge, { certificateStatus } from "../ui/StatusBadge";
 import AccessibleModal from "../components/AccessibleModal";
+import CertificateSubject, {
+  AllAuthors,
+  CertificateOf,
+  authorsLabel,
+  certificateOf,
+  workSubject,
+} from "../components/CertificateSubject";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import { Field, Select, TextInput, Textarea, Checkbox } from "../ui/Field";
 import { EmptyState, ErrorState, TableSkeleton } from "../ui/Feedback";
@@ -50,6 +60,7 @@ import {
 
 const PAGE_SIZE = 20;
 const MAX_ZIP_SELECTION = 200;
+const NAME_HINT_ID = "historico-name-hint";
 
 function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -362,7 +373,7 @@ export default function Historico() {
     setReissueError("");
     try {
       const updated = await reissueCertificate(reissueTarget.unique_code);
-      setDownloadStatus(`Certificado de ${updated.participant_name} reemitido com sucesso.`);
+      setDownloadStatus(`Certificado ${certificateOf(updated)} reemitido com sucesso.`);
       setReissueTarget(null);
       if (detail?.unique_code === updated.unique_code) setDetail(updated);
       await load();
@@ -392,6 +403,7 @@ export default function Historico() {
               {(props) => (
                 <TextInput
                   {...props}
+                  aria-describedby={NAME_HINT_ID}
                   value={draft.name}
                   onChange={(event) => setDraft({ ...draft, name: event.target.value })}
                 />
@@ -500,6 +512,14 @@ export default function Historico() {
                 Limpar filtros ({activeFilterCount})
               </Button>
             )}
+            {/* Here rather than as the field's hint, which would push its input
+             * out of line with the rest of the filter row. */}
+            <p
+              id={NAME_HINT_ID}
+              className="text-[length:var(--text-xs)] text-[color:var(--ink-subtle)] sm:ml-auto"
+            >
+              A busca por nome também encontra qualquer autor de um trabalho.
+            </p>
           </div>
         </form>
       </Panel>
@@ -590,7 +610,7 @@ export default function Historico() {
                           <span className="sr-only">Seleção</span>
                         </Th>
                       )}
-                      <Th>Participante</Th>
+                      <Th>Participante / Trabalho</Th>
                       <Th>Curso</Th>
                       <Th>Evento</Th>
                       <Th>Tipo</Th>
@@ -625,14 +645,16 @@ export default function Historico() {
                                 <Checkbox
                                   compact
                                   labelHidden
-                                  label={`Selecionar certificado de ${cert.participant_name}`}
+                                  label={`Selecionar certificado ${certificateOf(cert)}`}
                                   checked={selected.has(cert.unique_code)}
                                   disabled={!available}
                                   onChange={() => toggle(cert.unique_code)}
                                 />
                               </Td>
                             )}
-                            <TdHeader>{cert.participant_name}</TdHeader>
+                            <TdHeader>
+                              <CertificateSubject source={cert} />
+                            </TdHeader>
                             <Td className="text-[color:var(--ink-muted)]">
                               {cert.course_name || "—"}
                             </Td>
@@ -662,14 +684,14 @@ export default function Historico() {
                                 <IconButton
                                   size="sm"
                                   icon="eye"
-                                  label={`Ver detalhes de ${cert.participant_name}`}
+                                  label={`Ver detalhes ${certificateOf(cert)}`}
                                   onClick={() => void openDetail(cert)}
                                 />
                                 {can("certificates.download") && (
                                   <IconButton
                                     size="sm"
                                     icon="download"
-                                    label={`Baixar certificado de ${cert.participant_name}`}
+                                    label={`Baixar certificado ${certificateOf(cert)}`}
                                     disabled={!available}
                                     onClick={() => handleSingleDownload(cert)}
                                   />
@@ -724,7 +746,7 @@ export default function Historico() {
                             <Checkbox
                               compact
                               labelHidden
-                              label={`Selecionar certificado de ${cert.participant_name}`}
+                              label={`Selecionar certificado ${certificateOf(cert)}`}
                               checked={selected.has(cert.unique_code)}
                               disabled={!available}
                               onChange={() => toggle(cert.unique_code)}
@@ -733,7 +755,7 @@ export default function Historico() {
                           )}
                           <div className="min-w-0 flex-1">
                             <p className="font-medium text-[color:var(--ink)]">
-                              {cert.participant_name}
+                              <CertificateSubject source={cert} />
                             </p>
                             <p className="mt-0.5 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
                               {cert.event_name || cert.course_name || "—"}
@@ -838,9 +860,15 @@ export default function Historico() {
         }
       >
         <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
-          O certificado de <strong>{revokeTarget?.participant_name}</strong> deixará
+          O certificado {revokeTarget && <CertificateOf source={revokeTarget} />} deixará
           de ser válido na consulta pública e não poderá mais ser baixado.
         </p>
+        {revokeTarget && (
+          <AllAuthors
+            source={revokeTarget}
+            className="mt-1 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]"
+          />
+        )}
         <p className="mt-1 font-[family-name:var(--font-mono)] text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
           {revokeTarget?.unique_code}
         </p>
@@ -921,10 +949,16 @@ export default function Historico() {
         }}
       >
         <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
-          Reemitir o certificado de <strong>{reissueTarget?.participant_name}</strong>,
+          Reemitir o certificado {reissueTarget && <CertificateOf source={reissueTarget} />},
           código <span className="font-[family-name:var(--font-mono)]">{reissueTarget?.unique_code}</span>?
           A operação ficará registrada na auditoria.
         </p>
+        {reissueTarget && (
+          <AllAuthors
+            source={reissueTarget}
+            className="mt-1 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]"
+          />
+        )}
       </ConfirmDialog>
     </>
   );
@@ -960,8 +994,25 @@ function NoResults({
 /** Detail view. Shows only what the operator needs; no participant document. */
 function CertificateDetail({ cert }: { cert: AdminCertificate }) {
   const status = certificateStatus(cert);
+  const work = workSubject(cert);
+  const subjectRows: { label: string; value: React.ReactNode }[] = work
+    ? [
+        ...(work.title ? [{ label: "Trabalho", value: work.title }] : []),
+        {
+          label: authorsLabel(work.authors.length),
+          value: (
+            <ol className="list-decimal space-y-0.5 pl-5">
+              {work.authors.map((name, index) => (
+                <li key={`${index}-${name}`}>{name}</li>
+              ))}
+            </ol>
+          ),
+        },
+        ...(cert.team_name ? [{ label: "Equipe", value: cert.team_name }] : []),
+      ]
+    : [{ label: "Participante", value: cert.participant_name }];
   const rows: { label: string; value: React.ReactNode }[] = [
-    { label: "Participante", value: cert.participant_name },
+    ...subjectRows,
     { label: "Curso", value: cert.course_name || "—" },
     { label: "Evento", value: cert.event_name || "—" },
     {

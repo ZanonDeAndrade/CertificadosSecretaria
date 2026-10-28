@@ -56,6 +56,9 @@ e o código de erro; não envie planilha ou Registro Acadêmico (RA) por canal i
 ## 5. Histórico e downloads
 
 - filtre por nome, código, curso, evento, período, estado ou lote;
+- um certificado da Mostra aparece pelo título do trabalho e pelos autores; com
+  mais de três, toque em **+N** ou abra o detalhe para ver todos. O filtro de
+  nome encontra o trabalho por qualquer autor;
 - abra o detalhe para verificar template, emissor, integridade e ciclo de vida;
 - download individual ou ZIP só é oferecido quando autorizado e íntegro;
 - itens revogados, ausentes ou bloqueados são ignorados/informados no ZIP.
@@ -75,7 +78,8 @@ nem altera certificados existentes.
 O QR abre `/validar/<código>`. Um certificado ativo exibe metadados mínimos;
 revogado exibe seu estado e não permite download. Busca por nome não revela o
 código, nome ou RA; os dois últimos exigem confirmar o Registro Acadêmico (RA)
-para liberar o arquivo.
+para liberar o arquivo. Um trabalho da Mostra aparece na busca pelo título, com
+os autores mascarados.
 
 ## 8. Encerrar e comunicar incidente
 

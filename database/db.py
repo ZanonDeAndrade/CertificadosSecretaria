@@ -525,6 +525,11 @@ def get_by_code(unique_code: str) -> dict | None:
         return CertificateRepository(s).get_by_code(unique_code)
 
 
+def get_certificates_by_codes(codes: list[str]) -> list[dict]:
+    with _session() as s:
+        return CertificateRepository(s).by_codes(codes)
+
+
 def search_by_name(name: str) -> list[dict]:
     with _session() as s:
         return CertificateRepository(s).search_by_name(name)

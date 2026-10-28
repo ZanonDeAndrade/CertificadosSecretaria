@@ -484,6 +484,24 @@ class CertificateRepository:
         )
         return _to_dict(row) if row else None
 
+    def by_codes(self, codes: list[str]) -> List[dict]:
+        """Certificates with exactly these codes, in no particular order."""
+        unique = list(dict.fromkeys(code for code in codes if code))
+        found: List[dict] = []
+        # Chunked so a large batch stays under the bound-parameter limits.
+        for start in range(0, len(unique), 500):
+            rows = (
+                self.session.execute(
+                    select(Certificate.__table__).where(
+                        Certificate.unique_code.in_(unique[start : start + 500])
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            found.extend(_to_dict(row) for row in rows)
+        return found
+
     def get_by_business_key(self, business_key: str) -> dict | None:
         if not business_key:
             return None

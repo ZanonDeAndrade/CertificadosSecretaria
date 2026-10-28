@@ -186,13 +186,25 @@ export interface SpreadsheetPreview {
   can_manage_templates?: boolean;
 }
 
+/**
+ * `name` is the row's holder (the first author, for a per-work type). A
+ * finished per-work batch also names each generated or duplicate work by its
+ * title and every author, read back from the certificate.
+ */
+interface SummaryWork {
+  row_number?: number;
+  name: string;
+  work_title?: string | null;
+  authors?: string[];
+}
+
 export interface GenerationSummary {
   batch_id?: string;
-  generated: { name: string; code: string }[];
+  generated: (SummaryWork & { code: string })[];
   generated_count: number;
-  duplicates: { name: string; existing_code: string }[];
+  duplicates: (SummaryWork & { existing_code: string })[];
   duplicate_count: number;
-  failed: { name: string; error: string }[];
+  failed: { row_number?: number; name: string; error: string }[];
   failed_count: number;
   invalid: { row_number: number; errors: string[] }[];
   invalid_count: number;
@@ -207,6 +219,10 @@ export interface AdminCertificate {
   certificate_type?: string | null;
   certificate_type_label?: string;
   workload_hours?: number | null;
+  /** Per-work certificates: every author, the first being `participant_name`. */
+  authors?: string[];
+  team_name?: string | null;
+  work_title?: string | null;
   issue_date?: string | null;
   issue_date_iso?: string | null;
   status: string;

@@ -237,6 +237,103 @@ test.describe("histórico", () => {
   });
 });
 
+/* Per-work (Mostra) certificates in the mock: 1, 3 and 8 synthetic authors. */
+const WORK_AUTHORS = [
+  "Pessoa Exemplo Alfa",
+  "Pessoa Exemplo Beta",
+  "Pessoa Exemplo Gama",
+  "Pessoa Exemplo Delta",
+  "Pessoa Exemplo Épsilon",
+  "Pessoa Exemplo Zeta",
+  "Pessoa Exemplo Eta",
+  "Pessoa Exemplo Teta",
+];
+
+/** The cell (desktop) or record (mobile) that lists a work. */
+function workEntry(page: Page, wide: boolean, title: string) {
+  return wide
+    ? page.getByRole("rowheader", { name: new RegExp(`^${title}`) })
+    : page.getByRole("listitem").filter({ hasText: title });
+}
+
+test.describe("histórico da Mostra", () => {
+  test("lista o trabalho e todos os autores; o comum continua pelo titular", async ({ page }, testInfo) => {
+    const wide = testInfo.project.name === "desktop";
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await expect(page.getByText("Robô seguidor de linha", { exact: true })).toBeVisible();
+    await expect(page.getByText("João Pedro Lima").first()).toBeVisible();
+    if (wide) {
+      await expect(page.getByRole("columnheader", { name: "Participante / Trabalho" })).toBeVisible();
+    }
+
+    await expect(workEntry(page, wide, "Compostagem doméstica")).toContainText(
+      `Compostagem domésticaAutor: ${WORK_AUTHORS[0]}`,
+    );
+    const three = workEntry(page, wide, "Horta vertical automatizada");
+    await expect(three).toContainText(`Autores: ${WORK_AUTHORS.slice(0, 3).join(", ")}`);
+    await expect(three.getByRole("button", { name: /mostrar todos/ })).toHaveCount(0);
+
+    const eight = workEntry(page, wide, "Robô seguidor de linha");
+    await expect(eight).toContainText(`Autores: ${WORK_AUTHORS.slice(0, 3).join(", ")} +5`);
+    await expect(eight).not.toContainText(WORK_AUTHORS[7]);
+    const more = eight.getByRole("button", { name: "+5 autores; mostrar todos" });
+    // Mouse: the tooltip carries every author. Touch: the button expands the list.
+    await expect(more).toHaveAttribute("title", WORK_AUTHORS.join(", "));
+    if (wide) await more.click();
+    else await more.tap();
+    await expect(eight).toContainText(`Autores: ${WORK_AUTHORS.join(", ")}`);
+    await eight.getByRole("button", { name: "mostrar menos" }).click();
+    await expect(eight).not.toContainText(WORK_AUTHORS[7]);
+  });
+
+  test("o detalhe lista o trabalho, todos os autores e a equipe", async ({ page }, testInfo) => {
+    const wide = testInfo.project.name === "desktop";
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await expect(page.getByText("Robô seguidor de linha", { exact: true })).toBeVisible();
+
+    if (wide) {
+      await page
+        .getByRole("button", { name: "Ver detalhes do trabalho “Robô seguidor de linha”" })
+        .click();
+    } else {
+      await workEntry(page, wide, "Robô seguidor de linha").getByRole("button", { name: "Detalhes" }).tap();
+    }
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Detalhes do certificado" })).toBeVisible();
+    await expect(dialog.getByText("Trabalho", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Equipe Verde")).toBeVisible();
+    await expect(dialog.getByText("Participante", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("listitem")).toHaveText(WORK_AUTHORS);
+  });
+
+  test("a busca por nome encontra o trabalho por qualquer autor, sem acento", async ({ page }) => {
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await page.getByLabel("Nome do participante").fill("exemplo epsilon");
+    await page.getByRole("button", { name: "Buscar" }).click();
+
+    await expect(page).toHaveURL(/name=exemplo/);
+    await expect(page.getByText("Robô seguidor de linha", { exact: true })).toBeVisible();
+    await expect(page.getByText("Horta vertical automatizada", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("João Pedro Lima")).toHaveCount(0);
+  });
+
+  test("o painel mostra o trabalho e os autores nas emissões recentes", async ({ page }) => {
+    await scenario(page, "default");
+    await page.goto("/painel");
+    const table = page.getByRole("table", { name: /Últimos certificados emitidos/ });
+    await expect(table.getByRole("columnheader", { name: "Participante / Trabalho" })).toBeVisible();
+    const eight = table.getByRole("rowheader", { name: /^Robô seguidor de linha/ });
+    await expect(eight).toContainText(`Autores: ${WORK_AUTHORS.slice(0, 3).join(", ")} +5`);
+    await expect(eight.getByRole("button", { name: "+5 autores; mostrar todos" })).toHaveAttribute(
+      "title",
+      WORK_AUTHORS.join(", "),
+    );
+  });
+});
+
 test.describe("validação de certificado", () => {
   test("mostra veredito com ícone e texto", async ({ page }) => {
     await scenario(page, "default");

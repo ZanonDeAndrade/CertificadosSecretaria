@@ -22,6 +22,7 @@ import { Table, TableScroll, Tbody, Td, TdHeader, Th, Thead, Tr } from "../ui/Ta
 import { cn } from "../ui/cn";
 import { useAuth } from "../app/AuthContext";
 import { useAsyncData } from "../app/useAsyncData";
+import CertificateSubject from "../components/CertificateSubject";
 import {
   AdminCertificate,
   DashboardStats,
@@ -258,7 +259,7 @@ export default function Dashboard() {
             <Table caption="Últimos certificados emitidos, do mais recente para o mais antigo">
               <Thead>
                 <Tr>
-                  <Th>Participante</Th>
+                  <Th>Participante / Trabalho</Th>
                   <Th className="hidden sm:table-cell">Curso ou evento</Th>
                   <Th>Código</Th>
                   <Th>Situação</Th>
@@ -269,7 +270,9 @@ export default function Dashboard() {
                   const status = certificateStatus(cert);
                   return (
                     <Tr key={cert.unique_code}>
-                      <TdHeader>{cert.participant_name}</TdHeader>
+                      <TdHeader>
+                        <CertificateSubject source={cert} />
+                      </TdHeader>
                       <Td className="hidden text-[color:var(--ink-muted)] sm:table-cell">
                         {cert.event_name || cert.course_name || "—"}
                       </Td>

@@ -60,6 +60,7 @@ from database.certificate_types import (
     is_per_work_type,
     parse_certificate_type,
 )
+from database.repositories import authors_from_json
 
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 # Pre-check of the active template's sized text boxes. Measuring every row of
@@ -1196,6 +1197,37 @@ def serialize_batch(batch: dict) -> dict:
     }
 
 
+def with_work_details(serialized: dict) -> dict:
+    """Name each generated or duplicate work of a finished per-work batch.
+
+    The stored result keeps only the first author of each row; the title and
+    every author are read back from the certificates, for the response only.
+    """
+    result = serialized.get("result")
+    if (
+        not isinstance(result, dict)
+        or serialized.get("status") not in _TERMINAL_STATUSES
+        or not is_per_work_type(serialized.get("certificate_type"))
+    ):
+        return serialized
+    entries = [
+        (entry, str(entry.get("code") or entry.get("existing_code") or ""))
+        for category in ("generated", "duplicates")
+        for entry in (result.get(category) or [])
+        if isinstance(entry, dict)
+    ]
+    certificates = {
+        cert["unique_code"]: cert
+        for cert in db.get_certificates_by_codes([code for _, code in entries])
+    }
+    for entry, code in entries:
+        cert = certificates.get(code)
+        if cert:
+            entry["work_title"] = cert.get("work_title")
+            entry["authors"] = authors_from_json(cert.get("authors_json"))
+    return serialized
+
+
 def get_batch(batch_id: str) -> dict | None:
     row = db.get_emission_batch(batch_id)
-    return serialize_batch(row) if row else None
+    return with_work_details(serialize_batch(row)) if row else None

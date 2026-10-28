@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../app/AuthContext";
 import { failureMessage, useAsyncData } from "../app/useAsyncData";
+import CertificateSubject from "../components/CertificateSubject";
 import {
   cancelEmissionBatch,
   disconnectGoogleDrive,
@@ -389,6 +390,17 @@ export default function EmitirCertificados() {
   };
 
   const perWork = isPerWorkType(certificateType);
+  // A resumed batch knows its type even when the form was reset by a reload.
+  const summaryType = batch?.certificate_type ?? certificateType;
+  const summaryPerWork = isPerWorkType(summaryType);
+  // Per-work rows are named by their work, never by the first author alone.
+  const workTitleByRow = new Map<number, string | undefined>(
+    perWork ? (preview?.valid ?? []).map((row) => [row.row_number, row.titulo_trabalho]) : [],
+  );
+  const rowLabel = (row: { row_number: number; nome: string }) => {
+    const title = workTitleByRow.get(row.row_number);
+    return `linha ${row.row_number}: ${title ? `“${title}”` : row.nome}`;
+  };
   const hasBodyText = textoPadrao.trim() !== "";
   const canValidate = Boolean(file) && (perWork || hasBodyText);
   const offeredVariables = (bodyVariables.data?.variables ?? []).filter(
@@ -782,7 +794,7 @@ export default function EmitirCertificados() {
                 {preview.empty_fields.map((field) => (
                   <li key={field.key}>
                     <strong>{field.label}</strong>: {field.row_count} linha(s) —{" "}
-                    {field.rows.map((row) => `linha ${row.row_number}: ${row.nome}`).join("; ")}
+                    {field.rows.map(rowLabel).join("; ")}
                     {field.row_count > field.rows.length ? "; …" : ""}
                     {field.truncated &&
                       ` Verificadas apenas as primeiras ${field.checked_rows} linhas válidas.`}
@@ -805,8 +817,8 @@ export default function EmitirCertificados() {
                     <strong>{warning.label}</strong> (caixa de {warning.height} px):{" "}
                     {warning.applies_to_all
                       ? "texto fixo do template; vale para todos os certificados."
-                      : `${warning.row_count} participante(s) — ${warning.rows
-                          .map((row) => `linha ${row.row_number}: ${row.nome}`)
+                      : `${warning.row_count} ${perWork ? "trabalho(s)" : "participante(s)"} — ${warning.rows
+                          .map(rowLabel)
                           .join("; ")}${warning.row_count > warning.rows.length ? "; …" : ""}`}
                     {warning.truncated &&
                       ` Verificadas apenas as primeiras ${warning.checked_rows} linhas válidas.`}
@@ -1122,22 +1134,34 @@ export default function EmitirCertificados() {
           {summary.generated.length > 0 && (
             <ResultTable
               title={`Certificados gerados (${summary.generated_count})`}
-              headers={["Participante", "Código"]}
-              rows={summary.generated.map((item) => [item.name, item.code])}
+              headers={[summaryPerWork ? "Trabalho" : "Participante", "Código"]}
+              rows={summary.generated.map((item) => [
+                <SummarySubject item={item} certificateType={summaryType} />,
+                item.code,
+              ])}
             />
           )}
           {summary.duplicates.length > 0 && (
             <ResultTable
               title={`Duplicados mantidos (${summary.duplicate_count})`}
-              headers={["Participante", "Código existente"]}
-              rows={summary.duplicates.map((item) => [item.name, item.existing_code])}
+              headers={[summaryPerWork ? "Trabalho" : "Participante", "Código existente"]}
+              rows={summary.duplicates.map((item) => [
+                <SummarySubject item={item} certificateType={summaryType} />,
+                item.existing_code,
+              ])}
             />
           )}
           {summary.failed.length > 0 && (
             <ResultTable
               title={`Falhas (${summary.failed_count})`}
-              headers={["Participante", "Motivo"]}
-              rows={summary.failed.map((item) => [item.name, item.error])}
+              headers={[summaryPerWork ? "Linha e primeiro autor" : "Participante", "Motivo"]}
+              // A failed row has no certificate to read the work back from.
+              rows={summary.failed.map((item) => [
+                summaryPerWork && item.row_number
+                  ? `Linha ${item.row_number} — ${item.name}`
+                  : item.name,
+                item.error,
+              ])}
               danger
             />
           )}
@@ -1193,6 +1217,25 @@ export default function EmitirCertificados() {
   );
 }
 
+function SummarySubject({
+  item,
+  certificateType,
+}: {
+  item: GenerationSummary["generated"][number] | GenerationSummary["duplicates"][number];
+  certificateType: string | null | undefined;
+}) {
+  return (
+    <CertificateSubject
+      source={{
+        participant_name: item.name,
+        certificate_type: certificateType,
+        work_title: item.work_title,
+        authors: item.authors,
+      }}
+    />
+  );
+}
+
 function ResultTable({
   title,
   headers,
@@ -1201,7 +1244,7 @@ function ResultTable({
 }: {
   title: string;
   headers: [string, string];
-  rows: [string, string][];
+  rows: [ReactNode, string][];
   danger?: boolean;
 }) {
   return (
