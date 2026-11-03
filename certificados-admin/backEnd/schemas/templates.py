@@ -79,3 +79,54 @@ class TemplateSampleDataResponse(BaseModel):
     values: dict[str, str]
     empty_settings: list[EmptySettingResponse]
     can_manage_settings: bool
+
+
+# ── Certificate models ────────────────────────────────────────────────────────
+
+
+class TemplateCreateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    # {background: <data URL or serving URL>, image_width, image_height, elements}
+    layout: dict[str, Any]
+    # Dedicates the model to one certificate type; omitted = generic.
+    certificate_type: str | None = Field(default=None, max_length=32)
+    # Only files the model in the list; omitted = all courses.
+    course_id: int | None = Field(default=None, ge=1)
+
+
+class TemplateSaveRequest(BaseModel):
+    """Fields left out are kept; ``certificate_type: null`` makes the model
+    generic and ``course_id: null`` files it under all courses."""
+
+    name: str | None = Field(default=None, max_length=255)
+    certificate_type: str | None = Field(default=None, max_length=32)
+    course_id: int | None = Field(default=None, ge=1)
+    layout: dict[str, Any] | None = None
+    # The revision the editor opened; a different one on the server is refused.
+    revision: int | None = Field(default=None, ge=1)
+    # Required when the model is active and the layout changed.
+    apply: bool = False
+
+
+class TemplateDuplicateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    # A revision from the model's history; omitted = the current one.
+    version_id: int | None = Field(default=None, ge=1)
+
+
+# ── Courses ───────────────────────────────────────────────────────────────────
+
+
+class CourseResponse(BaseModel):
+    id: int
+    name: str
+    is_active: bool
+
+
+class CourseCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class CourseUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    is_active: bool | None = None

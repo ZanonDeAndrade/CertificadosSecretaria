@@ -18,6 +18,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -122,8 +123,11 @@ class Certificate(Base):
     pdf_path: Mapped[str | None] = mapped_column(Text)
     # Which template produced this certificate (human label, e.g. "v3").
     template_used: Mapped[str | None] = mapped_column(String(128))
-    # The exact global-template version used + an immutable snapshot of its
-    # layout, so a reissue reproduces the original certificate faithfully.
+    # The exact template version used + an immutable snapshot of its layout,
+    # so a reissue reproduces the original certificate faithfully. The foreign
+    # key (RESTRICT) makes the database refuse to delete a version that issued
+    # a certificate; on PostgreSQL it is created NOT VALID, so rows written
+    # before migration 0014 are never checked or altered.
     template_version_id: Mapped[int | None] = mapped_column(Integer)
     template_snapshot: Mapped[str | None] = mapped_column(Text)
     # Snapshot of the non-secret institutional data used for this issue.  New
@@ -188,6 +192,12 @@ class Certificate(Base):
         Index("idx_certificates_issue_date", "issue_date"),
         Index("idx_certificates_batch_id", "batch_id"),
         Index("idx_certificates_certificate_type", "certificate_type"),
+        ForeignKeyConstraint(
+            ["template_version_id"],
+            ["template_versions.id"],
+            name="fk_certificates_template_version_id",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             _in_list_sql("status", CERTIFICATE_STATUSES), name="ck_certificates_status"
         ),
@@ -199,6 +209,38 @@ class Certificate(Base):
             f"certificate_type IS NULL OR {_in_list_sql('certificate_type', CERTIFICATE_TYPE_VALUES)}",
             name="ck_certificates_certificate_type",
         ),
+    )
+
+
+class CertificateEmailHash(Base):
+    """Keyed hash of an e-mail linked to a certificate.
+
+    Position 1 is the holder's e-mail; a per-work certificate adds one row per
+    author, in spreadsheet order. The public site searches these rows by exact
+    e-mail and confirms a download with them. The plain e-mail never lives
+    here; the key version is kept so hashes can be rotated like the document's.
+    """
+
+    __tablename__ = "certificate_email_hashes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    certificate_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "certificates.id",
+            ondelete="CASCADE",
+            name="fk_certificate_email_hashes_certificate_id",
+        ),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    email_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    hash_key_id: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    __table_args__ = (
+        Index("idx_certificate_email_hashes_hash_key", "email_hash", "hash_key_id"),
+        Index("idx_certificate_email_hashes_certificate", "certificate_id"),
+        Index("uq_certificate_email_hashes_position", "certificate_id", "position", unique=True),
     )
 
 
@@ -577,18 +619,97 @@ class TemplateVersionSequence(Base):
     )
 
 
-class TemplateVersion(Base):
-    """An immutable version of the single global certificate template.
+class Course(Base):
+    """A registered course, so templates are filed under one spelling.
 
-    Every edit in the visual editor creates a new row (never mutated). Exactly
-    one row has ``is_active = 1`` at a time. The background image bytes live here
-    (durable DB storage — never APPDATA/local JSON), and ``layout_json`` is the
-    frozen snapshot of elements + dimensions + background reference.
+    Managed in the settings screen. Courses are deactivated, never deleted:
+    a template may still point at one. The spreadsheet keeps its own fixed
+    canonical list (the duplicate key of a certificate depends on it).
+    """
+
+    __tablename__ = "courses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Accent-free lowercase key; two spellings of one course collide here.
+    normalized_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+
+    __table_args__ = (UniqueConstraint("normalized_key", name="uq_courses_normalized_key"),)
+
+
+class CertificateTemplate(Base):
+    """A certificate model as the secretariat sees it: one item in the list.
+
+    Its layout lives in ``template_versions``: every row with this
+    ``template_id`` is a revision, the newest being the current one. Saving a
+    model that already issued certificates (or was ever active) adds a revision
+    instead of changing a row a certificate points at. A model with
+    certificates is never deleted, only archived (``archived_at``): the
+    certificates, the public validation and the reissue keep working.
+    """
+
+    __tablename__ = "certificate_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # NULL is the generic model; a value dedicates it to batches of that type.
+    certificate_type: Mapped[str | None] = mapped_column(String(32))
+    # Only files the model in the list; NULL means "all courses". Emission
+    # picks the active model by type, never by course.
+    course_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("courses.id", ondelete="RESTRICT")
+    )
+    # Bumped on every save; a stale editor sends the one it opened with and
+    # is refused instead of overwriting another operator's work.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", default=1)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    created_by: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    updated_by: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index("idx_certificate_templates_course_id", "course_id"),
+        Index("idx_certificate_templates_certificate_type", "certificate_type"),
+        Index("idx_certificate_templates_archived_at", "archived_at"),
+        CheckConstraint(
+            f"certificate_type IS NULL OR {_in_list_sql('certificate_type', CERTIFICATE_TYPE_VALUES)}",
+            name="ck_certificate_templates_certificate_type",
+        ),
+    )
+
+
+class TemplateVersion(Base):
+    """A revision of a certificate model (``certificate_templates``).
+
+    A version is never changed once a certificate points at it or once it has
+    been active: the editor then saves a new row. The background image bytes
+    live here (durable DB storage — never APPDATA/local JSON), and
+    ``layout_json`` is the frozen snapshot of elements + dimensions. At most one
+    version is active per certificate type, and it is always its model's
+    newest revision.
     """
 
     __tablename__ = "template_versions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    template_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("certificate_templates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
     name: Mapped[str | None] = mapped_column(String(255))
     # Immutable snapshot: {background, image_width, image_height, elements:[...]}.
@@ -619,6 +740,7 @@ class TemplateVersion(Base):
 
     __table_args__ = (
         Index("idx_template_versions_is_active", "is_active"),
+        Index("idx_template_versions_template_id", "template_id"),
         Index("uq_template_versions_active_type_key", "active_type_key", unique=True),
         CheckConstraint(
             f"certificate_type IS NULL OR {_in_list_sql('certificate_type', CERTIFICATE_TYPE_VALUES)}",

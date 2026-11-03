@@ -92,6 +92,11 @@ def _joined(parts: Iterable[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " e " + items[-1]
 
 
+def describe_problems(problems: list[str]) -> str:
+    """ "tem o elemento Nome do participante e não tem o bloco Autores"."""
+    return _joined(_PROBLEMS[code][0] for code in problems)
+
+
 def template_problem(
     version: dict | None, certificate_type: str | None, *, can_manage: bool
 ) -> str | None:
@@ -112,24 +117,24 @@ def template_problem(
         )
         if can_manage:
             return (
-                f"{reason} Em Template, use “Editar (nova versão)”, escolha o tipo {label} "
-                "(o editor monta o ponto de partida sem o nome e com o bloco Autores), "
-                "ajuste, salve e ative a versão."
+                f"{reason} Em Template, use “Novo modelo”, escolha o tipo {label} em "
+                "“Dados do modelo” (o editor monta o ponto de partida sem o nome e com o "
+                "bloco Autores), ajuste, salve e ative o modelo."
             )
         return (
-            f"{reason} Peça a um administrador para criar e ativar uma versão do tipo "
+            f"{reason} Peça a um administrador para criar e ativar um modelo do tipo "
             f"{label} em Template."
         )
 
     problems = layout_problems(version.get("layout") or {})
     if not problems:
         return None
-    what = _joined(_PROBLEMS[code][0] for code in problems)
-    reason = f"O template ativo do tipo {label} {what}."
+    what = describe_problems(problems)
+    reason = f"O modelo ativo do tipo {label} {what}."
     if not can_manage:
-        return f"{reason} Peça a um administrador para corrigir o template em Template."
+        return f"{reason} Peça a um administrador para corrigir o modelo em Template."
     steps = _joined(_PROBLEMS[code][1] for code in problems)
     return (
-        f"{reason} Em Template, use “Editar como nova” nessa versão, {steps}, "
-        "salve e ative a nova versão."
+        f"{reason} Em Template, abra esse modelo em “Editar”, {steps} e salve "
+        "aplicando às próximas emissões."
     )

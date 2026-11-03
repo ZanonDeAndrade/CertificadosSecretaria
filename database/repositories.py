@@ -15,7 +15,7 @@ from typing import Any, List, cast
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from .models import (
@@ -23,6 +23,9 @@ from .models import (
     AuditLog,
     AuthSession,
     Certificate,
+    CertificateEmailHash,
+    CertificateTemplate,
+    Course,
     EmissionBatch,
     EmissionBatchItem,
     GoogleDriveConnection,
@@ -34,6 +37,10 @@ from .models import (
     TemplateVersionSequence,
     utcnow,
 )
+
+# Plain e-mails of a row travel beside the insert columns under this key; only
+# their keyed hashes are written, to ``certificate_email_hashes``.
+EMAILS_FIELD = "emails"
 
 # Columns accepted by an insert (id / created_at are DB-managed).
 _INSERT_COLUMNS = (
@@ -186,10 +193,105 @@ class CertificateRepository:
         conflict — uniqueness is enforced by the database, never pre-checked
         outside a transaction. Used for seeding/migration of distinct rows.
         """
-        if not rows:
-            return
-        values = [_normalize_insert_row(r) for r in rows]
-        self.session.execute(insert(_table(Certificate)), values)
+        for row in rows:
+            result = self.session.execute(
+                insert(_table(Certificate)).values(**_normalize_insert_row(row))
+            )
+            emails = row.get(EMAILS_FIELD)
+            if emails:
+                self.replace_email_hashes(_inserted_id(result), emails)
+
+    # ── E-mail hashes: public search and download confirmation ───────────────
+    def replace_email_hashes(self, certificate_id: int, emails: object) -> None:
+        """Record one keyed hash per e-mail of the row, in author order.
+
+        Takes the plain e-mails straight from the decrypted job row and writes
+        only their HMACs, under the active key. Whatever the certificate had
+        before (a compensated reservation being reused) is replaced.
+        """
+        from .privacy import email_hash_with_key_id
+
+        self.session.execute(
+            delete(CertificateEmailHash).where(
+                CertificateEmailHash.certificate_id == certificate_id
+            )
+        )
+        values: list[dict] = []
+        for raw in emails if isinstance(emails, (list, tuple)) else []:
+            digest, key_id = email_hash_with_key_id(str(raw or ""))
+            if not digest or not key_id:
+                continue
+            values.append(
+                {
+                    "certificate_id": certificate_id,
+                    "position": len(values) + 1,
+                    "email_hash": digest,
+                    "hash_key_id": key_id,
+                }
+            )
+        if values:
+            self.session.execute(insert(_table(CertificateEmailHash)), values)
+
+    def email_hashes(self, certificate_id: int) -> list[dict]:
+        """The keyed e-mail hashes of one certificate, in author order."""
+        rows = (
+            self.session.execute(
+                select(CertificateEmailHash.__table__)
+                .where(CertificateEmailHash.certificate_id == certificate_id)
+                .order_by(CertificateEmailHash.position)
+            )
+            .mappings()
+            .all()
+        )
+        return [_to_dict(row) for row in rows]
+
+    def rotate_email_hash(
+        self, row_id: int, *, expected_hash: str, new_hash: str, new_key_id: str
+    ) -> bool:
+        """Rotate one e-mail HMAC after a successful confirmation; no plaintext here."""
+        result = self.session.execute(
+            update(CertificateEmailHash)
+            .where(CertificateEmailHash.id == row_id)
+            .where(CertificateEmailHash.email_hash == expected_hash)
+            .values(email_hash=new_hash, hash_key_id=new_key_id)
+        )
+        return _affected(result) > 0
+
+    def list_by_email_hashes(
+        self,
+        hashes_by_key_id: dict[str, str],
+        *,
+        statuses: tuple[str, ...] = ("ativo", "revogado"),
+    ) -> list[dict]:
+        """Every certificate whose holder or any author has this exact e-mail.
+
+        ``hashes_by_key_id`` carries the digest under each accepted key; no
+        plain e-mail reaches this repository or the SQL parameters.
+        """
+        if not hashes_by_key_id:
+            return []
+        matching = select(CertificateEmailHash.certificate_id).where(
+            or_(
+                *[
+                    and_(
+                        CertificateEmailHash.email_hash == digest,
+                        CertificateEmailHash.hash_key_id == key_id,
+                    )
+                    for key_id, digest in hashes_by_key_id.items()
+                ]
+            )
+        )
+        rows = (
+            self.session.execute(
+                select(Certificate.__table__)
+                .where(Certificate.id.in_(matching))
+                .where(Certificate.status.in_(statuses))
+                .order_by(Certificate.issue_date.desc(), Certificate.id.desc())
+            )
+            .mappings()
+            .all()
+        )
+        return [_to_dict(row) for row in rows]
 
     # ── Saga: reserve → finalize → fail ──────────────────────────────────────
     def insert_pending(self, *, code: str, business_key: str | None, fields: dict) -> None:
@@ -207,7 +309,10 @@ class CertificateRepository:
         # Set created_at explicitly (not the server default) so the reconciliation
         # age comparison uses the same tz handling as the Python-side cutoff.
         values["created_at"] = utcnow()
-        self.session.execute(insert(_table(Certificate)).values(**values))
+        result = self.session.execute(insert(_table(Certificate)).values(**values))
+        emails = fields.get(EMAILS_FIELD)
+        if emails:
+            self.replace_email_hashes(_inserted_id(result), emails)
 
     def retry_failed_reservation(
         self, *, code: str, business_key: str, batch_id: str, fields: dict
@@ -242,7 +347,17 @@ class CertificateRepository:
             .where(or_(Certificate.pdf_path.is_(None), Certificate.pdf_path == ""))
             .values(**values)
         )
-        return _affected(result) == 1
+        if _affected(result) != 1:
+            return False
+        emails = fields.get(EMAILS_FIELD)
+        if emails:
+            certificate_id = self.session.execute(
+                select(Certificate.id).where(
+                    func.lower(Certificate.unique_code) == func.lower(code.strip())
+                )
+            ).scalar_one()
+            self.replace_email_hashes(int(certificate_id), emails)
+        return True
 
     def finalize(self, unique_code: str, drive_fields: dict) -> bool:
         """Promote a reserved (``pending``) row to ``ativo`` with storage metadata.
@@ -1419,6 +1534,16 @@ class EmissionBatchRepository:
         )
         return _to_dict(row) if row else None
 
+    def count_in_progress(self) -> int:
+        """Batches a worker may still be issuing from (queued or processing)."""
+        return int(
+            self.session.execute(
+                select(func.count())
+                .select_from(EmissionBatch)
+                .where(EmissionBatch.status.in_(("queued", "processing")))
+            ).scalar_one()
+        )
+
     def purge_terminal_payloads(self, before: datetime) -> int:
         """Remove encrypted retry material after its bounded retention period.
 
@@ -1782,11 +1907,12 @@ class EmissionBatchRepository:
 
 # ── Audit log ────────────────────────────────────────────────────────────────
 
-# ── Template versions (single global template) ──────────────────────────────────
+# ── Template versions (revisions of a certificate model) ──────────────────────
 
 # All columns except the (potentially large) background image blob.
 _VERSION_META = (
     TemplateVersion.id,
+    TemplateVersion.template_id,
     TemplateVersion.version_number,
     TemplateVersion.name,
     TemplateVersion.layout_json,
@@ -1813,24 +1939,15 @@ class TemplateVersionRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create(
-        self,
-        *,
-        name: str | None,
-        layout_json: str,
-        image_width: int,
-        image_height: int,
-        background_image: bytes | None,
-        background_mime_type: str,
-        created_by: int | None = None,
-        certificate_type: str | None = None,
-    ) -> dict:
+    def lock_sequence(self) -> TemplateVersionSequence:
+        """Lock the singleton sequence row: the portable advisory lock that
+        serialises every template mutation across PostgreSQL workers (SQLite
+        already serialises writers). Seeds the row on metadata-created
+        databases; production migration 0008 always has it."""
         sequence = self.session.execute(
             select(TemplateVersionSequence).where(TemplateVersionSequence.id == 1).with_for_update()
         ).scalar_one_or_none()
         if sequence is None:
-            # Fresh dev/test databases are created from metadata rather than
-            # migrations. Production migration 0008 always seeds this row.
             next_seed = (
                 int(
                     self.session.execute(
@@ -1842,11 +1959,28 @@ class TemplateVersionRepository:
             sequence = TemplateVersionSequence(id=1, next_number=next_seed)
             self.session.add(sequence)
             self.session.flush()
+        return sequence
+
+    def create(
+        self,
+        *,
+        template_id: int,
+        name: str | None,
+        layout_json: str,
+        image_width: int,
+        image_height: int,
+        background_image: bytes | None,
+        background_mime_type: str,
+        created_by: int | None = None,
+        certificate_type: str | None = None,
+    ) -> dict:
+        sequence = self.lock_sequence()
         next_num = int(sequence.next_number)
         sequence.next_number = next_num + 1
         self.session.flush()
         result = self.session.execute(
             insert(_table(TemplateVersion)).values(
+                template_id=template_id,
                 version_number=next_num,
                 name=name,
                 layout_json=layout_json,
@@ -1861,6 +1995,70 @@ class TemplateVersionRepository:
             )
         )
         return {"id": _inserted_id(result), "version_number": next_num}
+
+    def update_layout(
+        self,
+        version_id: int,
+        *,
+        layout_json: str,
+        image_width: int,
+        image_height: int,
+        background_image: bytes,
+        background_mime_type: str,
+    ) -> None:
+        """Change a version in place. Only for a revision no certificate points
+        at and that was never active: the service enforces that rule."""
+        self.session.execute(
+            update(TemplateVersion)
+            .where(TemplateVersion.id == version_id)
+            .values(
+                layout_json=layout_json,
+                image_width=image_width,
+                image_height=image_height,
+                background_image=background_image,
+                background_mime_type=background_mime_type,
+            )
+        )
+
+    def set_certificate_type(self, template_id: int, certificate_type: str | None) -> None:
+        """Mirror the model's type on its (inactive, unreferenced) versions."""
+        self.session.execute(
+            update(TemplateVersion)
+            .where(TemplateVersion.template_id == template_id)
+            .values(certificate_type=certificate_type)
+        )
+
+    def list_by_template(self, template_id: int) -> list[dict]:
+        rows = (
+            self.session.execute(
+                select(*_VERSION_META)
+                .where(TemplateVersion.template_id == template_id)
+                .order_by(TemplateVersion.version_number.desc())
+            )
+            .mappings()
+            .all()
+        )
+        return [_to_dict(r) for r in rows]
+
+    def current_for_template(self, template_id: int) -> dict | None:
+        """The newest revision of a model (the one the editor opens)."""
+        row = (
+            self.session.execute(
+                select(*_VERSION_META)
+                .where(TemplateVersion.template_id == template_id)
+                .order_by(TemplateVersion.version_number.desc())
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        return _to_dict(row) if row else None
+
+    def delete_by_template(self, template_id: int) -> int:
+        result = self.session.execute(
+            delete(TemplateVersion).where(TemplateVersion.template_id == template_id)
+        )
+        return _affected(result)
 
     def get(self, version_id: int) -> dict | None:
         row = (
@@ -1912,26 +2110,8 @@ class TemplateVersionRepository:
         return row[0], row[1]
 
     def activate(self, version_id: int, actor: int | None = None) -> bool:
-        """Make exactly one version active (atomic within the caller's txn)."""
-        # The singleton sequence row doubles as a portable advisory lock. It
-        # serializes create/activate across PostgreSQL workers; SQLite already
-        # serializes writers.
-        sequence_id = self.session.execute(
-            select(TemplateVersionSequence.id)
-            .where(TemplateVersionSequence.id == 1)
-            .with_for_update()
-        ).scalar_one_or_none()
-        if sequence_id is None:
-            next_number = (
-                int(
-                    self.session.execute(
-                        select(func.coalesce(func.max(TemplateVersion.version_number), 0))
-                    ).scalar_one()
-                )
-                + 1
-            )
-            self.session.add(TemplateVersionSequence(id=1, next_number=next_number))
-            self.session.flush()
+        """Make exactly one version active per type (atomic within the caller's txn)."""
+        self.lock_sequence()
         target = self.session.execute(
             select(TemplateVersion.id, TemplateVersion.certificate_type)
             .where(TemplateVersion.id == version_id)
@@ -1958,57 +2138,284 @@ class TemplateVersionRepository:
         )
         return True
 
-    def rename(self, version_id: int, name: str) -> dict | None:
-        """Rename only the human label; the immutable layout stays untouched."""
-        exists = self.session.execute(
-            select(TemplateVersion.id).where(TemplateVersion.id == version_id).limit(1)
-        ).first()
-        if not exists:
-            return None
-        self.session.execute(
-            update(TemplateVersion).where(TemplateVersion.id == version_id).values(name=name)
+
+# ── Courses ───────────────────────────────────────────────────────────────────
+
+
+class CourseRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def list(self, *, include_inactive: bool = True) -> list[dict]:
+        statement = select(_table(Course)).order_by(Course.name)
+        if not include_inactive:
+            statement = statement.where(Course.is_active == 1)
+        return [_to_dict(row) for row in self.session.execute(statement).mappings().all()]
+
+    def get(self, course_id: int) -> dict | None:
+        row = (
+            self.session.execute(select(_table(Course)).where(Course.id == course_id).limit(1))
+            .mappings()
+            .first()
         )
-        self.session.flush()
-        return self.get(version_id)
+        return _to_dict(row) if row else None
 
-    def delete_if_unused(self, version_id: int) -> tuple[str, dict | None]:
-        """Delete an inactive, unreferenced version without weakening history.
-
-        The row is locked while the guards are evaluated. The active version,
-        the last remaining version, and versions recorded by certificates are
-        deliberately preserved.
-        """
-        version_row = (
+    def get_by_key(self, normalized_key: str) -> dict | None:
+        row = (
             self.session.execute(
-                select(*_VERSION_META)
-                .where(TemplateVersion.id == version_id)
-                .with_for_update()
-                .limit(1)
+                select(_table(Course)).where(Course.normalized_key == normalized_key).limit(1)
             )
             .mappings()
             .first()
         )
-        if version_row is None:
-            return "not_found", None
-        version = _to_dict(version_row)
-        if bool(version["is_active"]):
-            return "active", version
-        total = int(
-            self.session.execute(select(func.count()).select_from(TemplateVersion)).scalar_one()
+        return _to_dict(row) if row else None
+
+    def count(self) -> int:
+        return int(self.session.execute(select(func.count()).select_from(Course)).scalar_one())
+
+    def create(self, *, name: str, normalized_key: str) -> dict:
+        now = utcnow()
+        result = self.session.execute(
+            insert(_table(Course)).values(
+                name=name,
+                normalized_key=normalized_key,
+                is_active=1,
+                created_at=now,
+                updated_at=now,
+            )
         )
-        if total <= 1:
-            return "last_version", version
-        references = int(
+        created = self.get(_inserted_id(result))
+        assert created is not None
+        return created
+
+    def update(self, course_id: int, values: dict) -> dict | None:
+        if not self.get(course_id):
+            return None
+        self.session.execute(
+            update(Course).where(Course.id == course_id).values(**values, updated_at=utcnow())
+        )
+        return self.get(course_id)
+
+
+# ── Certificate models ────────────────────────────────────────────────────────
+
+# Certificates that count as issued when a model's usage is shown.
+ISSUED_STATUSES = ("ativo", "revogado")
+
+
+class CertificateTemplateRepository:
+    """One row per model; its revisions live in ``template_versions``."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create(
+        self,
+        *,
+        name: str,
+        certificate_type: str | None,
+        course_id: int | None,
+        created_by: int | None,
+    ) -> int:
+        now = utcnow()
+        result = self.session.execute(
+            insert(_table(CertificateTemplate)).values(
+                name=name,
+                certificate_type=certificate_type,
+                course_id=course_id,
+                revision=1,
+                created_at=now,
+                created_by=created_by,
+                updated_at=now,
+                updated_by=created_by,
+            )
+        )
+        return _inserted_id(result)
+
+    def get(self, template_id: int, *, for_update: bool = False) -> dict | None:
+        statement = (
+            select(_table(CertificateTemplate))
+            .where(CertificateTemplate.id == template_id)
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self.session.execute(statement).mappings().first()
+        return _to_dict(row) if row else None
+
+    def update(self, template_id: int, values: dict, *, actor: int | None, bump: bool) -> None:
+        payload: dict[str, Any] = {**values, "updated_at": utcnow(), "updated_by": actor}
+        if bump:
+            payload["revision"] = CertificateTemplate.revision + 1
+        self.session.execute(
+            update(CertificateTemplate)
+            .where(CertificateTemplate.id == template_id)
+            .values(**payload)
+        )
+
+    def set_archived(self, template_id: int, *, archived: bool, actor: int | None) -> None:
+        self.session.execute(
+            update(CertificateTemplate)
+            .where(CertificateTemplate.id == template_id)
+            .values(
+                archived_at=utcnow() if archived else None,
+                archived_by=actor if archived else None,
+                updated_at=utcnow(),
+                updated_by=actor,
+            )
+        )
+
+    def delete(self, template_id: int) -> None:
+        """Remove a model and its revisions. Only for a model no certificate
+        points at; the RESTRICT keys refuse anything else."""
+        self.session.execute(
+            delete(TemplateVersion).where(TemplateVersion.template_id == template_id)
+        )
+        self.session.execute(
+            delete(CertificateTemplate).where(CertificateTemplate.id == template_id)
+        )
+
+    def count(self) -> int:
+        return int(
+            self.session.execute(select(func.count()).select_from(CertificateTemplate)).scalar_one()
+        )
+
+    def reference_counts(self, template_id: int) -> tuple[int, int]:
+        """``(any status, issued)`` certificates pointing at the model's revisions."""
+        versions = aliased(TemplateVersion)
+        base = (
+            select(func.count())
+            .select_from(Certificate)
+            .join(versions, versions.id == Certificate.template_version_id)
+            .where(versions.template_id == template_id)
+        )
+        total = int(self.session.execute(base).scalar_one())
+        issued = int(
+            self.session.execute(base.where(Certificate.status.in_(ISSUED_STATUSES))).scalar_one()
+        )
+        return total, issued
+
+    def ever_activated(self, template_id: int) -> bool:
+        count = self.session.execute(
+            select(func.count())
+            .select_from(TemplateVersion)
+            .where(TemplateVersion.template_id == template_id)
+            .where(TemplateVersion.activated_at.is_not(None))
+        ).scalar_one()
+        return int(count) > 0
+
+    def _overview_statement(self):  # noqa: ANN202 - SQLAlchemy Select
+        current = (
+            select(
+                TemplateVersion.template_id.label("template_id"),
+                func.max(TemplateVersion.version_number).label("version_number"),
+            )
+            .group_by(TemplateVersion.template_id)
+            .subquery("current_revision")
+        )
+        refs = aliased(TemplateVersion)
+        reference_count = (
+            select(func.count())
+            .select_from(Certificate)
+            .join(refs, refs.id == Certificate.template_version_id)
+            .where(refs.template_id == CertificateTemplate.id)
+            .correlate(CertificateTemplate)
+            .scalar_subquery()
+        )
+        issued = aliased(TemplateVersion)
+        certificate_count = (
+            select(func.count())
+            .select_from(Certificate)
+            .join(issued, issued.id == Certificate.template_version_id)
+            .where(issued.template_id == CertificateTemplate.id)
+            .where(Certificate.status.in_(ISSUED_STATUSES))
+            .correlate(CertificateTemplate)
+            .scalar_subquery()
+        )
+        activated = aliased(TemplateVersion)
+        activations = (
+            select(func.count())
+            .select_from(activated)
+            .where(activated.template_id == CertificateTemplate.id)
+            .where(activated.activated_at.is_not(None))
+            .correlate(CertificateTemplate)
+            .scalar_subquery()
+        )
+        return (
+            select(
+                CertificateTemplate.id,
+                CertificateTemplate.name,
+                CertificateTemplate.certificate_type,
+                CertificateTemplate.course_id,
+                Course.name.label("course_name"),
+                CertificateTemplate.revision,
+                CertificateTemplate.archived_at,
+                CertificateTemplate.created_at,
+                CertificateTemplate.created_by,
+                CertificateTemplate.updated_at,
+                TemplateVersion.id.label("current_version_id"),
+                TemplateVersion.version_number,
+                TemplateVersion.is_active,
+                TemplateVersion.image_width,
+                TemplateVersion.image_height,
+                TemplateVersion.activated_at,
+                reference_count.label("reference_count"),
+                certificate_count.label("certificate_count"),
+                activations.label("activation_count"),
+            )
+            .select_from(CertificateTemplate)
+            .outerjoin(Course, Course.id == CertificateTemplate.course_id)
+            .outerjoin(current, current.c.template_id == CertificateTemplate.id)
+            .outerjoin(
+                TemplateVersion,
+                and_(
+                    TemplateVersion.template_id == CertificateTemplate.id,
+                    TemplateVersion.version_number == current.c.version_number,
+                ),
+            )
+        )
+
+    def overview(self, template_id: int) -> dict | None:
+        row = (
             self.session.execute(
-                select(func.count())
-                .select_from(Certificate)
-                .where(Certificate.template_version_id == version_id)
-            ).scalar_one()
+                self._overview_statement().where(CertificateTemplate.id == template_id)
+            )
+            .mappings()
+            .first()
         )
-        if references:
-            return "referenced", version
-        self.session.execute(delete(TemplateVersion).where(TemplateVersion.id == version_id))
-        return "deleted", version
+        return _to_dict(row) if row else None
+
+    def list_overview(
+        self,
+        *,
+        course_id: int | None = None,
+        without_course: bool = False,
+        certificate_type: str | None = None,
+        generic_only: bool = False,
+        query: str | None = None,
+        include_archived: bool = False,
+    ) -> list[dict]:
+        statement = self._overview_statement()
+        if course_id is not None:
+            statement = statement.where(CertificateTemplate.course_id == course_id)
+        elif without_course:
+            statement = statement.where(CertificateTemplate.course_id.is_(None))
+        if certificate_type:
+            statement = statement.where(CertificateTemplate.certificate_type == certificate_type)
+        elif generic_only:
+            statement = statement.where(CertificateTemplate.certificate_type.is_(None))
+        if query:
+            escaped = _escape_like(query.strip())
+            statement = statement.where(CertificateTemplate.name.ilike(f"%{escaped}%", escape="\\"))
+        if not include_archived:
+            statement = statement.where(CertificateTemplate.archived_at.is_(None))
+        statement = statement.order_by(
+            func.coalesce(TemplateVersion.is_active, 0).desc(),
+            CertificateTemplate.archived_at.is_not(None),
+            func.lower(CertificateTemplate.name),
+            CertificateTemplate.id,
+        )
+        return [_to_dict(row) for row in self.session.execute(statement).mappings().all()]
 
 
 class AuditLogRepository:

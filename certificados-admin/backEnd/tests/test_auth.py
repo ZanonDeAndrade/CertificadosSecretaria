@@ -303,12 +303,12 @@ def test_role_authorization_denies_auditor_mutation(client):
     auditor = _new_client(client)
     _login(auditor, "auditor", "audit-password")
     response = auditor.post(
-        "/templates/versions",
+        "/templates",
         json={"name": "forbidden", "layout": {}},
     )
     assert response.status_code == 403
-    assert auditor.patch("/templates/versions/1", json={"name": "Negado"}).status_code == 403
-    assert auditor.delete("/templates/versions/1").status_code == 403
+    assert auditor.put("/templates/1", json={"name": "Negado"}).status_code == 403
+    assert auditor.delete("/templates/1").status_code == 403
 
 
 def test_cookie_mutations_require_allowed_origin_or_referer(client):

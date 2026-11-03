@@ -10,13 +10,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from database.models import TemplateVersion, TemplateVersionSequence
-from database.repositories import TemplateVersionRepository
+from database.repositories import CertificateTemplateRepository, TemplateVersionRepository
 
 pytestmark = pytest.mark.postgres
 
 
-def _create(repo: TemplateVersionRepository, name: str) -> dict:
+def _create(repo: TemplateVersionRepository, template_id: int, name: str) -> dict:
     return repo.create(
+        template_id=template_id,
         name=name,
         layout_json='{"elements":[]}',
         image_width=3508,
@@ -26,16 +27,23 @@ def _create(repo: TemplateVersionRepository, name: str) -> dict:
     )
 
 
+def _model(session, name: str) -> int:  # noqa: ANN001 - SQLAlchemy Session
+    return CertificateTemplateRepository(session).create(
+        name=name, certificate_type=None, course_id=None, created_by=None
+    )
+
+
 def test_concurrent_creates_receive_distinct_monotonic_versions(postgres_engine):
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False, future=True)
     with factory.begin() as session:
         session.add(TemplateVersionSequence(id=1, next_number=1))
+        template_id = _model(session, "Concorrente")
     barrier = Barrier(8)
 
     def create(index: int) -> int:
         with factory.begin() as session:
             barrier.wait(timeout=10)
-            result = _create(TemplateVersionRepository(session), f"v{index}")
+            result = _create(TemplateVersionRepository(session), template_id, f"v{index}")
             return int(result["version_number"])
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -48,8 +56,8 @@ def test_concurrent_activation_leaves_exactly_one_active(postgres_engine):
     with factory.begin() as session:
         session.add(TemplateVersionSequence(id=1, next_number=1))
         repo = TemplateVersionRepository(session)
-        first = _create(repo, "primeiro")
-        second = _create(repo, "segundo")
+        first = _create(repo, _model(session, "Primeiro"), "primeiro")
+        second = _create(repo, _model(session, "Segundo"), "segundo")
         assert repo.activate(int(first["id"]))
 
     barrier = Barrier(2)

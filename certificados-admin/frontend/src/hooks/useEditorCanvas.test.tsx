@@ -137,6 +137,13 @@ vi.mock("fabric", () => {
     getHeight() {
       return this.height;
     }
+    zoom = 1;
+    setZoom(value: number) {
+      this.zoom = value;
+    }
+    getZoom() {
+      return this.zoom;
+    }
   }
 
   return { Canvas, FabricImage, FabricObject, IText, Textbox, Control };
@@ -156,6 +163,7 @@ type MockCanvas = {
   backgroundImage?: fabric.FabricImage;
   width: number;
   height: number;
+  zoom: number;
   requestRenderAll: ReturnType<typeof vi.fn>;
 };
 
@@ -180,6 +188,22 @@ function Harness() {
       >
         fundo
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          editor.setBackground("data:image/png;base64,b3V0cm8=", 1200, 800)
+        }
+      >
+        arte igual
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          editor.setBackground("data:image/png;base64,bWFpb3I=", 2400, 1600)
+        }
+      >
+        arte maior
+      </button>
       <button type="button" onClick={() => editor.addTextElement("name")}>
         texto
       </button>
@@ -198,6 +222,7 @@ function Harness() {
       </button>
       <output data-testid="background">{editor.backgroundUrl ?? "sem fundo"}</output>
       <output data-testid="elements">{editor.elements.length}</output>
+      <output data-testid="selected">{editor.selectedId ?? "nenhum"}</output>
       <output data-testid="error">{editor.canvasError ?? "sem erro"}</output>
       <output data-testid="source">{editor.layoutSource}</output>
     </>
@@ -602,16 +627,117 @@ test("dados de exemplo do servidor substituem o texto da prévia e são remedido
   );
 });
 
-test("as alças mantêm o tamanho na tela quando o zoom muda", async () => {
+test("a página inteira cabe na área: o canvas toma o tamanho da área e o zoom do Fabric faz a escala", async () => {
+  render(<Harness />);
+  loadLayout();
+  await waitFor(() => expect(screen.getByTestId("elements").textContent).toBe("4"));
+  const canvas = canvasInstance();
+  // Scene: 1200 × 800 art shown at 900 × 600 (scale 0,75).
+  expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 900, height: 600 });
+  const before = latest!.elements.map((element) => ({ x: element.x, y: element.y }));
+  const text = canvas.objects.find((candidate) => candidate.data?.elementId === "boxed")!;
+  const left = text.left;
+
+  // Area of 616 × 416 minus the 8 px margin on each side: 600 × 400 useful.
+  act(() => {
+    latest!.fitToArea({ width: 616, height: 416 });
+  });
+  expect({ width: canvas.width, height: canvas.height }).toEqual({ width: 600, height: 400 });
+  expect(canvas.zoom).toBeCloseTo(600 / 900, 6);
+  // Screen px per art px = zoom × scene scale.
+  expect(latest!.displayScale).toBeCloseTo(0.5, 6);
+  // Objects keep their scene coordinates, so nothing moves in the layout.
+  expect(text.left).toBe(left);
+  expect(latest!.elements.map((element) => ({ x: element.x, y: element.y }))).toEqual(before);
+
+  // A large area: more than 100% of the scene, still whole.
+  act(() => {
+    latest!.fitToArea({ width: 1936, height: 1096 });
+  });
+  expect(canvas.width).toBe(1620);
+  expect(canvas.height).toBe(1080);
+  expect(canvas.zoom).toBeCloseTo(1.8, 6);
+});
+
+test("as alças ficam com o mesmo tamanho na tela em qualquer escala", async () => {
+  render(<Harness />);
+  loadLayout();
+  await waitFor(() => expect(screen.getByTestId("elements").textContent).toBe("4"));
+  const canvas = canvasInstance();
+  const text = canvas.objects.find((candidate) => candidate.data?.elementId === "boxed")!;
+  expect(text.cornerSize).toBe(10);
+
+  act(() => {
+    latest!.fitToArea({ width: 466, height: 316 });
+  });
+  // Fabric draws the controls in screen pixels, outside the viewport zoom.
+  expect(text.cornerSize).toBe(10);
+  expect(canvas.zoom).toBeCloseTo(0.5, 6);
+});
+
+test("mudar a área não pede novas quebras de linha ao servidor", async () => {
+  render(<Harness />);
+  loadLayout();
+  await waitFor(() => expect(screen.getByTestId("elements").textContent).toBe("4"));
+  await waitFor(() => expect(vi.mocked(computeTextLayouts)).toHaveBeenCalled());
+  const calls = vi.mocked(computeTextLayouts).mock.calls.length;
+
+  act(() => {
+    latest!.fitToArea({ width: 700, height: 500 });
+    latest!.fitToArea({ width: 1400, height: 900 });
+  });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(vi.mocked(computeTextLayouts).mock.calls.length).toBe(calls);
+});
+
+test("trocar a arte mantém cada elemento nas mesmas coordenadas da arte", async () => {
   render(<Harness />);
   loadLayout();
   await waitFor(() => expect(screen.getByTestId("elements").textContent).toBe("4"));
 
   act(() => {
-    latest!.setZoom(2);
+    latest!.updateElement("boxed", { x: 150, y: 350, width: 500, height: 120 });
+    latest!.updateElement("legacy", { x: 640, y: 90 });
+    latest!.selectElement("boxed");
   });
-
+  const before = latest!.getLayout();
+  expect(before.elements.find((element) => element.id === "boxed")).toMatchObject({
+    x: 150,
+    y: 350,
+    width: 500,
+    height: 120,
+  });
   const canvas = canvasInstance();
-  const text = canvas.objects.find((candidate) => candidate.data?.elementId === "boxed")!;
-  expect(text.cornerSize).toBe(5);
+  const boxedObject = () => canvas.objects.find((candidate) => candidate.data?.elementId === "boxed")!;
+  const original = boxedObject();
+
+  // Same size: only the art changes; the selection survives.
+  fireEvent.click(screen.getByRole("button", { name: "arte igual" }));
+  await waitFor(() => expect(boxedObject()).not.toBe(original));
+  expect(screen.getByTestId("background").textContent).toContain("b3V0cm8=");
+  const sameSize = latest!.getLayout();
+  expect(sameSize.elements).toEqual(before.elements);
+  expect(sameSize.image_width).toBe(1200);
+  expect(screen.getByTestId("selected").textContent).toBe("boxed");
+
+  // Another size: the same coordinates in art px, objects rebuilt at the new
+  // scale, and the state the panels read agrees with the canvas.
+  const rebuiltOnce = boxedObject();
+  fireEvent.click(screen.getByRole("button", { name: "arte maior" }));
+  await waitFor(() => expect(boxedObject()).not.toBe(rebuiltOnce));
+  const larger = latest!.getLayout();
+  expect(larger.elements).toEqual(before.elements);
+  expect({ width: larger.image_width, height: larger.image_height }).toEqual({
+    width: 2400,
+    height: 1600,
+  });
+  expect(latest!.elements.find((element) => element.id === "boxed")).toMatchObject({
+    x: 150,
+    y: 350,
+    width: 500,
+    height: 120,
+  });
+  expect(screen.getByTestId("selected").textContent).toBe("boxed");
+  expect(boxedObject().left).toBeCloseTo(150 * (900 / 2400), 6);
+  expect(canvas.objects).toHaveLength(4);
 });

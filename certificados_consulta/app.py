@@ -3,8 +3,12 @@ os seus certificados.
 
 Sem login, sem autenticação. Três formas de busca:
   - por nome (parcial, case-insensitive)
-  - por Registro Acadêmico (RA) exato, comparado somente por HMAC
+  - por e-mail exato, comparado somente por HMAC (titular ou qualquer autor)
   - por código único (ex: CERT-2026-AB1234)
+
+O download após uma busca exige confirmar o e-mail cadastrado na emissão; o
+Registro Acadêmico (RA) só confirma certificados emitidos antes de o e-mail
+ser registrado. Nem o e-mail nem o RA aparecem em página, resposta ou log.
 
 Lê o mesmo PostgreSQL configurado para o painel administrativo e entrega os
 PDFs pelo backend a partir do storage privado configurado.
@@ -32,10 +36,14 @@ import observability
 from database import db
 from database.certificate_types import certificate_type_label, is_per_work_type
 from database.privacy import (
+    MAX_EMAIL_LENGTH,
     active_document_key_id,
     document_hash,
-    document_hash_candidates,
+    email_hash,
+    email_hash_candidates,
+    is_valid_email,
     matching_document_key_id,
+    matching_email_key_id,
     normalize_document,
     normalize_name,
     pseudonymous_rate_limit_key,
@@ -89,6 +97,10 @@ def _valid_academic_record(value: str) -> bool:
     return len(value) <= PUBLIC_DOCUMENT_MAX_LENGTH and len(normalized) >= 3
 
 
+def _valid_email(value: str) -> bool:
+    return len(value) <= MAX_EMAIL_LENGTH and is_valid_email(value)
+
+
 class PublicNameSearchRequest(BaseModel):
     nome: str = Field(min_length=1, max_length=PUBLIC_NAME_MAX_LENGTH)
     page: int = Field(default=1, ge=1, le=PUBLIC_MAX_PAGE)
@@ -99,15 +111,15 @@ class PublicNameSearchRequest(BaseModel):
         return value.strip()
 
 
-class PublicAcademicRecordSearchRequest(BaseModel):
-    registro_academico: str = Field(min_length=1, max_length=PUBLIC_DOCUMENT_MAX_LENGTH)
+class PublicEmailSearchRequest(BaseModel):
+    email: str = Field(min_length=1, max_length=MAX_EMAIL_LENGTH)
 
-    @field_validator("registro_academico")
+    @field_validator("email")
     @classmethod
-    def strip_academic_record(cls, value: str) -> str:
+    def strip_email(cls, value: str) -> str:
         value = value.strip()
-        if not _valid_academic_record(value):
-            raise ValueError("Registro Acadêmico (RA) inválido.")
+        if not _valid_email(value):
+            raise ValueError("E-mail inválido.")
         return value
 
 
@@ -467,14 +479,14 @@ def _name_search(term: str, page: int) -> dict:
     }
 
 
-def _academic_record_search(academic_record: str) -> dict:
-    if not _valid_academic_record(academic_record):
-        raise HTTPException(400, "Informe um Registro Acadêmico (RA) válido.")
-    # RA is both a lookup identifier and a download confirmation factor.  Use
-    # the stricter confirmation throttle and persist only its pseudonymous key.
-    rate_limit_identity("search-document", academic_record, confirmation=True)
-    items = db.list_certificates_by_document_hashes(
-        document_hash_candidates(academic_record),
+def _email_search(email: str) -> dict:
+    if not _valid_email(email):
+        raise HTTPException(400, "Informe um e-mail válido.")
+    # The e-mail is both a lookup identifier and a download confirmation
+    # factor: the stricter confirmation throttle applies, keyed by a pseudonym.
+    rate_limit_identity("search-email", email, confirmation=True)
+    items = db.list_certificates_by_email_hashes(
+        email_hash_candidates(email),
         statuses=("ativo", "revogado"),
     )
     return {
@@ -516,19 +528,20 @@ async def index(request: Request, codigo: str | None = None) -> HTMLResponse:
 
 @app.post("/", response_class=HTMLResponse)
 async def search_page(request: Request) -> HTMLResponse:
-    """HTML name/RA search. Sensitive terms remain POST-only and no-store."""
+    """HTML name/e-mail search. Sensitive terms remain POST-only and no-store."""
 
     search_type = "nome"
     try:
         rate_limit(request)
         form = await request.form()
         term = str(form.get("nome") or "").strip()
-        academic_record = str(form.get("registro_academico") or "").strip()
-        if bool(term) == bool(academic_record):
-            raise HTTPException(400, "Informe o nome ou o Registro Acadêmico (RA).")
-        if academic_record:
-            search_type = "ra"
-            result = _academic_record_search(academic_record)
+        email = str(form.get("email") or "").strip()
+        if bool(term) == bool(email):
+            raise HTTPException(400, "Informe o nome ou o e-mail.")
+        if email:
+            # The e-mail is never echoed back, not even as the query shown.
+            search_type = "email"
+            result = _email_search(email)
             term = ""
         else:
             search_type = "nome"
@@ -651,14 +664,14 @@ async def public_search(
     return _name_search(payload.nome, payload.page)
 
 
-@app.post("/public/search/academic-record")
-async def public_academic_record_search(
-    payload: PublicAcademicRecordSearchRequest,
+@app.post("/public/search/email")
+async def public_email_search(
+    payload: PublicEmailSearchRequest,
     _: None = Depends(rate_limit),
 ) -> dict:
-    """Return all public certificates linked to an exact RA, without exposing it."""
+    """Every public certificate of an exact e-mail (holder or author), never exposing it."""
 
-    return _academic_record_search(payload.registro_academico)
+    return _email_search(payload.email)
 
 
 @app.get("/public/certificates/{code}/download")
@@ -671,41 +684,60 @@ async def public_download(code: str, _: None = Depends(rate_limit)) -> Streaming
 async def public_download_by_name(
     request: Request, _: None = Depends(rate_limit)
 ) -> StreamingResponse:
-    """Download after independent Registro Acadêmico (RA) confirmation.
+    """Download after an independent confirmation of the person's identity.
 
-    ``result_ref`` only selects one row from a name-search result.  It is not an
-    authorization capability: the stored, versioned document HMAC must also
-    match in constant time.  The removed ``challenge`` field is deliberately
-    ignored, so replaying a legacy response cannot authorize a download.
+    After a name search the person confirms the e-mail recorded at emission;
+    a certificate issued before e-mails were recorded accepts its Registro
+    Acadêmico (RA) instead. After an e-mail search the e-mail is typed again
+    and the full name, as printed, is the second factor. ``result_ref`` only
+    selects one row of the search result: it is not an authorization
+    capability, the stored, versioned HMAC must also match in constant time.
+    The removed ``challenge`` field is deliberately ignored, so replaying a
+    legacy response cannot authorize a download.
     """
 
     form = await request.form()
     name = str(form.get("nome") or "").strip()
-    # ``documento`` remains input-only compatibility for pages deployed before
-    # this RA terminology change. New clients use ``registro_academico``.
-    academic_record = str(form.get("registro_academico") or form.get("documento") or "").strip()
-    search_type = "ra" if str(form.get("search_type") or "").strip() == "ra" else "nome"
+    # One field confirms: an e-mail, or the RA of a certificate without one.
+    # ``registro_academico``/``documento`` stay accepted for pages already open.
+    confirmation = str(
+        form.get("confirmacao")
+        or form.get("email")
+        or form.get("registro_academico")
+        or form.get("documento")
+        or ""
+    ).strip()
+    email = confirmation if _valid_email(confirmation) else ""
+    academic_record = "" if email else confirmation
+    search_type = "email" if str(form.get("search_type") or "").strip() == "email" else "nome"
     result_ref = str(form.get("result_ref") or "").strip()
     raw_page = str(form.get("page") or "1")
     selected = None
-    matched_key_id = None
+    proof: _Proof | None = None
     try:
         selected_page = int(raw_page) if len(raw_page) <= 6 else 0
     except ValueError:
         selected_page = 0
     input_is_bounded = (
-        _valid_academic_record(academic_record)
-        and len(result_ref) == PUBLIC_RESULT_REFERENCE_LENGTH
+        len(result_ref) == PUBLIC_RESULT_REFERENCE_LENGTH
+        and _valid_name_term(name)
         and (
-            search_type == "ra"
-            or (_valid_name_term(name) and 1 <= selected_page <= PUBLIC_MAX_PAGE)
+            (search_type == "email" and bool(email))
+            or (
+                search_type == "nome"
+                and (bool(email) or _valid_academic_record(academic_record))
+                and 1 <= selected_page <= PUBLIC_MAX_PAGE
+            )
         )
     )
     if input_is_bounded:
-        rate_limit_identity("confirm-document", academic_record, confirmation=True)
-        if search_type == "ra":
-            candidates = db.list_certificates_by_document_hashes(
-                document_hash_candidates(academic_record),
+        if email:
+            rate_limit_identity("confirm-email", email, confirmation=True)
+        else:
+            rate_limit_identity("confirm-document", academic_record, confirmation=True)
+        if search_type == "email":
+            candidates = db.list_certificates_by_email_hashes(
+                email_hash_candidates(email),
                 statuses=("ativo",),
             )
         else:
@@ -717,40 +749,119 @@ async def public_download_by_name(
                 offset=(selected_page - 1) * PUBLIC_PAGE_SIZE,
                 order_by="issue_date",
             )
-        # Do not return early: every candidate gets the same two digest checks.
+        # Do not return early: every candidate gets the same digest checks.
         for cert in candidates:
             reference_matches = hmac.compare_digest(
                 public_result_reference(cert["unique_code"]), result_ref
             )
-            candidate_key_id = matching_document_key_id(
-                cert.get("participant_document_hash"),
-                academic_record,
-                key_id=cert.get("participant_document_hash_key_id"),
+            candidate = _confirmation_proof(
+                cert,
+                email=email,
+                academic_record=academic_record,
+                name=name if search_type == "email" else "",
             )
-            if reference_matches and candidate_key_id and selected is None:
+            if reference_matches and candidate is not None and selected is None:
                 selected = cert
-                matched_key_id = candidate_key_id
-    if selected is None:
+                proof = candidate
+    if selected is None or proof is None:
         raise HTTPException(
             404,
-            "Não foi possível confirmar o Registro Acadêmico (RA). "
-            "Verifique o valor ou procure a secretaria.",
+            "Não foi possível confirmar o e-mail cadastrado (ou o RA, em certificados "
+            "antigos). Verifique os dados ou procure a secretaria.",
         )
 
+    _rotate_confirmation_hash(selected, proof, email=email, academic_record=academic_record)
+    return _stream_public_certificate(selected["unique_code"])
+
+
+class _Proof:
+    """Which stored hash confirmed the person, and under which key version."""
+
+    __slots__ = ("kind", "row_id", "expected_hash", "key_id")
+
+    def __init__(self, kind: str, row_id: int | None, expected_hash: str, key_id: str) -> None:
+        self.kind = kind
+        self.row_id = row_id
+        self.expected_hash = expected_hash
+        self.key_id = key_id
+
+
+def _name_matches(cert: dict, name: str) -> bool:
+    """The full name as printed: the holder's or, on a per-work certificate, any author's."""
+    wanted = normalize_name(name)
+    if not wanted:
+        return False
+    printed = [str(cert.get("participant_name_normalized") or "")]
+    printed.extend(normalize_name(author) for author in authors_from_json(cert.get("authors_json")))
+    matched = False
+    for candidate in printed:
+        if hmac.compare_digest(candidate.encode("utf-8"), wanted.encode("utf-8")):
+            matched = True
+    return matched
+
+
+def _confirmation_proof(
+    cert: dict, *, email: str, academic_record: str, name: str
+) -> _Proof | None:
+    """Constant-time check of the confirmation against the certificate's hashes.
+
+    An e-mail is checked against every e-mail hash of the certificate (any
+    author). The academic record is accepted only when the certificate has no
+    e-mail hash at all, that is, it was issued before e-mails were recorded.
+    When a name is given it must match too.
+    """
+    email_rows = db.certificate_email_hashes(int(cert["id"]))
+    proof: _Proof | None = None
+    if email:
+        for row in email_rows:
+            key_id = matching_email_key_id(
+                row.get("email_hash"), email, key_id=row.get("hash_key_id")
+            )
+            if key_id and proof is None:
+                proof = _Proof("email", int(row["id"]), str(row["email_hash"]), key_id)
+    elif academic_record and not email_rows:
+        key_id = matching_document_key_id(
+            cert.get("participant_document_hash"),
+            academic_record,
+            key_id=cert.get("participant_document_hash_key_id"),
+        )
+        if key_id:
+            proof = _Proof(
+                "document", None, str(cert.get("participant_document_hash") or ""), key_id
+            )
+    if proof is not None and name and not _name_matches(cert, name):
+        return None
+    return proof
+
+
+def _rotate_confirmation_hash(
+    cert: dict, proof: _Proof, *, email: str, academic_record: str
+) -> None:
+    """Move the hash that just confirmed to the active key, as the RA always did."""
     active_key_id = active_document_key_id()
-    if matched_key_id != active_key_id:
-        rotated_hash = document_hash(academic_record, key_id=active_key_id)
-        if rotated_hash:
-            try:
-                db.rotate_certificate_document_hash(
-                    selected["unique_code"],
-                    expected_hash=selected["participant_document_hash"],
-                    new_hash=rotated_hash,
+    if proof.key_id == active_key_id:
+        return
+    try:
+        if proof.kind == "email" and proof.row_id is not None:
+            rotated = email_hash(email, key_id=active_key_id)
+            if rotated:
+                db.rotate_certificate_email_hash(
+                    proof.row_id,
+                    expected_hash=proof.expected_hash,
+                    new_hash=rotated,
                     new_key_id=active_key_id,
                 )
-            except Exception:  # pragma: no cover - download remains available
-                LOGGER.warning("Falha ao atualizar versão do HMAC de RA")
-    return _stream_public_certificate(selected["unique_code"])
+        elif proof.kind == "document":
+            rotated = document_hash(academic_record, key_id=active_key_id)
+            if rotated:
+                db.rotate_certificate_document_hash(
+                    cert["unique_code"],
+                    expected_hash=proof.expected_hash,
+                    new_hash=rotated,
+                    new_key_id=active_key_id,
+                )
+    except Exception:  # pragma: no cover - download remains available
+        LOGGER.warning("Falha ao atualizar versão do HMAC de confirmação")
 
 
 @app.get("/certificado/{unique_code}/download")

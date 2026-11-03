@@ -203,11 +203,67 @@ const PNG_1PX = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64",
 );
-const TEMPLATE_VERSIONS = [
-  { id: 4, version_number: 4, name: "Modelo 2026", is_active: true, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/4/background", created_at: "2026-05-02T10:00:00Z", activated_at: "2026-05-02T10:30:00Z" },
-  { id: 3, version_number: 3, name: "Ajuste de assinatura", is_active: false, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/3/background", created_at: "2026-03-18T10:00:00Z", activated_at: null },
-  { id: 2, version_number: 2, name: "Modelo 2025", is_active: false, certificate_type: null, image_width: 3508, image_height: 2480, background_url: "/templates/versions/2/background", created_at: "2025-08-01T10:00:00Z", activated_at: null },
+/* Certificate models: one item per model, revisions behind it. The in-memory
+ * state is mutated by the write routes so a flow can edit, duplicate, delete,
+ * archive and restore within one run; each run of the mock starts fresh. */
+const REGISTERED_COURSES = [
+  { id: 1, name: "Administração", is_active: true },
+  { id: 2, name: "Contabilidade", is_active: true },
+  { id: 3, name: "Direito", is_active: true },
+  { id: 4, name: "Gastronomia", is_active: true },
+  { id: 5, name: "Hotelaria", is_active: true },
+  { id: 6, name: "Ontopsicologia", is_active: true },
+  { id: 7, name: "Pedagogia", is_active: true },
+  { id: 8, name: "Sistemas de Informação", is_active: true },
 ];
+function version(id, templateId, name, extra = {}) {
+  return {
+    id, template_id: templateId, version_number: id, name, is_active: false, certificate_type: null,
+    image_width: 3508, image_height: 2480, background_url: `/templates/versions/${id}/background`,
+    created_at: `2026-0${Math.min(9, 1 + (id % 9))}-10T10:00:00Z`, activated_at: null, is_current: false, ...extra,
+  };
+}
+let HISTORY;
+let TEMPLATES;
+let NEXT_TEMPLATE_ID;
+let NEXT_VERSION_ID;
+function model(id, name, extra = {}) {
+  const current = HISTORY[id]?.[0];
+  return {
+    id, name, certificate_type: null, certificate_type_label: null, course_id: null, course_name: null,
+    is_active: false, is_archived: false, archived_at: null, revision: 1,
+    current_version_id: current?.id ?? null, version_number: current?.version_number ?? null,
+    image_width: 3508, image_height: 2480, background_url: current ? current.background_url : null,
+    certificate_count: 0, reference_count: 0, ever_activated: false, type_locked: false, edits_in_place: true,
+    created_at: "2026-05-02T10:00:00Z", updated_at: "2026-05-02T10:30:00Z", activated_at: null, ...extra,
+  };
+}
+/* The mock serves the whole Playwright run and the write routes mutate this
+ * state; a spec that writes calls POST /__mock/reset first. */
+function resetModels() {
+  HISTORY = {
+    1: [version(4, 1, "Modelo 2026", { is_active: true, is_current: true, activated_at: "2026-05-02T10:30:00Z" }), version(3, 1, "Ajuste de assinatura")],
+    2: [version(10, 2, "Certificado_OPL", { is_current: true })],
+    3: [version(7, 3, "Mostra", { is_active: true, is_current: true, certificate_type: "scientific_initiation", activated_at: "2026-10-26T21:32:00Z" }), version(6, 3, "Cópia de v5", { certificate_type: "scientific_initiation" })],
+    4: [version(2, 4, "Modelo 2025", { is_current: true })],
+    5: [version(8, 5, "Ouvinte 2024", { is_current: true, certificate_type: "listener" })],
+  };
+  TEMPLATES = [
+    model(1, "Modelo 2026", { is_active: true, revision: 3, certificate_count: 128, reference_count: 131, ever_activated: true, type_locked: true, edits_in_place: false, activated_at: "2026-05-02T10:30:00Z" }),
+    model(2, "Certificado_OPL", { course_id: 3, course_name: "Direito", created_at: "2026-10-29T10:00:00Z", updated_at: "2026-10-29T10:00:00Z" }),
+    model(3, "Modelo Mostra de Iniciação Científica", { certificate_type: "scientific_initiation", certificate_type_label: "Mostra de Iniciação Científica", is_active: true, revision: 2, certificate_count: 1, reference_count: 1, ever_activated: true, type_locked: true, edits_in_place: false, activated_at: "2026-10-26T21:32:00Z" }),
+    model(4, "Modelo 2025", { is_archived: true, archived_at: "2026-06-01T10:00:00Z", certificate_count: 40, reference_count: 40, ever_activated: true, type_locked: true, edits_in_place: false }),
+    model(5, "Ouvinte 2024", { certificate_type: "listener", certificate_type_label: "Ouvinte", certificate_count: 12, reference_count: 12, ever_activated: true, type_locked: true, edits_in_place: false }),
+  ];
+  NEXT_TEMPLATE_ID = 6;
+  NEXT_VERSION_ID = 11;
+}
+resetModels();
+const TYPE_LABELS = {
+  listener: "Ouvinte", speaker: "Palestrante", organizing_committee: "Comissão Organizadora", teams: "Equipes",
+  monitoring: "Monitoria", tcc_board_professor: "Professores participantes de Banca de TCC", scientific_initiation: "Mostra de Iniciação Científica",
+};
+const allVersions = () => Object.values(HISTORY).flat();
 
 const BATCHES = new Map();
 const BATCH_KEYS = new Map();
@@ -408,6 +464,10 @@ const server = createServer(async (req, res) => {
   if (path === "/auth/logout" || path === "/auth/sessions/revoke-all") {
     return send(res, 200, { ok: true, revoked: 2 });
   }
+  if (path === "/__mock/reset" && req.method === "POST") {
+    resetModels();
+    return send(res, 200, { ok: true });
+  }
 
   if (scenario === "error") return send(res, 500, { detail: "Erro interno simulado." });
   if (scenario === "forbidden") {
@@ -534,7 +594,7 @@ const server = createServer(async (req, res) => {
     if (/name="certificate_type"\r\n\r\nscientific_initiation/.test(form)) {
       return send(res, 200, workPreview(
         scenario === "mostra-sem-template"
-          ? "Não há template ativo do tipo Mostra de Iniciação Científica. Este tipo não usa o template genérico, porque o certificado vale para todos os autores e não destaca nenhum nome. Em Template, use “Editar (nova versão)”, escolha o tipo Mostra de Iniciação Científica (o editor monta o ponto de partida sem o nome e com o bloco Autores), ajuste, salve e ative a versão."
+          ? "Não há template ativo do tipo Mostra de Iniciação Científica. Este tipo não usa o template genérico, porque o certificado vale para todos os autores e não destaca nenhum nome. Em Template, use “Novo modelo”, escolha o tipo Mostra de Iniciação Científica em “Dados do modelo” (o editor monta o ponto de partida sem o nome e com o bloco Autores), ajuste, salve e ative o modelo."
           : null,
       ));
     }
@@ -682,11 +742,9 @@ const server = createServer(async (req, res) => {
     // fall back to its local approximation by answering with no items.
     return send(res, 200, { items: [] });
   }
-  if (path === "/templates/versions" && req.method === "GET") {
-    return send(res, 200, empty ? [] : TEMPLATE_VERSIONS);
-  }
   if (path === "/templates/active") {
-    return empty ? send(res, 404, { detail: "Nenhuma versão ativa." }) : send(res, 200, TEMPLATE_VERSIONS[0]);
+    const active = allVersions().find((entry) => entry.is_active && !entry.certificate_type);
+    return empty || !active ? send(res, 404, { detail: "Nenhum template ativo." }) : send(res, 200, active);
   }
   if (/^\/templates\/versions\/\d+\/background$/.test(path)) {
     res.writeHead(200, { "content-type": "image/png", "access-control-allow-origin": req.headers.origin ?? "*", "cache-control": "no-store" });
@@ -694,8 +752,127 @@ const server = createServer(async (req, res) => {
   }
   if (/^\/templates\/versions\/\d+$/.test(path)) {
     const id = Number(path.split("/").pop());
-    const version = TEMPLATE_VERSIONS.find((entry) => entry.id === id);
+    const version = Object.values(HISTORY).flat().find((entry) => entry.id === id);
+    if (!version) return send(res, 404, { detail: "Versão não encontrada." });
     return send(res, 200, { ...version, layout: defaultLayout(id) });
+  }
+
+  // ── Certificate models ────────────────────────────────────────────────────
+  const withLayout = (template) => ({ ...template, layout: defaultLayout(template.current_version_id) });
+  if (path === "/templates" && req.method === "GET") {
+    if (empty) return send(res, 200, []);
+    let list = TEMPLATES.filter((template) => url.searchParams.get("include_archived") === "true" || !template.is_archived);
+    if (scenario === "mostra-sem-template") list = list.filter((template) => template.certificate_type !== "scientific_initiation");
+    const courseId = url.searchParams.get("course_id");
+    if (courseId) list = list.filter((template) => template.course_id === Number(courseId));
+    else if (url.searchParams.get("without_course") === "true") list = list.filter((template) => template.course_id === null);
+    const type = url.searchParams.get("certificate_type");
+    if (type === "__generic__") list = list.filter((template) => template.certificate_type === null);
+    else if (type) list = list.filter((template) => template.certificate_type === type);
+    return send(res, 200, [...list].sort((a, b) => Number(b.is_active) - Number(a.is_active) || Number(a.is_archived) - Number(b.is_archived) || a.name.localeCompare(b.name)));
+  }
+  if (path === "/templates" && req.method === "POST") {
+    if (!PERMISSIONS[current.role]?.includes("templates.manage")) return send(res, 403, { detail: "Seu perfil não permite esta ação." });
+    const body = JSON.parse((await readText(req)) || "{}");
+    const course = REGISTERED_COURSES.find((entry) => entry.id === body.course_id) ?? null;
+    const id = NEXT_TEMPLATE_ID++;
+    HISTORY[id] = [version(NEXT_VERSION_ID++, id, body.name || "Novo modelo", { is_current: true, certificate_type: body.certificate_type ?? null })];
+    const created = model(id, body.name || "Novo modelo", {
+      certificate_type: body.certificate_type ?? null, certificate_type_label: TYPE_LABELS[body.certificate_type] ?? null,
+      course_id: course?.id ?? null, course_name: course?.name ?? null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    });
+    TEMPLATES.push(created);
+    return send(res, 200, withLayout(created));
+  }
+  const templateAction = path.match(/^\/templates\/(\d+)(?:\/(history|duplicate|activate|restore))?$/);
+  if (templateAction) {
+    const template = TEMPLATES.find((entry) => entry.id === Number(templateAction[1]));
+    if (!template) return send(res, 404, { detail: "Modelo não encontrado." });
+    const action = templateAction[2];
+    if (req.method === "GET" && action === "history") return send(res, 200, HISTORY[template.id] ?? []);
+    if (req.method === "GET" && !action) return send(res, 200, withLayout(template));
+    if (!PERMISSIONS[current.role]?.includes("templates.manage")) return send(res, 403, { detail: "Seu perfil não permite esta ação." });
+    if (req.method === "PUT" && !action) {
+      const body = JSON.parse((await readText(req)) || "{}");
+      if (template.is_archived) return send(res, 409, { detail: "Este modelo está arquivado. Restaure-o antes de editar." });
+      if (body.revision != null && body.revision !== template.revision) return send(res, 409, { detail: "Este modelo foi alterado por outra pessoa desde que você o abriu." });
+      let outcome = "unchanged";
+      if (body.layout) {
+        if (template.is_active && !body.apply) return send(res, 409, { detail: "Este modelo está ativo: confirme com “Salvar e aplicar às próximas emissões”." });
+        const frozen = template.reference_count > 0 || template.ever_activated;
+        if (frozen) {
+          const previous = HISTORY[template.id][0];
+          previous.is_current = false; previous.is_active = false;
+          const next = version(NEXT_VERSION_ID++, template.id, body.name ?? template.name, { is_current: true, is_active: template.is_active, certificate_type: template.certificate_type });
+          HISTORY[template.id].unshift(next);
+          template.current_version_id = next.id; template.version_number = next.version_number; template.background_url = next.background_url;
+          outcome = template.is_active ? "applied" : "revised";
+        } else {
+          outcome = "updated";
+        }
+      }
+      if (body.name) template.name = body.name;
+      if ("certificate_type" in body && !template.type_locked) {
+        template.certificate_type = body.certificate_type ?? null;
+        template.certificate_type_label = TYPE_LABELS[body.certificate_type] ?? null;
+      }
+      if ("course_id" in body) {
+        const course = REGISTERED_COURSES.find((entry) => entry.id === body.course_id) ?? null;
+        template.course_id = course?.id ?? null; template.course_name = course?.name ?? null;
+      }
+      template.revision += 1; template.updated_at = new Date().toISOString();
+      return send(res, 200, { ...withLayout(template), outcome });
+    }
+    if (req.method === "POST" && action === "duplicate") {
+      const body = JSON.parse((await readText(req)) || "{}");
+      const id = NEXT_TEMPLATE_ID++;
+      const name = body.name || `Cópia de ${template.name}`;
+      HISTORY[id] = [version(NEXT_VERSION_ID++, id, name, { is_current: true, certificate_type: template.certificate_type })];
+      const copy = model(id, name, { certificate_type: template.certificate_type, certificate_type_label: template.certificate_type_label, course_id: template.course_id, course_name: template.course_name, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+      TEMPLATES.push(copy);
+      return send(res, 200, withLayout(copy));
+    }
+    if (req.method === "POST" && action === "activate") {
+      if (template.is_archived) return send(res, 409, { detail: "Um modelo arquivado não pode ser ativado." });
+      for (const other of TEMPLATES) {
+        if (other.certificate_type === template.certificate_type && other.is_active) { other.is_active = false; HISTORY[other.id][0].is_active = false; }
+      }
+      template.is_active = true; template.ever_activated = true; template.type_locked = true; template.edits_in_place = false; template.activated_at = new Date().toISOString();
+      HISTORY[template.id][0].is_active = true;
+      return send(res, 200, withLayout(template));
+    }
+    if (req.method === "POST" && action === "restore") {
+      template.is_archived = false; template.archived_at = null;
+      return send(res, 200, withLayout(template));
+    }
+    if (req.method === "DELETE" && !action) {
+      if (template.is_active) return send(res, 409, { detail: "O modelo ativo não pode ser excluído nem arquivado. Ative outro modelo primeiro." });
+      if (template.reference_count > 0) {
+        template.is_archived = true; template.archived_at = new Date().toISOString();
+        return send(res, 200, { outcome: "archived", template_id: template.id });
+      }
+      TEMPLATES = TEMPLATES.filter((entry) => entry.id !== template.id);
+      delete HISTORY[template.id];
+      return send(res, 200, { outcome: "deleted", template_id: template.id });
+    }
+  }
+  if (path === "/courses" && req.method === "GET") {
+    return send(res, 200, url.searchParams.get("include_inactive") === "false" ? REGISTERED_COURSES.filter((course) => course.is_active) : REGISTERED_COURSES);
+  }
+  if (path === "/courses" && req.method === "POST") {
+    const body = JSON.parse((await readText(req)) || "{}");
+    const created = { id: REGISTERED_COURSES.length + 1, name: String(body.name || "").trim(), is_active: true };
+    REGISTERED_COURSES.push(created);
+    return send(res, 200, created);
+  }
+  const courseAction = path.match(/^\/courses\/(\d+)$/);
+  if (courseAction && req.method === "PATCH") {
+    const course = REGISTERED_COURSES.find((entry) => entry.id === Number(courseAction[1]));
+    if (!course) return send(res, 404, { detail: "Curso não encontrado." });
+    const body = JSON.parse((await readText(req)) || "{}");
+    if (body.name) course.name = body.name;
+    if (typeof body.is_active === "boolean") course.is_active = body.is_active;
+    return send(res, 200, course);
   }
 
   return send(res, 404, { detail: "Rota não encontrada no mock." });

@@ -26,7 +26,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -51,18 +51,42 @@ class _ModelColumn(NamedTuple):
     width: int
 
 
-_PER_WORK_MODEL: tuple[_ModelColumn, ...] = (
-    _ModelColumn("autor1", True, "Nome completo do primeiro autor.", "Maria Oliveira", 28),
-    *(
+def _author_columns() -> tuple[_ModelColumn, ...]:
+    """autor1/email1 … autor8/email8, side by side: each author with the e-mail."""
+    columns: list[_ModelColumn] = [
+        _ModelColumn("autor1", True, "Nome completo do primeiro autor.", "Maria Oliveira", 28),
         _ModelColumn(
-            f"autor{index}",
-            False,
-            "Outro autor do mesmo trabalho. Colunas vazias são ignoradas.",
-            "João Silva" if index == 2 else "",
-            28,
+            "email1",
+            True,
+            "E-mail do primeiro autor. Serve para ele encontrar e baixar o certificado.",
+            "maria.oliveira@exemplo.com",
+            32,
+        ),
+    ]
+    for index in range(2, MAX_WORK_AUTHORS + 1):
+        columns.append(
+            _ModelColumn(
+                f"autor{index}",
+                False,
+                "Outro autor do mesmo trabalho. Colunas vazias são ignoradas.",
+                "João Silva" if index == 2 else "",
+                28,
+            )
         )
-        for index in range(2, MAX_WORK_AUTHORS + 1)
-    ),
+        columns.append(
+            _ModelColumn(
+                f"email{index}",
+                False,
+                f"E-mail do autor {index}. Obrigatório quando autor{index} está preenchido.",
+                "joao.silva@exemplo.com" if index == 2 else "",
+                32,
+            )
+        )
+    return tuple(columns)
+
+
+_PER_WORK_MODEL: tuple[_ModelColumn, ...] = (
+    *_author_columns(),
     _ModelColumn(
         "evento",
         True,
@@ -91,7 +115,20 @@ _PER_WORK_MODEL: tuple[_ModelColumn, ...] = (
 )
 _ORDINARY_MODEL: tuple[_ModelColumn, ...] = (
     _ModelColumn("nome", True, "Nome completo do participante.", "Maria Oliveira", 32),
-    _ModelColumn("carga_horaria", True, "Horas, só o número.", "8", 18),
+    _ModelColumn(
+        "email",
+        True,
+        "E-mail do participante. Serve para ele encontrar e baixar o certificado.",
+        "maria.oliveira@exemplo.com",
+        32,
+    ),
+    _ModelColumn(
+        "carga_horaria",
+        False,
+        "Horas, só o número. Obrigatória se o texto do certificado usar {{carga_horaria}}.",
+        "8",
+        18,
+    ),
     _ModelColumn("curso", False, "Curso do participante.", "Sistemas de Informação", 28),
     _ModelColumn("evento", False, "Evento ou atividade.", "Semana Acadêmica 2026", 32),
     _ModelColumn(
@@ -103,7 +140,6 @@ _ORDINARY_MODEL: tuple[_ModelColumn, ...] = (
     ),
     _ModelColumn("data_inicio", False, "Início do evento, se o texto do certificado usar.", "", 18),
     _ModelColumn("data_fim", False, "Fim do evento, se o texto do certificado usar.", "", 18),
-    _ModelColumn("email", False, "E-mail do participante.", "", 32),
     _ModelColumn("documento", False, "Registro Acadêmico (RA) do participante.", "", 20),
     _ModelColumn("equipe", False, "Nome da equipe, se houver.", "", 24),
     _ModelColumn("titulo_trabalho", False, "Título do trabalho, se houver.", "", 36),
@@ -116,21 +152,27 @@ def _header_style(cells) -> None:
         cell.fill = PatternFill("solid", fgColor="1F4E78")
 
 
+SPREADSHEET_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+SPREADSHEET_TEMPLATE_FILENAME = "modelo-certificados.xlsx"
+
+
 @router.get(
     "/certificates/spreadsheet-template",
     operation_id="download_spreadsheet_template",
-    responses={
-        200: {"content": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}}}
-    },
+    responses={200: {"content": {SPREADSHEET_MEDIA_TYPE: {}}}},
 )
 def spreadsheet_template(
     certificate_type: str | None = None,
     _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
-) -> StreamingResponse:
+) -> Response:
     """Model workbook for a batch; per-work types get the authors columns.
 
     The data sheet holds only the header, so nothing in it can reach a
     certificate; the "Instruções" sheet (never read) explains each column.
+
+    The workbook goes out as one complete response with ``Content-Length``:
+    a chunked stream has no declared end, and a browser download only finishes
+    when the terminating chunk survives every proxy on the way.
     """
     per_work_type = is_per_work_type(certificate_type)
     model = _PER_WORK_MODEL if per_work_type else _ORDINARY_MODEL
@@ -152,6 +194,13 @@ def spreadsheet_template(
     )
     if per_work_type:
         guide.append(["Um certificado por trabalho, válido para todos os autores."])
+        guide.append(["Cada autor precisa do e-mail na coluna email de mesmo número."])
+    guide.append(
+        [
+            "O e-mail é usado na consulta pública para localizar e baixar o certificado; "
+            "ele não é exibido a ninguém."
+        ]
+    )
     guide.append([])
     guide.append(["Coluna", "Obrigatória", "O que preencher", "Exemplo"])
     _header_style(guide[guide.max_row])
@@ -165,11 +214,10 @@ def spreadsheet_template(
     buffer = BytesIO()
     workbook.save(buffer)
     workbook.close()
-    buffer.seek(0)
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="modelo-certificados.xlsx"'},
+    return Response(
+        content=buffer.getvalue(),
+        media_type=SPREADSHEET_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{SPREADSHEET_TEMPLATE_FILENAME}"'},
     )
 
 

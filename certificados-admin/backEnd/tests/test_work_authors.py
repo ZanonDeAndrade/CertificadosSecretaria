@@ -58,8 +58,10 @@ AUTHORS = (
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buffer = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buffer, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buffer, index=False)
     return buffer.getvalue()
 
 
@@ -222,7 +224,7 @@ def test_nome_stands_in_for_autor1_only_when_autor1_is_absent():
     )
     assert both.valid[0].nome == AUTHORS[0]
 
-    with pytest.raises(SpreadsheetError, match="ausentes na planilha: autor1$"):
+    with pytest.raises(SpreadsheetError, match="ausentes na planilha: autor1, email1$"):
         read_and_validate(BytesIO(_xlsx([work])), certificate_type=MOSTRA)
 
 
@@ -233,11 +235,12 @@ def test_work_without_first_author_is_invalid_and_other_types_are_unchanged():
     assert [row.errors for row in report.invalid] == [["autor1 é obrigatório"]]
     assert len(report.valid) == 1
 
-    # Ordinary types keep requiring nome and carga_horaria.
+    # Ordinary types require nome and email; the workload may be blank there too.
     ordinary = read_and_validate(
         BytesIO(_xlsx([{"nome": "Ana", "carga_horaria": ""}])), certificate_type="listener"
     )
-    assert ordinary.invalid[0].errors == ["carga_horaria é obrigatória"]
+    assert ordinary.invalid == []
+    assert ordinary.valid[0].carga_horaria is None
     with pytest.raises(SpreadsheetError, match="nome"):
         read_and_validate(BytesIO(_xlsx([{"autor1": "Ana", "carga_horaria": 8}])))
 
@@ -312,8 +315,9 @@ def test_equipe_and_titulo_trabalho_are_body_variables():
 
 
 def _create(client, name: str, certificate_type: str | None, elements=None) -> dict:
+    """A new inactive model of that type; returns the model (``id`` is its id)."""
     response = client.post(
-        "/templates/versions",
+        "/templates",
         json={
             "name": name,
             "layout": _layout(elements or [_text("name")]),
@@ -324,31 +328,32 @@ def _create(client, name: str, certificate_type: str | None, elements=None) -> d
     return response.json()
 
 
-def test_each_type_activates_its_own_version_and_falls_back_to_the_generic(client, auth_headers):
+def test_each_type_activates_its_own_model_and_falls_back_to_the_generic(client, auth_headers):
     generic = template_service.get_active_version()
     assert generic and generic["certificate_type"] is None
 
-    mostra_v1 = _create(client, "Mostra v1", MOSTRA)
+    mostra_v1 = _create(client, "Mostra v1", MOSTRA, MOSTRA_ELEMENTS)
     assert mostra_v1["certificate_type"] == MOSTRA
-    assert client.post(f"/templates/versions/{mostra_v1['id']}/activate").status_code == 200
+    assert client.post(f"/templates/{mostra_v1['id']}/activate").status_code == 200
 
-    # The generic version is still active; the Mostra has its own.
+    # The generic model is still active; the Mostra has its own.
     assert template_service.get_active_version()["id"] == generic["id"]
-    assert template_service.get_active_version(MOSTRA)["id"] == mostra_v1["id"]
+    assert template_service.get_active_version(MOSTRA)["id"] == mostra_v1["current_version_id"]
     assert template_service.get_active_version("listener")["id"] == generic["id"]
     by_api = client.get("/templates/active", params={"certificate_type": MOSTRA})
-    assert by_api.status_code == 200 and by_api.json()["id"] == mostra_v1["id"]
+    assert by_api.status_code == 200 and by_api.json()["id"] == mostra_v1["current_version_id"]
 
-    # Activating another Mostra version steps down only the previous Mostra one.
-    mostra_v2 = _create(client, "Mostra v2", MOSTRA)
-    assert client.post(f"/templates/versions/{mostra_v2['id']}/activate").status_code == 200
-    versions = {item["id"]: item for item in client.get("/templates/versions").json()}
-    assert versions[mostra_v1["id"]]["is_active"] is False
-    assert versions[mostra_v2["id"]]["is_active"] is True
-    assert versions[generic["id"]]["is_active"] is True
+    # Activating another Mostra model steps down only the previous Mostra one.
+    mostra_v2 = _create(client, "Mostra v2", MOSTRA, MOSTRA_ELEMENTS)
+    assert client.post(f"/templates/{mostra_v2['id']}/activate").status_code == 200
+    models = {item["id"]: item for item in client.get("/templates").json()}
+    assert models[mostra_v1["id"]]["is_active"] is False
+    assert models[mostra_v2["id"]]["is_active"] is True
+    by_version = {item["current_version_id"]: item for item in models.values()}
+    assert by_version[generic["id"]]["is_active"] is True
 
     unknown = client.post(
-        "/templates/versions",
+        "/templates",
         json={"name": "x", "layout": _layout([_text("name")]), "certificate_type": "nope"},
     )
     assert unknown.status_code == 400
@@ -387,7 +392,7 @@ def test_mostra_batch_issues_one_certificate_per_work_and_lists_the_authors(
     client, auth_headers, monkeypatch
 ):
     mostra = _create(client, "Mostra", MOSTRA, MOSTRA_ELEMENTS)
-    assert client.post(f"/templates/versions/{mostra['id']}/activate").status_code == 200
+    assert client.post(f"/templates/{mostra['id']}/activate").status_code == 200
 
     preview = client.post(
         "/certificates/validate-spreadsheet",
@@ -449,9 +454,9 @@ def test_mostra_batch_issues_one_certificate_per_work_and_lists_the_authors(
     assert AUTHORS[2] not in str(search)
 
 
-def test_blank_workload_used_by_the_body_only_warns(client, auth_headers):
+def test_blank_workload_used_by_the_body_makes_the_row_invalid(client, auth_headers):
     mostra = _create(client, "Mostra", MOSTRA, MOSTRA_ELEMENTS)
-    assert client.post(f"/templates/versions/{mostra['id']}/activate").status_code == 200
+    assert client.post(f"/templates/{mostra['id']}/activate").status_code == 200
 
     preview = client.post(
         "/certificates/validate-spreadsheet",
@@ -462,16 +467,25 @@ def test_blank_workload_used_by_the_body_only_warns(client, auth_headers):
         },
     )
     assert preview.status_code == 200, preview.text
-    assert preview.json()["empty_fields"] == [
+    body = preview.json()
+    # The row would print "carga horária de  horas": refused, not just listed.
+    assert body["valid_count"] == 1 and body["invalid_count"] == 1
+    assert body["invalid"] == [
         {
-            "key": "carga_horaria",
-            "label": "Carga horária",
-            "row_count": 1,
-            "rows": [{"row_number": 3, "nome": AUTHORS[1]}],
-            "checked_rows": 2,
-            "truncated": False,
+            "row_number": 3,
+            "errors": ["carga_horaria vazia, mas o texto do certificado usa {{carga_horaria}}"],
+            "data": None,
         }
     ]
+    assert body["empty_fields"] == []
+
+    # Without the variable in the text the same rows are all valid.
+    automatic = client.post(
+        "/certificates/validate-spreadsheet",
+        files=_files([_work(AUTHORS[0], carga_horaria=8), _work(AUTHORS[1])]),
+        data={"texto_padrao": "", "certificate_type": MOSTRA},
+    )
+    assert automatic.json()["invalid"] == []
 
 
 def test_spreadsheet_template_offers_author_columns_for_per_work_types(client, auth_headers):
@@ -480,13 +494,16 @@ def test_spreadsheet_template_offers_author_columns_for_per_work_types(client, a
     mostra = client.get("/certificates/spreadsheet-template", params={"certificate_type": MOSTRA})
     assert mostra.status_code == 200
     headers = [cell.value for cell in load_workbook(BytesIO(mostra.content)).active[1]]
-    assert headers[:8] == [f"autor{index}" for index in range(1, 9)]
+    # Each author beside the e-mail of the same number.
+    assert headers[:16] == [
+        column for index in range(1, 9) for column in (f"autor{index}", f"email{index}")
+    ]
     assert {"evento", "titulo_trabalho", "equipe", "carga_horaria"} <= set(headers)
-    assert "nome" not in headers
+    assert "nome" not in headers and "email" not in headers
 
     generic = client.get("/certificates/spreadsheet-template")
     generic_headers = [cell.value for cell in load_workbook(BytesIO(generic.content)).active[1]]
-    assert generic_headers[:2] == ["nome", "carga_horaria"]
+    assert generic_headers[:3] == ["nome", "email", "carga_horaria"]
     assert {"equipe", "titulo_trabalho"} <= set(generic_headers)
 
 

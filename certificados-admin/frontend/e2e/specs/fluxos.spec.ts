@@ -5,13 +5,32 @@
  */
 import { test, expect, Page } from "@playwright/test";
 import path from "node:path";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, statSync } from "node:fs";
 
 async function scenario(page: Page, name: string, role = "admin") {
   await page.context().setExtraHTTPHeaders({
     "x-mock-scenario": name,
     "x-mock-role": role,
   });
+}
+
+/** Open a model in the editor from its row in the list. */
+async function openModel(page: Page, name: string) {
+  await page
+    .getByRole("listitem")
+    .filter({ hasText: name })
+    .getByRole("button", { name: "Editar" })
+    .click();
+  await expect(page.getByRole("button", { name: "Salvar", exact: true })).toBeVisible();
+}
+
+/** Choose the certificate type in "Dados do modelo". */
+async function setModelType(page: Page, value: string) {
+  await page.getByRole("button", { name: /Dados do modelo/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Dados do modelo" });
+  await dialog.getByLabel("Tipo").selectOption(value);
+  await dialog.getByRole("button", { name: "Pronto" }).click();
+  await expect(dialog).toBeHidden();
 }
 
 /* A real .xlsx built by the app's own writer would need a browser context, so
@@ -24,6 +43,32 @@ test.beforeAll(() => {
 });
 
 test.describe("emissão em lote", () => {
+  test("baixar planilha modelo entrega o .xlsx inteiro, com o nome certo", async ({ page }) => {
+    await scenario(page, "default", "secretaria");
+    await page.goto("/emitir");
+    await expect(page.getByRole("heading", { name: "1. Planilha do lote" })).toBeVisible();
+
+    // The contract on screen: name and e-mail, and one e-mail per author on the Mostra.
+    await expect(page.getByText(/Colunas obrigatórias: nome e e-mail/)).toBeVisible();
+    await page
+      .getByRole("combobox", { name: /Tipo do certificado/ })
+      .selectOption("scientific_initiation");
+    await expect(
+      page.getByText(/Colunas obrigatórias: autor1, email1, evento e titulo_trabalho/),
+    ).toBeVisible();
+    await page.getByRole("combobox", { name: /Tipo do certificado/ }).selectOption("");
+
+    // A plain link download: the browser must see the file end and finish it.
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("link", { name: "Baixar planilha modelo" }).click(),
+    ]);
+    expect(download.suggestedFilename()).toBe("modelo-certificados.xlsx");
+    const file = await download.path();
+    expect(await download.failure()).toBeNull();
+    expect(statSync(file).size).toBeGreaterThan(0);
+  });
+
   test("secretaria: planilha → conferência → confirmação → lote persistido", async ({ page }) => {
     await scenario(page, "default", "secretaria");
     await page.addInitScript(() => {
@@ -398,16 +443,15 @@ test.describe("editor de template", () => {
     await scenario(page, "default");
     await page.goto("/template");
 
-    await page.getByRole("button", { name: /Editar \(nova versão\)/ }).click();
+    await openModel(page, "Certificado_OPL");
 
     // Toolbar is present and the canvas region rendered.
-    await expect(page.getByRole("button", { name: "Salvar versão" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Desfazer/ })).toBeVisible();
-    await expect(page.getByRole("textbox", { name: "Nome" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Dados do modelo/ })).toBeVisible();
 
     // Add an element, which makes the draft dirty.
     await page.getByRole("button", { name: "Nome", exact: true }).click();
-    await expect(page.getByText("Alterações não salvas")).toBeVisible();
+    await expect(page.getByText("Não salvo")).toBeVisible();
 
     // Leaving now must ask first.
     await page.getByRole("button", { name: "Voltar" }).click();
@@ -418,20 +462,19 @@ test.describe("editor de template", () => {
     test.skip(testInfo.project.name !== "desktop", "editor é uma tela de desktop");
     await scenario(page, "default");
     await page.goto("/template");
-    await page.getByRole("button", { name: /Editar \(nova versão\)/ }).click();
+    await openModel(page, "Certificado_OPL");
 
-    // Generic template: no per-work field.
+    // Generic model: no per-work field.
     await expect(page.getByRole("button", { name: "Nome", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Autores", exact: true })).toHaveCount(0);
 
-    const typeSelect = page.getByLabel("Tipo", { exact: true });
-    await typeSelect.selectOption("scientific_initiation");
+    await setModelType(page, "scientific_initiation");
     const authors = page.getByRole("button", { name: "Autores", exact: true });
     await expect(authors).toBeVisible();
     await authors.click();
     await expect(page.getByText("Base fixa: Y é a base do bloco")).toBeVisible();
 
-    await typeSelect.selectOption("");
+    await setModelType(page, "");
     await expect(page.getByRole("button", { name: "Autores", exact: true })).toHaveCount(0);
   });
 
@@ -439,7 +482,7 @@ test.describe("editor de template", () => {
     test.skip(testInfo.project.name !== "desktop", "editor é uma tela de desktop");
     await scenario(page, "default");
     await page.goto("/template");
-    await page.getByRole("button", { name: /Editar \(nova versão\)/ }).click();
+    await openModel(page, "Certificado_OPL");
 
     const list = page.getByRole("listbox", { name: "Elementos do template" });
     const option = (text: string) => list.getByRole("option").filter({ hasText: text });
@@ -448,7 +491,7 @@ test.describe("editor de template", () => {
     // The history takes the loaded copy as its baseline once the layout settles.
     await page.waitForTimeout(600);
 
-    await page.getByLabel("Tipo", { exact: true }).selectOption("scientific_initiation");
+    await setModelType(page, "scientific_initiation");
     await expect(option("Autores")).toHaveCount(1);
     await expect(option("Nome do participante")).toHaveCount(0);
     await expect(option("Certificamos, para os devidos fins, que")).toHaveCount(0);
@@ -474,7 +517,7 @@ test.describe("editor de template", () => {
     const dialog = page.getByRole("dialog");
     await expect(dialog).toContainText("Todos os certificados emitidos a partir de agora");
 
-    const confirm = dialog.getByRole("button", { name: /Ativar esta versão/ });
+    const confirm = dialog.getByRole("button", { name: /Ativar este modelo/ });
     await expect(confirm).toBeDisabled();
     await dialog.getByLabel(/Digite/).fill("ATIVAR");
     await expect(confirm).toBeEnabled();

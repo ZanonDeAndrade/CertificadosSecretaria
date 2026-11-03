@@ -24,9 +24,11 @@ Import-safe: never opens a connection at import time.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +40,8 @@ from .repositories import (
     AuditLogRepository,
     AuthSessionRepository,
     CertificateRepository,
+    CertificateTemplateRepository,
+    CourseRepository,
     EmissionBatchRepository,
     GoogleDriveIntegrationRepository,
     InstitutionalSettingsRepository,
@@ -160,6 +164,8 @@ _EMISSION_BATCH_EXTRA_COLUMNS: dict[str, str] = {
 _TEMPLATE_VERSION_EXTRA_COLUMNS: dict[str, str] = {
     "certificate_type": "TEXT",
     "active_type_key": "TEXT",
+    # Revisions belong to a model since 0014; filled by _file_legacy_versions.
+    "template_id": "INTEGER REFERENCES certificate_templates(id)",
 }
 
 _INDEXES: tuple[str, ...] = (
@@ -176,6 +182,7 @@ _INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_certificates_certificate_type ON certificates (certificate_type)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_certificates_business_key ON certificates (business_key)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_template_versions_active_type_key ON template_versions (active_type_key)",
+    "CREATE INDEX IF NOT EXISTS idx_template_versions_template_id ON template_versions (template_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_action_created_at ON audit_log (action, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_actor_created_at ON audit_log (actor_id, created_at)",
@@ -230,8 +237,71 @@ def _legacy_sqlite_migrate(eng) -> None:
                 "UPDATE template_versions SET active_type_key = '__generic__' "
                 "WHERE is_active = 1 AND active_type_key IS NULL"
             )
+            _file_legacy_versions(conn)
         for statement in _INDEXES:
             conn.exec_driver_sql(statement)
+        _seed_default_courses(conn)
+
+
+def _file_legacy_versions(conn) -> None:
+    """File versions of an old development database under models (as 0014 does)."""
+    from .template_grouping import VersionRow, group_versions
+
+    rows = conn.exec_driver_sql(
+        "SELECT id, version_number, name, certificate_type, is_active, created_at, created_by "
+        "FROM template_versions WHERE template_id IS NULL"
+    ).fetchall()
+    if not rows:
+        return
+    meta = {int(row[0]): row for row in rows}
+    groups = group_versions(
+        [
+            VersionRow(
+                id=int(row[0]),
+                version_number=int(row[1]),
+                name=row[2],
+                certificate_type=row[3],
+                is_active=bool(row[4]),
+            )
+            for row in rows
+        ]
+    )
+    for group in groups:
+        first = meta[group.version_ids[0]]
+        newest = meta[group.version_ids[-1]]
+        cursor = conn.exec_driver_sql(
+            "INSERT INTO certificate_templates "
+            "(name, certificate_type, course_id, revision, created_at, created_by, updated_at) "
+            "VALUES (?, ?, NULL, ?, ?, ?, ?)",
+            (
+                group.name[:255],
+                group.certificate_type,
+                len(group.version_ids),
+                first[5],
+                first[6],
+                newest[5],
+            ),
+        )
+        template_id = cursor.lastrowid
+        placeholders = ", ".join("?" for _ in group.version_ids)
+        conn.exec_driver_sql(
+            f"UPDATE template_versions SET template_id = ? WHERE id IN ({placeholders})",
+            (template_id, *group.version_ids),
+        )
+
+
+def _seed_default_courses(conn) -> None:
+    """The institution's courses, so the list is never empty on a fresh database."""
+    from .courses import DEFAULT_COURSES, normalize_course_key
+
+    if conn.exec_driver_sql("SELECT count(*) FROM courses").scalar():
+        return
+    for name in DEFAULT_COURSES:
+        conn.exec_driver_sql(
+            "INSERT INTO courses (name, normalized_key, is_active, created_at, updated_at) "
+            "VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (name, normalize_course_key(name)),
+        )
 
 
 def _backfill_event_name_normalized(conn) -> None:
@@ -605,6 +675,41 @@ def list_certificates_by_document_hashes(
         return CertificateRepository(s).list_by_document_hashes(
             hashes_by_key_id,
             statuses=statuses,
+        )
+
+
+def list_certificates_by_email_hashes(
+    hashes_by_key_id: dict[str, str],
+    *,
+    statuses: tuple[str, ...] = ("ativo", "revogado"),
+) -> list[dict]:
+    """Find certificates by versioned e-mail hashes: the holder's or any author's."""
+
+    with _session() as s:
+        return CertificateRepository(s).list_by_email_hashes(hashes_by_key_id, statuses=statuses)
+
+
+def certificate_email_hashes(certificate_id: int) -> list[dict]:
+    """The keyed e-mail hashes of one certificate, in author order."""
+    with _session() as s:
+        return CertificateRepository(s).email_hashes(certificate_id)
+
+
+def rotate_certificate_email_hash(
+    row_id: int,
+    *,
+    expected_hash: str,
+    new_hash: str,
+    new_key_id: str,
+) -> bool:
+    """Persist a lazy e-mail HMAC rotation without ever receiving plaintext."""
+
+    with _session() as s:
+        return CertificateRepository(s).rotate_email_hash(
+            row_id,
+            expected_hash=expected_hash,
+            new_hash=new_hash,
+            new_key_id=new_key_id,
         )
 
 
@@ -1083,31 +1188,69 @@ def list_emission_batches(
         return EmissionBatchRepository(s).list(created_by=created_by, limit=limit, offset=offset)
 
 
-# ── Template versions (single global template) ──────────────────────────────────
+# ── Certificate models and their revisions ────────────────────────────────────
 
 
-def create_template_version(
-    *,
-    name: str | None,
-    layout_json: str,
-    image_width: int,
-    image_height: int,
-    background_image: bytes | None,
-    background_mime_type: str,
-    created_by: int | None = None,
-    certificate_type: str | None = None,
-) -> dict:
+@dataclass(frozen=True)
+class TemplateUnitOfWork:
+    """Repositories bound to ONE transaction, for multi-step model operations
+    (save a revision and activate it, duplicate, delete) that must be atomic."""
+
+    templates: CertificateTemplateRepository
+    versions: TemplateVersionRepository
+    courses: CourseRepository
+    batches: EmissionBatchRepository
+
+
+@contextmanager
+def template_unit_of_work() -> Iterator[TemplateUnitOfWork]:
     with _session() as s:
-        return TemplateVersionRepository(s).create(
-            name=name,
-            layout_json=layout_json,
-            image_width=image_width,
-            image_height=image_height,
-            background_image=background_image,
-            background_mime_type=background_mime_type,
-            created_by=created_by,
-            certificate_type=certificate_type,
+        yield TemplateUnitOfWork(
+            templates=CertificateTemplateRepository(s),
+            versions=TemplateVersionRepository(s),
+            courses=CourseRepository(s),
+            batches=EmissionBatchRepository(s),
         )
+
+
+def get_template_overview(template_id: int) -> dict | None:
+    with _session() as s:
+        return CertificateTemplateRepository(s).overview(template_id)
+
+
+def list_template_overviews(**filters) -> list[dict]:  # noqa: ANN003 - repository kwargs
+    with _session() as s:
+        return CertificateTemplateRepository(s).list_overview(**filters)
+
+
+def list_template_versions_of(template_id: int) -> list[dict]:
+    with _session() as s:
+        return TemplateVersionRepository(s).list_by_template(template_id)
+
+
+def list_courses(*, include_inactive: bool = True) -> list[dict]:
+    with _session() as s:
+        return CourseRepository(s).list(include_inactive=include_inactive)
+
+
+def get_course(course_id: int) -> dict | None:
+    with _session() as s:
+        return CourseRepository(s).get(course_id)
+
+
+def get_course_by_key(normalized_key: str) -> dict | None:
+    with _session() as s:
+        return CourseRepository(s).get_by_key(normalized_key)
+
+
+def create_course(*, name: str, normalized_key: str) -> dict:
+    with _session() as s:
+        return CourseRepository(s).create(name=name, normalized_key=normalized_key)
+
+
+def update_course(course_id: int, values: dict) -> dict | None:
+    with _session() as s:
+        return CourseRepository(s).update(course_id, values)
 
 
 def get_template_version(version_id: int) -> dict | None:
@@ -1133,21 +1276,6 @@ def count_template_versions() -> int:
 def get_template_background(version_id: int) -> tuple[bytes | None, str] | None:
     with _session() as s:
         return TemplateVersionRepository(s).get_background(version_id)
-
-
-def activate_template_version(version_id: int, actor: int | None = None) -> bool:
-    with _session() as s:
-        return TemplateVersionRepository(s).activate(version_id, actor)
-
-
-def rename_template_version(version_id: int, name: str) -> dict | None:
-    with _session() as s:
-        return TemplateVersionRepository(s).rename(version_id, name)
-
-
-def delete_template_version_if_unused(version_id: int) -> tuple[str, dict | None]:
-    with _session() as s:
-        return TemplateVersionRepository(s).delete_if_unused(version_id)
 
 
 # ── Audit log ───────────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ import {
 } from "../../lib/textBoxResize";
 import { TextAlign } from "../../types/template";
 
-/** Handle size on screen, whatever the zoom. */
+/** Handle size on screen, whatever the scale the page is shown at. */
 export const HANDLE_SIZE_PX = 10;
 export const TOUCH_HANDLE_SIZE_PX = 24;
 export const SELECTION_COLOR = "#2563eb";
@@ -105,10 +105,13 @@ export class TemplateTextbox extends fabric.Textbox {
   _render(ctx: CanvasRenderingContext2D): void {
     super._render(ctx);
     if (!this.overflow) return;
+    // Object space is scaled by the viewport zoom; keep the outline 1.5 px on
+    // screen at every scale.
+    const zoom = this.canvas?.getZoom() || 1;
     ctx.save();
     ctx.strokeStyle = OVERFLOW_COLOR;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 3]);
+    ctx.lineWidth = 1.5 / zoom;
+    ctx.setLineDash([5 / zoom, 3 / zoom]);
     ctx.strokeRect(-this.width / 2, -this.height / 2, this.width, this.height);
     ctx.restore();
   }
@@ -188,12 +191,14 @@ export class TemplateTextbox extends fabric.Textbox {
   }
 }
 
-/** Keep handles the same size on screen whatever the zoom. */
-export function applyHandleSize(object: fabric.FabricObject, zoom: number): void {
-  const factor = Math.max(zoom, 0.05);
+/**
+ * Handle size on screen. Fabric draws controls in screen pixels, outside the
+ * viewport zoom, so one size serves every scale the page is shown at.
+ */
+export function applyHandleSize(object: fabric.FabricObject): void {
   object.set({
-    cornerSize: HANDLE_SIZE_PX / factor,
-    touchCornerSize: TOUCH_HANDLE_SIZE_PX / factor,
+    cornerSize: HANDLE_SIZE_PX,
+    touchCornerSize: TOUCH_HANDLE_SIZE_PX,
   });
   object.setCoords();
 }

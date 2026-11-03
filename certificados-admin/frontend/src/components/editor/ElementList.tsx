@@ -6,12 +6,20 @@
  * (not hover-only) for the selected row and are reachable by keyboard; the old
  * `opacity-0 group-hover` treatment hid them from touch and keyboard entirely.
  */
+import { useRef } from "react";
 import { KEY_LABELS, TemplateElement, ElementKey } from "../../types/template";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
 import { isPerWorkType } from "../../domain/certificateTypes";
 import Icon from "../../ui/Icon";
 import { IconButton } from "../../ui/Button";
 import { cn } from "../../ui/cn";
+
+const QUICK_BUTTON_CLASS = cn(
+  "inline-flex items-center gap-1 rounded-[var(--radius)] border px-2 py-1.5",
+  "border-[color:var(--line-strong)] bg-[var(--surface)]",
+  "text-[length:var(--text-xs)] font-medium text-[color:var(--ink)]",
+  "hover:border-[color:var(--brand-500)] hover:bg-[var(--brand-50)]",
+);
 
 /* Offered only on templates for per-work certificate types. */
 const PER_WORK_QUICK_KEYS: { key: ElementKey; label: string; title: string }[] = [
@@ -81,6 +89,9 @@ interface ElementListProps {
   /** Type the template is dedicated to; null for the generic template. */
   certificateType?: string | null;
   onAdd: EditorAPI["addTextElement"];
+  /** An image element (logo, signature) from a file chosen by the operator. */
+  onAddImage: EditorAPI["addImageElement"];
+  onError: (message: string) => void;
   onSelect: EditorAPI["selectElement"];
   onDelete: EditorAPI["deleteElement"];
   onDuplicate: EditorAPI["duplicateElement"];
@@ -91,13 +102,27 @@ export default function ElementList({
   selectedId,
   certificateType = null,
   onAdd,
+  onAddImage,
+  onError,
   onSelect,
   onDelete,
   onDuplicate,
 }: ElementListProps) {
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const quickKeys = isPerWorkType(certificateType)
     ? [...QUICK_KEYS.filter(({ key }) => !NOT_PER_WORK_KEYS.has(key)), ...PER_WORK_QUICK_KEYS]
     : QUICK_KEYS;
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      await onAddImage(file);
+    } catch {
+      onError("Erro ao carregar imagem no editor.");
+    }
+    event.target.value = "";
+  };
   const handleListKeyDown = (event: React.KeyboardEvent) => {
     if (elements.length === 0) return;
     const index = elements.findIndex((element) => element.id === selectedId);
@@ -126,17 +151,29 @@ export default function ElementList({
               type="button"
               onClick={() => onAdd(key)}
               title={title}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-[var(--radius)] border px-2 py-1.5",
-                "border-[color:var(--line-strong)] bg-[var(--surface)]",
-                "text-[length:var(--text-xs)] font-medium text-[color:var(--ink)]",
-                "hover:border-[color:var(--brand-500)] hover:bg-[var(--brand-50)]",
-              )}
+              className={QUICK_BUTTON_CLASS}
             >
               <Icon name="plus" size={12} />
               {label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => imageInputRef.current?.click()}
+            title="Imagem fixa (logo, assinatura) igual em todos os certificados"
+            className={QUICK_BUTTON_CLASS}
+          >
+            <Icon name="image" size={12} />
+            Imagem
+          </button>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={handleImageUpload}
+            aria-label="Arquivo de imagem para inserir"
+          />
         </div>
       </div>
 

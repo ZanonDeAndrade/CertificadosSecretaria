@@ -54,8 +54,13 @@ _KEYS = count(1)
 
 def _work(*authors: str, **extra) -> dict:
     """A row with the columns of the Mostra model workbook."""
-    row: dict = {f"autor{index}": "" for index in range(1, 9)}
-    row.update({f"autor{index}": name for index, name in enumerate(authors, start=1)})
+    row: dict = {}
+    for index in range(1, 9):
+        row[f"autor{index}"] = ""
+        row[f"email{index}"] = ""
+    for index, name in enumerate(authors, start=1):
+        row[f"autor{index}"] = name
+        row[f"email{index}"] = f"autor{index}@exemplo.com" if name else ""
     row.update(
         evento=EVENT,
         titulo_trabalho=TITLE,
@@ -70,8 +75,10 @@ def _work(*authors: str, **extra) -> dict:
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buffer = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buffer, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buffer, index=False)
     return buffer.getvalue()
 
 
@@ -122,7 +129,11 @@ def _mostra_version(elements: list[dict]) -> dict:
         "elements": elements,
     }
     version = template_service.create_version(name="Mostra", layout=layout, certificate_type=MOSTRA)
-    assert template_service.activate_version(version["id"])
+    # Activation now refuses a layout unfit for the Mostra; these tests cover
+    # the emission-time guard for models activated before that rule existed,
+    # so the version is activated at the repository level.
+    with db.template_unit_of_work() as uow:
+        assert uow.versions.activate(version["id"])
     return version
 
 
@@ -161,13 +172,13 @@ def test_mostra_batch_without_a_template_of_its_type_is_refused(client, auth_hea
     [
         (
             [_text("texto_certificado"), QR],
-            "não tem o bloco Autores. Em Template, use “Editar como nova” nessa versão, "
-            "adicione o bloco Autores acima do QR Code, salve e ative a nova versão.",
+            "não tem o bloco Autores. Em Template, abra esse modelo em “Editar”, "
+            "adicione o bloco Autores acima do QR Code e salve aplicando às próximas emissões.",
         ),
         (
             [_text("name"), _text("texto_certificado"), _text("authors", anchorY="bottom"), QR],
-            "tem o elemento Nome do participante. Em Template, use “Editar como nova” "
-            "nessa versão, remova o elemento Nome, salve e ative a nova versão.",
+            "tem o elemento Nome do participante. Em Template, abra esse modelo em “Editar”, "
+            "remova o elemento Nome e salve aplicando às próximas emissões.",
         ),
         (
             [_text("name"), _text("authors", anchorY="bottom"), QR],
@@ -437,9 +448,9 @@ def test_model_workbook_has_no_example_row_and_explains_each_column(
     assert [line[0] for line in table] == headers
     required = {line[0] for line in table if line[1] == "Sim"}
     if certificate_type == MOSTRA:
-        assert required == {"autor1", "evento", "titulo_trabalho"}
+        assert required == {"autor1", "email1", "evento", "titulo_trabalho"}
     else:
-        assert required == {"nome", "carga_horaria"}
+        assert required == {"nome", "email"}
     examples = {str(line[3]) for line in table if line[3]}
     assert not examples & set(TEMPLATE_EXAMPLE_TEXTS)
 
@@ -467,11 +478,11 @@ def test_filled_model_is_read_from_its_data_sheet_even_with_instructions_active(
 def test_a_workbook_without_an_instructions_sheet_still_reads_its_first_sheet():
     workbook = Workbook()
     first = workbook.active
-    first.append(["nome", "carga_horaria"])
-    first.append(["Ana Souza", 8])
+    first.append(["nome", "email", "carga_horaria"])
+    first.append(["Ana Souza", "ana.souza@exemplo.com", 8])
     other = workbook.create_sheet("Rascunho")
-    other.append(["nome", "carga_horaria"])
-    other.append(["Outra Pessoa", 4])
+    other.append(["nome", "email", "carga_horaria"])
+    other.append(["Outra Pessoa", "outra.pessoa@exemplo.com", 4])
     workbook.active = 1
     buffer = BytesIO()
     workbook.save(buffer)

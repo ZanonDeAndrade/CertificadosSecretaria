@@ -10,6 +10,8 @@ function renderList(certificateType: string | null) {
       selectedId={null}
       certificateType={certificateType}
       onAdd={onAdd}
+      onAddImage={vi.fn(async () => undefined)}
+      onError={vi.fn()}
       onSelect={vi.fn()}
       onDelete={vi.fn()}
       onDuplicate={vi.fn()}
@@ -17,6 +19,12 @@ function renderList(certificateType: string | null) {
   );
   return onAdd;
 }
+
+test("o painel oferece inserir uma imagem fixa a partir de um arquivo", () => {
+  renderList(null);
+  expect(screen.getByRole("button", { name: "Imagem" })).toBeTruthy();
+  expect(screen.getByLabelText("Arquivo de imagem para inserir")).toBeTruthy();
+});
 
 test("o bloco Autores só é oferecido em templates de certificado por trabalho", () => {
   renderList("scientific_initiation");

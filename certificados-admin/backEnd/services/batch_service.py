@@ -167,6 +167,29 @@ def _parse(
         raise HTTPException(status_code=400, detail="Não foi possível ler a planilha.") from exc
 
 
+WORKLOAD_REQUIRED_BY_TEXT = "carga_horaria vazia, mas o texto do certificado usa {{carga_horaria}}"
+
+
+def _block_blank_workload(report: spreadsheet.ValidationReport, body_template: str) -> None:
+    """A text that prints ``{{carga_horaria}}`` cannot go out as "carga horária
+    de  horas": rows without a workload become invalid, in the review and in
+    the API alike. Other blank variables keep being a warning."""
+    if "carga_horaria" not in body_template_variables(body_template or ""):
+        return
+    kept: list[SpreadsheetRow] = []
+    for row in report.valid:
+        if row.carga_horaria is None:
+            report.invalid.append(
+                spreadsheet.InvalidRow(
+                    row_number=row.row_number, data={}, errors=[WORKLOAD_REQUIRED_BY_TEXT]
+                )
+            )
+        else:
+            kept.append(row)
+    report.valid = kept
+    report.invalid.sort(key=lambda item: item.row_number)
+
+
 def _body(value: str | None, certificate_type: str | None) -> str:
     """The batch's body text, validated for its type.
 
@@ -427,6 +450,7 @@ async def preview(
     frozen_type = parsed_type.value if parsed_type else None
     body_template = _body(texto_padrao, frozen_type)
     report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
+    _block_blank_workload(report, body_template)
     context = _review_context(report, body_template=body_template, certificate_type=frozen_type)
     active = template_service.get_active_version(frozen_type)
     missing = template_fields.missing_settings((active or {}).get("layout") or {})
@@ -510,6 +534,7 @@ async def prepare_batch(
     content = await read_upload(file)
     body_template = _body(texto_padrao, frozen_type)
     report = _parse(content, data_emissao=data_emissao, certificate_type=frozen_type)
+    _block_blank_workload(report, body_template)
     # A per-work type never falls back to the generic template, and its own
     # must fit it; the review screen says the same, this guards the API.
     active = template_service.get_active_version(frozen_type)
@@ -758,6 +783,7 @@ def _decrypt_row(batch_id: str, item: dict) -> SpreadsheetRow:
             data_fim=str(value.get("data_fim") or ""),
             # Jobs queued before per-work certificates carry none of these.
             autores=tuple(str(name) for name in (value.get("autores") or []) if str(name)),
+            emails=tuple(str(mail) for mail in (value.get("emails") or []) if str(mail)),
             equipe=str(value.get("equipe") or ""),
             titulo_trabalho=str(value.get("titulo_trabalho") or ""),
         )

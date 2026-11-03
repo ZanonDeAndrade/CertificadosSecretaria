@@ -1,9 +1,10 @@
 import { TemplateLayout } from "../types/template";
 import { api } from "./api";
 
-/** A version of the single global certificate template (immutable). */
+/** A revision of a certificate model (immutable once used or active). */
 export interface TemplateVersion {
   id: number;
+  template_id?: number | null;
   version_number: number;
   name: string | null;
   is_active: boolean;
@@ -14,7 +15,63 @@ export interface TemplateVersion {
   background_url: string;
   created_at?: string | null;
   activated_at?: string | null;
+  /** Set on history entries: the revision the editor opens. */
+  is_current?: boolean;
   layout?: TemplateLayout;
+}
+
+/** A certificate model: one item in the list, with its current revision. */
+export interface CertificateTemplate {
+  id: number;
+  name: string;
+  certificate_type: string | null;
+  certificate_type_label?: string | null;
+  /** null = all courses. Only files the model; emission picks by type. */
+  course_id: number | null;
+  course_name?: string | null;
+  is_active: boolean;
+  is_archived: boolean;
+  archived_at?: string | null;
+  /** Bumped on every save; sent back so a stale editor is refused. */
+  revision: number;
+  current_version_id: number | null;
+  version_number: number | null;
+  image_width: number | null;
+  image_height: number | null;
+  background_url: string | null;
+  /** Issued (active or revoked) certificates across every revision. */
+  certificate_count: number;
+  /** Any certificate row (including failed attempts) pointing at a revision. */
+  reference_count: number;
+  ever_activated: boolean;
+  /** The type cannot change any more: duplicate instead. */
+  type_locked: boolean;
+  /** Saving still changes the current revision in place. */
+  edits_in_place: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  activated_at?: string | null;
+  layout?: TemplateLayout;
+}
+
+/** What a save did to the layout. */
+export type SaveOutcome = "unchanged" | "updated" | "revised" | "applied";
+
+export interface TemplateListFilters {
+  course_id?: number | null;
+  /** Only the models filed under "all courses". */
+  without_course?: boolean;
+  /** A type value, or GENERIC_TYPE for the generic models only. */
+  certificate_type?: string | null;
+  include_archived?: boolean;
+}
+
+export const GENERIC_TYPE = "__generic__";
+
+export interface Course {
+  id: number;
+  name: string;
+  is_active: boolean;
 }
 
 export async function getActiveVersion(): Promise<TemplateVersion | null> {
@@ -26,48 +83,115 @@ export async function getActiveVersion(): Promise<TemplateVersion | null> {
   }
 }
 
-export async function listVersions(): Promise<TemplateVersion[]> {
-  const res = await api.get<TemplateVersion[]>("/templates/versions");
-  return res.data;
-}
-
 export async function getVersion(id: number): Promise<TemplateVersion> {
   const res = await api.get<TemplateVersion>(`/templates/versions/${id}`);
   return res.data;
 }
 
-export async function createVersion(
-  name: string,
-  layout: TemplateLayout,
-  certificateType: string | null = null,
-): Promise<TemplateVersion> {
-  const res = await api.post<TemplateVersion>("/templates/versions", {
-    name,
-    layout,
-    certificate_type: certificateType || null,
-  });
+export async function listTemplates(
+  filters: TemplateListFilters = {},
+): Promise<CertificateTemplate[]> {
+  const params: Record<string, string | number | boolean> = {};
+  if (filters.course_id != null) params.course_id = filters.course_id;
+  if (filters.without_course) params.without_course = true;
+  if (filters.certificate_type) params.certificate_type = filters.certificate_type;
+  if (filters.include_archived) params.include_archived = true;
+  const res = await api.get<CertificateTemplate[]>("/templates", { params });
   return res.data;
 }
 
-export async function activateVersion(id: number): Promise<TemplateVersion> {
-  const res = await api.post<TemplateVersion>(
-    `/templates/versions/${id}/activate`,
+export async function getTemplate(id: number): Promise<CertificateTemplate> {
+  const res = await api.get<CertificateTemplate>(`/templates/${id}`);
+  return res.data;
+}
+
+export interface TemplateCreateInput {
+  name: string;
+  layout: TemplateLayout;
+  certificate_type: string | null;
+  course_id: number | null;
+}
+
+export async function createTemplate(input: TemplateCreateInput): Promise<CertificateTemplate> {
+  const res = await api.post<CertificateTemplate>("/templates", input);
+  return res.data;
+}
+
+export interface TemplateSaveInput {
+  name?: string;
+  /** Present and null makes the model generic; absent keeps the type. */
+  certificate_type?: string | null;
+  /** Present and null files the model under all courses; absent keeps it. */
+  course_id?: number | null;
+  layout?: TemplateLayout;
+  revision: number;
+  /** Required when the model is active and the layout changed. */
+  apply?: boolean;
+}
+
+export async function saveTemplate(
+  id: number,
+  input: TemplateSaveInput,
+): Promise<CertificateTemplate & { outcome: SaveOutcome }> {
+  const res = await api.put<CertificateTemplate & { outcome: SaveOutcome }>(
+    `/templates/${id}`,
+    input,
   );
   return res.data;
 }
 
-export async function renameVersion(
+export async function duplicateTemplate(
   id: number,
-  name: string,
-): Promise<TemplateVersion> {
-  const res = await api.patch<TemplateVersion>(`/templates/versions/${id}`, {
-    name,
+  input: { name?: string; version_id?: number } = {},
+): Promise<CertificateTemplate> {
+  const res = await api.post<CertificateTemplate>(`/templates/${id}/duplicate`, input);
+  return res.data;
+}
+
+export async function activateTemplate(id: number): Promise<CertificateTemplate> {
+  const res = await api.post<CertificateTemplate>(`/templates/${id}/activate`);
+  return res.data;
+}
+
+export type DeleteOutcome = "deleted" | "archived";
+
+export async function deleteTemplate(
+  id: number,
+): Promise<{ outcome: DeleteOutcome; template_id: number }> {
+  const res = await api.delete<{ outcome: DeleteOutcome; template_id: number }>(
+    `/templates/${id}`,
+  );
+  return res.data;
+}
+
+export async function restoreTemplate(id: number): Promise<CertificateTemplate> {
+  const res = await api.post<CertificateTemplate>(`/templates/${id}/restore`);
+  return res.data;
+}
+
+export async function getTemplateHistory(id: number): Promise<TemplateVersion[]> {
+  const res = await api.get<TemplateVersion[]>(`/templates/${id}/history`);
+  return res.data;
+}
+
+export async function listCourses(includeInactive = true): Promise<Course[]> {
+  const res = await api.get<Course[]>("/courses", {
+    params: includeInactive ? {} : { include_inactive: false },
   });
   return res.data;
 }
 
-export async function deleteVersion(id: number): Promise<void> {
-  await api.delete(`/templates/versions/${id}`);
+export async function createCourse(name: string): Promise<Course> {
+  const res = await api.post<Course>("/courses", { name });
+  return res.data;
+}
+
+export async function updateCourse(
+  id: number,
+  input: { name?: string; is_active?: boolean },
+): Promise<Course> {
+  const res = await api.patch<Course>(`/courses/${id}`, input);
+  return res.data;
 }
 
 /** Sample values for the preview, resolved exactly as the PDF resolves them. */

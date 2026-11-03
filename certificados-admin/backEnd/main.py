@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from io import BytesIO
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
@@ -12,29 +11,12 @@ from urllib.request import urlopen
 import uvicorn
 from certificados_backend import auth
 from certificados_backend.policies import Permission, require_permission
-from certificados_backend.schemas.templates import (
-    TemplateSampleDataResponse,
-    TextLayoutRequest,
-    TextLayoutResponse,
-)
-from certificados_backend.services import (
-    audit_service,
-    batch_service,
-    template_fields,
-    template_service,
-)
-from certificados_backend.services.generator import measuring_draw
-from certificados_backend.services.runtime import (
-    build_certificate_service,
-    build_layout_generator,
-)
-from certificados_backend.services.template_service import TemplateConflictError, TemplateError
-from certificados_backend.utils.courses import COURSES
+from certificados_backend.services import batch_service, template_service
+from certificados_backend.services.runtime import build_certificate_service
 from certificados_backend.utils.file_utils import ensure_directory
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
 
 from database import db
 from database.db import PDFS_DIR, init_db
@@ -110,18 +92,6 @@ def resolve_allowed_origins() -> list[str]:
             raise RuntimeError(f"Origem CORS deve usar HTTPS em produção: {origin}")
         normalized.append(f"{parsed.scheme}://{parsed.netloc}".rstrip("/"))
     return list(dict.fromkeys(normalized))
-
-
-class CreateTemplateVersionRequest(BaseModel):
-    name: str | None = Field(default=None, max_length=128)
-    # {background: <data URL or serving URL>, image_width, image_height, elements}
-    layout: dict
-    # Dedicates the version to one certificate type; omitted = generic.
-    certificate_type: str | None = Field(default=None, max_length=32)
-
-
-class RenameTemplateVersionRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
 
 
 def configure_logging() -> None:
@@ -254,6 +224,7 @@ def create_app() -> FastAPI:
     from certificados_backend.routers import certificates as certificate_routes
     from certificados_backend.routers import drive as drive_routes
     from certificados_backend.routers import settings as settings_routes
+    from certificados_backend.routers import templates as template_routes
     from certificados_backend.routers import users as user_routes
 
     app.include_router(auth_routes.router)
@@ -264,6 +235,8 @@ def create_app() -> FastAPI:
     app.include_router(batch_routes.router)
     app.include_router(certificate_routes.router)
     app.include_router(drive_routes.router)
+    app.include_router(template_routes.router)
+    app.include_router(template_routes.courses_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -285,197 +258,6 @@ def create_app() -> FastAPI:
         """In-process counters (no PII): generation, failures, compensations,
         downloads and integrity incidents."""
         return observability.metrics.snapshot()
-
-    # ── Template global (versionado) ────────────────────────────────────────────
-
-    @app.get("/templates/active")
-    def template_active(
-        certificate_type: str | None = None,
-        _: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
-    ) -> dict:
-        """Active version for a type (its own, else the generic one; per-work types
-        have no fallback)."""
-        version = template_service.get_active_version(certificate_type or None)
-        if not version:
-            raise HTTPException(status_code=404, detail="Nenhum template ativo.")
-        return version
-
-    @app.get("/templates/versions")
-    def template_versions(
-        _: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
-    ) -> list[dict]:
-        return template_service.list_versions()
-
-    @app.get("/templates/versions/{version_id}")
-    def template_version_detail(
-        version_id: int,
-        _: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
-    ) -> dict:
-        version = template_service.get_version(version_id)
-        if not version:
-            raise HTTPException(status_code=404, detail="Versão não encontrada.")
-        return version
-
-    @app.get("/templates/versions/{version_id}/background")
-    def template_version_background(version_id: int) -> StreamingResponse:
-        # Public: a template background image is not sensitive data, and the
-        # editor loads it cross-origin where a SameSite=Lax cookie isn't sent.
-        try:
-            content, mime = template_service.get_background_bytes(version_id)
-        except TemplateError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return StreamingResponse(BytesIO(content), media_type=mime)
-
-    @app.get("/templates/sample-data", response_model=TemplateSampleDataResponse)
-    def template_sample_data(
-        current: dict = Depends(require_permission(Permission.TEMPLATES_READ)),
-    ) -> dict:
-        """Sample values for the editor, resolved exactly as the PDF resolves them.
-
-        Institutional values come from the current settings, so the preview
-        never shows a city or a signatory the certificate will not have.
-        """
-        return template_fields.sample_data(actor=current)
-
-    @app.post("/templates/text-layout", response_model=TextLayoutResponse)
-    def template_text_layout(
-        payload: TextLayoutRequest,
-        _: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
-    ) -> dict:
-        """Line breaks and heights the PDF will use, for the editor preview.
-
-        Measured with the same fonts and wrapping as the renderer, so the
-        editor shows the operator exactly what the certificate will contain.
-        """
-        generator = build_layout_generator()
-        draw = measuring_draw()
-        items: list[dict] = []
-        for item in payload.items:
-            if not item.text.strip():
-                items.append(
-                    {
-                        "id": item.id,
-                        "lines": [],
-                        "font_size": item.fontSize,
-                        "line_height": 0,
-                        "text_height": 0,
-                        "wrap_width": None,
-                        "overflow": False,
-                        "top_offset": 0,
-                    }
-                )
-                continue
-            box = generator.layout_text_box(draw, payload.image_width, item.text, item.as_element())
-            items.append(
-                {
-                    "id": item.id,
-                    "lines": box.lines,
-                    "font_size": box.font_size,
-                    "line_height": box.line_height,
-                    "text_height": box.text_height,
-                    "wrap_width": box.wrap_width,
-                    "overflow": box.overflow,
-                    "top_offset": box.top_offset,
-                }
-            )
-        return {"items": items}
-
-    @app.post("/templates/versions")
-    def create_template_version(
-        payload: CreateTemplateVersionRequest,
-        current: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
-    ) -> dict:
-        try:
-            version = template_service.create_version(
-                name=payload.name,
-                layout=payload.layout,
-                created_by=current["id"],
-                certificate_type=payload.certificate_type,
-            )
-        except TemplateError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        audit_service.record(
-            "template_version_created",
-            actor=current,
-            target_type="template_version",
-            target_id=version["id"],
-            details={
-                "version_id": version["id"],
-                "version_number": version["version_number"],
-            },
-        )
-        return version
-
-    @app.post("/templates/versions/{version_id}/activate")
-    def activate_template_version(
-        version_id: int,
-        current: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
-    ) -> dict:
-        if not template_service.activate_version(version_id, current["id"]):
-            raise HTTPException(status_code=404, detail="Versão não encontrada.")
-        audit_service.record(
-            "template_version_activated",
-            actor=current,
-            target_type="template_version",
-            target_id=version_id,
-            details={"version_id": version_id},
-        )
-        return template_service.get_version(version_id)
-
-    @app.patch("/templates/versions/{version_id}")
-    def rename_template_version(
-        version_id: int,
-        payload: RenameTemplateVersionRequest,
-        current: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
-    ) -> dict:
-        try:
-            version = template_service.rename_version(version_id, payload.name)
-        except TemplateError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if version is None:
-            raise HTTPException(status_code=404, detail="Versão não encontrada.")
-        audit_service.record(
-            "template_version_renamed",
-            actor=current,
-            target_type="template_version",
-            target_id=version_id,
-            details={
-                "version_id": version_id,
-                "version_number": version["version_number"],
-                "fields": ["name"],
-            },
-        )
-        return version
-
-    @app.delete("/templates/versions/{version_id}")
-    def delete_template_version(
-        version_id: int,
-        current: dict = Depends(require_permission(Permission.TEMPLATES_MANAGE)),
-    ) -> dict:
-        try:
-            version = template_service.delete_version(version_id)
-        except TemplateConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if version is None:
-            raise HTTPException(status_code=404, detail="Versão não encontrada.")
-        audit_service.record(
-            "template_version_deleted",
-            actor=current,
-            target_type="template_version",
-            target_id=version_id,
-            details={
-                "version_id": version_id,
-                "version_number": version["version_number"],
-            },
-        )
-        return {"deleted": True, "version_id": version_id}
-
-    @app.get("/courses")
-    def list_courses(
-        _: dict = Depends(require_permission(Permission.CERTIFICATES_ISSUE)),
-    ) -> list[str]:
-        """Return the canonical list of valid courses (participant field)."""
-        return COURSES
 
     # ── Modelo estruturado: pré-validação + geração confirmada ──────────────────
 

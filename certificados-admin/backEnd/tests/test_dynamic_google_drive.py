@@ -190,8 +190,10 @@ def _begin_and_complete_oauth(client, monkeypatch, service: FakeDriveService | N
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     output = io.BytesIO()
-    pd.DataFrame(rows).to_excel(output, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(output, index=False)
     return output.getvalue()
 
 

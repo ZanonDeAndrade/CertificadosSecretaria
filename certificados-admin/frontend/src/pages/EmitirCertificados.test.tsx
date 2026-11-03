@@ -567,6 +567,21 @@ function chooseType(value: string) {
   });
 }
 
+test("a tela diz que nome e e-mail são obrigatórios, e na Mostra um e-mail por autor", async () => {
+  render();
+  expect(
+    screen.getByText(/Colunas obrigatórias: nome e e-mail\. Carga horária, curso/),
+  ).not.toBeNull();
+  expect(screen.getByText(/obrigatória se o texto usar \{\{carga_horaria\}\}/)).not.toBeNull();
+
+  chooseType("scientific_initiation");
+  expect(
+    screen.getByText(/Colunas obrigatórias: autor1, email1, evento e titulo_trabalho/),
+  ).not.toBeNull();
+  expect(screen.getByText(/cada um com o e-mail de mesmo número/)).not.toBeNull();
+  expect(screen.queryByText(/Colunas obrigatórias: nome e e-mail/)).toBeNull();
+});
+
 async function reachWorkPreview() {
   vi.mocked(validateSpreadsheet).mockResolvedValue(WORK_PREVIEW);
   render();

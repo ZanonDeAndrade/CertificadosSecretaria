@@ -17,8 +17,11 @@ from database.models import Base
 
 TABLE_ORDER = (
     "admin_users",
+    "courses",
+    "certificate_templates",
     "template_versions",
     "certificates",
+    "certificate_email_hashes",
     "auth_sessions",
     "login_throttles",
     "public_rate_limits",

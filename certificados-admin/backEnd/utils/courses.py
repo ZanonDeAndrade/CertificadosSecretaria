@@ -1,28 +1,20 @@
+"""Course names the spreadsheet validator canonicalises.
+
+The registered course list lives in the ``courses`` table (managed in the
+settings screen) and files templates. The spreadsheet keeps using this fixed
+list on purpose: a participant's course is part of the duplicate key of a
+certificate, so a course renamed in the settings must not change how an old
+spreadsheet is read.
+"""
+
 from __future__ import annotations
 
-import unicodedata
+from database.courses import DEFAULT_COURSES, normalize_course_key
 
-# Canonical list of valid courses. This is the single source of truth for
-# both upload validation and the /courses endpoint consumed by the frontend.
-COURSES: list[str] = [
-    "Sistemas de Informação",
-    "Direito",
-    "Ontopsicologia",
-    "Contabilidade",
-    "Pedagogia",
-    "Gastronomia",
-    "Administração",
-    "Hotelaria",
-]
+# Canonical spellings the validator maps synonyms onto.
+COURSES: list[str] = list(DEFAULT_COURSES)
 
 
 def normalize_course_name(course: str) -> str:
-    """Stable, lowercase ASCII key from an arbitrary course name.
-
-    "Engenharia Civil" -> "engenharia_civil"; "Ciências Contábeis" ->
-    "ciencias_contabeis". Used by the spreadsheet validator to match course
-    synonyms against :data:`COURSES`.
-    """
-    nfkd = unicodedata.normalize("NFKD", course.strip())
-    ascii_only = nfkd.encode("ascii", "ignore").decode("ascii")
-    return "_".join(ascii_only.lower().split())
+    """Same key as the registered courses: "Ciências Contábeis" -> "ciencias_contabeis"."""
+    return normalize_course_key(course)

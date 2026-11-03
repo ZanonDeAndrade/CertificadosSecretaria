@@ -4,23 +4,25 @@ Supported (canonical) columns — header names are normalised (lowercase, no
 accents, no spaces/punctuation) and matched against a set of synonyms, so
 "Carga Horária", "carga_horaria" and "CH" all resolve to ``carga_horaria``:
 
-    nome*          carga_horaria*  (* obrigatório)
-    curso          evento          data_emissao
-    data_inicio    data_fim        email   registro_academico
+    nome*          email*          (* obrigatório)
+    carga_horaria  curso           evento          data_emissao
+    data_inicio    data_fim        registro_academico
 
 Rules enforced here:
-- Only ``nome`` and ``carga_horaria`` are REQUIRED. Everything else is optional
-  and is meant to be written by the secretary in the certificate body text.
-- ``carga_horaria`` is parsed to a positive integer (structured).
+- Only ``nome`` and ``email`` are REQUIRED. Everything else is optional and is
+  meant to be written by the secretary in the certificate body text.
+- ``email`` is validated (one "@", a dot in the domain) and normalised (lower
+  case, no spaces); the certificate keeps its keyed hash for the public search.
+- ``carga_horaria``, when present, is parsed to a positive integer.
 - Optional fields never block a row: ``curso`` is canonicalised when it matches
   the official list (kept as-is otherwise), dates are normalised when parseable,
   and unknown/extra columns are ignored.
 - ``evento`` is a distinct column (never the course).
-- Per-work types require ``autor1``, ``evento`` and ``titulo_trabalho``; the
-  workload is optional.
+- Per-work types require ``autor1``, ``email1``, ``evento`` and
+  ``titulo_trabalho``; every author listed needs the e-mail of the same number.
 - A cell still holding an example text of the model workbook ("Equipe
   (opcional)", ...) invalidates its row: it would print on the certificate.
-- invalid rows (missing name or workload) never produce a certificate.
+- invalid rows (missing name or e-mail) never produce a certificate.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from certificados_backend.utils.courses import COURSES, normalize_course_name
 from certificados_backend.utils.dates import normalize_date
 
 from database.certificate_types import MAX_WORK_AUTHORS, certificate_type_traits
+from database.privacy import is_valid_email, normalize_email
 
 DEFAULT_MAX_ROWS = 2000
 DEFAULT_MAX_COLS = 50
@@ -90,16 +93,28 @@ _COLUMN_SYNONYMS: dict[str, set[str]] = {
         "title",
         "worktitle",
     },
-    # Per-work certificates: "Autor 1", "autor_1", "Autor01" all map to autor1.
+    # Per-work certificates: "Autor 1", "autor_1", "Autor01" all map to autor1,
+    # and "E-mail 1", "email_1", "Email do autor 1" to email1.
     **{
         f"autor{index}": {f"autor{index}", f"autor0{index}", f"author{index}", f"coautor{index}"}
         for index in range(1, MAX_WORK_AUTHORS + 1)
     },
+    **{
+        f"email{index}": {
+            f"email{index}",
+            f"email0{index}",
+            f"emailautor{index}",
+            f"emaildoautor{index}",
+            f"emailcoautor{index}",
+        }
+        for index in range(1, MAX_WORK_AUTHORS + 1)
+    },
 }
 
-REQUIRED_COLUMNS = ("nome", "carga_horaria")
-# Per-work certificates name the work and its event; the workload may be blank.
-PER_WORK_REQUIRED_COLUMNS = ("autor1", "evento", "titulo_trabalho")
+REQUIRED_COLUMNS = ("nome", "email")
+# Per-work certificates name the work and its event, and every author has an
+# e-mail; the workload may be blank in every type.
+PER_WORK_REQUIRED_COLUMNS = ("autor1", "email1", "evento", "titulo_trabalho")
 
 # Texts the example row of earlier model workbooks carried. Those models are
 # still in circulation, and a cell left unchanged would print on the
@@ -144,12 +159,13 @@ class SpreadsheetError(Exception):
 class SpreadsheetRow:
     row_number: int
     nome: str
-    # ``None`` only for types whose workload is optional (per-work certificates).
+    # Blank when the spreadsheet brings no workload; the texts then omit it.
     carga_horaria: int | None
     # Optional fields — written by the secretary in the body text when absent.
     curso: str = ""  # canonical course name when matched, else raw
     evento: str = ""
     data_emissao: str = ""  # normalised (por extenso) when parseable
+    # The holder's e-mail, normalised (lower case, no spaces). Required.
     email: str = ""
     documento: str = ""
     data_inicio: str = ""
@@ -157,6 +173,9 @@ class SpreadsheetRow:
     # Per-work certificates: the authors in order, blanks already dropped.
     # ``nome`` is the first author, the certificate's holder.
     autores: tuple[str, ...] = ()
+    # One normalised e-mail per author, in the same order as ``autores``; on an
+    # ordinary certificate, just the holder's.
+    emails: tuple[str, ...] = ()
     equipe: str = ""
     titulo_trabalho: str = ""
 
@@ -378,8 +397,8 @@ def read_and_validate(
 
     ``certificate_type`` selects the column contract: per-work types take the
     authors columns (``autor1`` required, ``nome`` standing in for it only when
-    ``autor1`` is absent), require the event and the work title, and may leave
-    the workload blank.
+    ``autor1`` is absent; the same for ``email1`` and ``email``), one e-mail
+    per author, and require the event and the work title.
     """
     traits = certificate_type_traits(certificate_type)
     per_work = traits.per_work_authors
@@ -403,6 +422,8 @@ def read_and_validate(
     if per_work:
         if "autor1" not in colmap and "nome" in colmap:
             colmap["autor1"] = colmap.pop("nome")
+        if "email1" not in colmap and "email" in colmap:
+            colmap["email1"] = colmap.pop("email")
         ignored = sorted(
             str(column)
             for column in dataframe.columns
@@ -428,42 +449,62 @@ def read_and_validate(
 
     default_emissao_norm = normalize_date(default_data_emissao) if has_emissao_default else None
 
-    author_columns = [f"autor{index}" for index in range(1, MAX_WORK_AUTHORS + 1)]
     for offset, (_, raw) in enumerate(dataframe.iterrows()):
         row_number = offset + 2  # +1 header, +1 to 1-based
         values = {canonical: _cell(raw[col]) for canonical, col in colmap.items()}
 
-        # Blank cells between authors are dropped; the rest keep their order.
-        autores = tuple(values.get(column, "") for column in author_columns if values.get(column))
+        # Authors and e-mails pair by column number (autor3 ↔ email3). Blank
+        # pairs between authors are dropped; the rest keep their order.
+        pairs = [
+            (values.get(f"autor{index}", ""), values.get(f"email{index}", ""), index)
+            for index in range(1, MAX_WORK_AUTHORS + 1)
+            if values.get(f"autor{index}") or values.get(f"email{index}")
+        ]
         if per_work:
-            if not autores and not values.get("carga_horaria"):
+            if not pairs and not values.get("carga_horaria"):
                 continue  # skip fully empty rows
-        elif not values.get("nome") and not values.get("carga_horaria"):
+        elif not (values.get("nome") or values.get("email") or values.get("carga_horaria")):
             continue  # skip fully empty rows
 
         errors: list[str] = example_text_errors(values)
+        emails: list[str] = []
 
-        # ── Required: name (or first author) + workload ───────────────────────
+        # ── Required: name (or first author) + e-mail ─────────────────────────
         if per_work:
+            autores = tuple(name for name, _mail, _index in pairs if name)
             nome = autores[0] if autores else ""
             if not nome:
                 errors.append("autor1 é obrigatório")
+            for name, mail, index in pairs:
+                if name and not mail:
+                    errors.append(f"email{index} é obrigatório (autor{index})")
+                elif mail and not name:
+                    errors.append(f"email{index} preenchido sem autor{index}")
+                elif not is_valid_email(mail):
+                    errors.append(f"email{index} inválido")
+                else:
+                    emails.append(normalize_email(mail))
             # The certificate names the work and the event it was presented at.
             if not values.get("titulo_trabalho"):
                 errors.append("titulo_trabalho é obrigatório")
             if not values.get("evento"):
                 errors.append("evento é obrigatório")
         else:
+            autores = ()
             nome = values.get("nome", "")
             if not nome:
                 errors.append("nome é obrigatório")
+            mail = values.get("email", "")
+            if not mail:
+                errors.append("email é obrigatório")
+            elif not is_valid_email(mail):
+                errors.append("email inválido")
+            else:
+                emails.append(normalize_email(mail))
 
         carga_raw = values.get("carga_horaria", "")
         carga = parse_workload(carga_raw) if carga_raw else None
-        if not carga_raw:
-            if not traits.optional_workload:
-                errors.append("carga_horaria é obrigatória")
-        elif carga is None:
+        if carga_raw and carga is None:
             errors.append(f"carga_horaria inválida: '{carga_raw}'")
 
         # ── Optional: never block a row; normalise when possible ──────────────
@@ -497,11 +538,12 @@ def read_and_validate(
                 curso=curso,
                 evento=evento,
                 data_emissao=emissao,
-                email=values.get("email", ""),
+                email=emails[0] if emails else "",
                 documento=values.get("documento", ""),
                 data_inicio=inicio,
                 data_fim=fim,
-                autores=autores if per_work else (),
+                autores=autores,
+                emails=tuple(emails),
                 equipe=values.get("equipe", ""),
                 titulo_trabalho=values.get("titulo_trabalho", ""),
             )

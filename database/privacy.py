@@ -34,6 +34,31 @@ def normalize_document(value: str | None) -> str:
     return "".join(ch for ch in normalized if ch.isalnum())
 
 
+# An address as the spreadsheet and the public site compare it: one "@", a dot
+# in the domain, nothing else assumed. Longer than this no mailbox accepts.
+MAX_EMAIL_LENGTH = 254
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def normalize_email(value: str | None) -> str:
+    """The form an e-mail is validated, hashed and compared in.
+
+    NFKC, lower case and without any whitespace, so "Ana.Silva@Exemplo.com "
+    and "ana.silva@exemplo.com" are the same person.
+    """
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return "".join(normalized.split())
+
+
+def is_valid_email(value: str | None) -> bool:
+    normalized = normalize_email(value)
+    return (
+        0 < len(normalized) <= MAX_EMAIL_LENGTH
+        and normalized.count("@") == 1
+        and _EMAIL_RE.fullmatch(normalized) is not None
+    )
+
+
 def active_document_key_id() -> str:
     key_id = (os.getenv("DOCUMENT_HASH_ACTIVE_KEY_ID") or LEGACY_DOCUMENT_KEY_ID).strip()
     if not _KEY_ID_RE.fullmatch(key_id):
@@ -167,6 +192,68 @@ def document_hash_candidates(value: str | None) -> dict[str, str]:
     }
 
 
+def _email_digest(secret: bytes, normalized: str) -> str:
+    # Domain-separated from the document HMAC: the same key never yields the
+    # same digest for an e-mail and for an academic record.
+    return hmac.new(secret, f"email:v1:{normalized}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def email_hash(value: str | None, *, key_id: str | None = None) -> str | None:
+    normalized = normalize_email(value)
+    if not normalized:
+        return None
+    return _email_digest(_secret(key_id), normalized)
+
+
+def email_hash_with_key_id(value: str | None) -> tuple[str | None, str | None]:
+    key_id = active_document_key_id()
+    digest = email_hash(value, key_id=key_id)
+    return digest, key_id if digest else None
+
+
+def email_hash_candidates(value: str | None) -> dict[str, str]:
+    """The keyed hashes that may identify a stored e-mail, one per accepted key.
+
+    Rows keep the key version they were written with, so a public search has
+    to try every key still accepted during a rotation; the plain e-mail is
+    never stored or logged.
+    """
+
+    normalized = normalize_email(value)
+    if not normalized:
+        return {}
+    return {
+        key_id: _email_digest(secret, normalized) for key_id, secret in document_keyring().items()
+    }
+
+
+def matching_email_key_id(
+    expected_hash: str | None,
+    email: str | None,
+    *,
+    key_id: str | None = None,
+) -> str | None:
+    """Constant-time check of an e-mail against a stored keyed hash.
+
+    Same contract as :func:`matching_document_key_id`: the recorded key
+    version is tried, or every configured key when none is recorded, without
+    an early return.
+    """
+
+    normalized = normalize_email(email)
+    if not expected_hash or not normalized:
+        return None
+    keys = document_keyring()
+    candidates = [key_id] if key_id else sorted(keys)
+    matched: str | None = None
+    for candidate_id in candidates:
+        secret = keys.get(candidate_id)
+        candidate_hash = "0" * 64 if secret is None else _email_digest(secret, normalized)
+        if hmac.compare_digest(expected_hash, candidate_hash) and secret is not None:
+            matched = candidate_id
+    return matched
+
+
 def public_result_reference(unique_code: str) -> str:
     """Return a non-authorizing opaque selector for a name-search result.
 
@@ -185,7 +272,12 @@ def public_result_reference(unique_code: str) -> str:
 def pseudonymous_rate_limit_key(scope: str, value: str | None) -> str:
     """HMAC an in-memory identity before it is stored as a rate-limit key."""
 
-    normalized = normalize_document(value) if "document" in scope else normalize_name(value)
+    if "document" in scope:
+        normalized = normalize_document(value)
+    elif "email" in scope:
+        normalized = normalize_email(value)
+    else:
+        normalized = normalize_name(value)
     if not normalized:
         normalized = "empty"
     key_id = active_document_key_id()

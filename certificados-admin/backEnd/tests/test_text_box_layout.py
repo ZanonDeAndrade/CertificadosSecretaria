@@ -342,8 +342,10 @@ def test_text_layout_endpoint_limits_text_font_and_item_count(client, auth_heade
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buffer = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buffer, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buffer, index=False)
     return buffer.getvalue()
 
 
@@ -354,6 +356,7 @@ def _files(rows: list[dict]) -> dict:
 def _row(nome: str, row_extra: dict | None = None) -> dict:
     row = {
         "nome": nome,
+        "email": "pessoa.sintetica@exemplo.com",
         "curso": "Direito",
         "evento": "Semana Jurídica",
         "carga_horaria": 40,
@@ -371,7 +374,7 @@ def _activate_layout(client, elements: list[dict]) -> None:
         "elements": elements,
     }
     version = template_service.create_version(name="Com caixas", layout=layout)
-    activated = client.post(f"/templates/versions/{version['id']}/activate")
+    activated = client.post(f"/templates/{version['template_id']}/activate")
     assert activated.status_code == 200, activated.text
 
 

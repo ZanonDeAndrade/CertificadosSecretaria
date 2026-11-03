@@ -3,10 +3,13 @@
 {# Busca pública. Três caminhos, com pesos diferentes:
    - por código: caminho preferencial, não expõe dados de terceiros;
    - por nome:   POST (o termo não vai para a URL nem para o histórico) e o
-                 download exige Registro Acadêmico (RA);
-   - por RA:     POST e compara somente HMAC; retorna todos os certificados do RA.
+                 download exige o e-mail cadastrado (ou o RA, em certificados
+                 antigos sem e-mail);
+   - por e-mail: POST e compara somente HMAC; retorna todos os certificados
+                 ligados ao e-mail, inclusive como coautor; o download pede o
+                 e-mail de novo e o nome completo. O e-mail nunca volta na página.
    Todos os campos e ações que o backend espera são preservados:
-   nome, registro_academico, page, codigo, result_ref. #}
+   nome, email, confirmacao, page, codigo, result_ref. #}
 
 {% block content %}
   <div class="page-intro">
@@ -68,8 +71,8 @@
     <div class="card__header">
       <h2 id="busca-nome">Não tenho o código</h2>
       <p>
-        Busque pelo nome ou pelo Registro Acadêmico (RA). Para baixar pelo nome,
-        será preciso confirmar o RA cadastrado na planilha de emissão.
+        Busque pelo nome ou pelo e-mail cadastrado na emissão. Para baixar,
+        será preciso confirmar esse e-mail.
       </p>
     </div>
     <div class="card__body">
@@ -94,20 +97,22 @@
       <div class="search-divider" role="separator"><span>ou</span></div>
 
       <form action="{{ public_base_path }}/" method="post" role="search">
-        <label class="field-label" for="registro-academico">Registro Acadêmico (RA)</label>
-        <p class="field-hint" id="registro-academico-hint">
-          A pesquisa retorna todos os certificados relacionados exatamente a esse RA.
+        <label class="field-label" for="email">E-mail cadastrado</label>
+        <p class="field-hint" id="email-hint">
+          A pesquisa retorna todos os certificados ligados exatamente a esse
+          e-mail, inclusive como coautor. Ele não é exibido nem guardado.
         </p>
         <div class="field-row">
           <input
-            id="registro-academico"
-            name="registro_academico"
-            type="password"
-            maxlength="96"
-            autocomplete="off"
-            aria-describedby="registro-academico-hint"
+            id="email"
+            name="email"
+            type="email"
+            maxlength="254"
+            autocomplete="email"
+            spellcheck="false"
+            aria-describedby="email-hint"
           />
-          <button type="submit" class="btn btn-primary">Buscar por RA</button>
+          <button type="submit" class="btn btn-primary">Buscar por e-mail</button>
         </div>
       </form>
     </div>
@@ -132,8 +137,8 @@
               Tente o nome completo, como consta na inscrição. Se ainda assim não
               aparecer, procure a secretaria acadêmica.
             {% else %}
-              Nenhum certificado ativo ou revogado está relacionado ao Registro
-              Acadêmico (RA) informado. Confira o valor ou procure a secretaria acadêmica.
+              Nenhum certificado ativo ou revogado está ligado ao e-mail informado.
+              Confira a digitação ou procure a secretaria acadêmica.
             {% endif %}
           </div>
         </div>
@@ -190,28 +195,48 @@
                     Baixar PDF
                   </a>
                 {% else %}
-                  {# Busca por nome/RA: confirmar identidade antes de liberar o arquivo. #}
+                  {# Busca por nome/e-mail: confirmar identidade antes de liberar o arquivo. #}
                   <form action="{{ public_base_path }}/public/certificates/download-by-search" method="post"
                         class="download-confirmation">
                     <input type="hidden" name="search_type" value="{{ search_type }}" />
                     {% if search_type == 'nome' %}
                       <input type="hidden" name="nome" value="{{ query }}" />
+                    {% else %}
+                      <label class="field-label" for="nome-{{ loop.index }}">Nome completo</label>
+                      <p class="field-hint" id="nome-hint-{{ loop.index }}">
+                        Como está impresso no certificado.
+                      </p>
+                      <input
+                        id="nome-{{ loop.index }}"
+                        name="nome"
+                        type="text"
+                        maxlength="160"
+                        autocomplete="name"
+                        aria-describedby="nome-hint-{{ loop.index }}"
+                        required
+                      />
                     {% endif %}
                     <input type="hidden" name="result_ref" value="{{ cert.result_ref }}" />
                     <input type="hidden" name="page" value="{{ page }}" />
-                    <label class="field-label" for="registro-academico-{{ loop.index }}">
-                      Registro Acadêmico (RA)
+                    <label class="field-label" for="confirmacao-{{ loop.index }}">
+                      E-mail cadastrado
                     </label>
-                    <p class="field-hint" id="registro-academico-hint-{{ loop.index }}">
-                      Confirme o RA para liberar este certificado.
+                    <p class="field-hint" id="confirmacao-hint-{{ loop.index }}">
+                      {% if search_type == 'nome' %}
+                        Confirme o e-mail cadastrado na emissão para liberar este certificado.
+                        Certificado antigo, sem e-mail: informe o Registro Acadêmico (RA).
+                      {% else %}
+                        Digite o e-mail de novo para liberar este certificado.
+                      {% endif %}
                     </p>
                     <input
-                      id="registro-academico-{{ loop.index }}"
-                      name="registro_academico"
-                      type="password"
-                      maxlength="96"
+                      id="confirmacao-{{ loop.index }}"
+                      name="confirmacao"
+                      type="text"
+                      maxlength="254"
                       autocomplete="off"
-                      aria-describedby="registro-academico-hint-{{ loop.index }}"
+                      spellcheck="false"
+                      aria-describedby="confirmacao-hint-{{ loop.index }}"
                       required
                     />
                     <button type="submit" class="btn btn-download">Confirmar e baixar</button>
@@ -222,10 +247,11 @@
           {% endfor %}
         </ul>
 
-        {% if search_type in ('nome', 'ra') %}
+        {% if search_type in ('nome', 'email') %}
           <p class="field-hint" style="margin-top: var(--space-3)">
-            O download exige o Registro Acadêmico (RA) cadastrado na emissão. Se o
-            certificado não tiver RA, procure a secretaria responsável.
+            O download exige o e-mail cadastrado na emissão. Certificados emitidos
+            antes do cadastro de e-mail aceitam o Registro Acadêmico (RA). Se nada
+            funcionar, procure a secretaria responsável.
           </p>
         {% endif %}
 
@@ -258,9 +284,10 @@
     <p>
       Esta consulta mostra apenas o nome do participante, o curso ou evento, a
       carga horária e a data — o mínimo necessário para identificar o
-      certificado. O Registro Acadêmico (RA) e o e-mail nunca são exibidos; o RA
-      serve apenas para localizar os certificados e confirmar que o arquivo
-      pertence a você. As buscas por nome ou RA não ficam registradas no endereço
+      certificado. O e-mail e o Registro Acadêmico (RA) nunca são exibidos; o
+      e-mail serve apenas para localizar os certificados e confirmar que o
+      arquivo pertence a você, e é comparado por um código derivado dele, não
+      pelo texto. As buscas por nome ou e-mail não ficam registradas no endereço
       da página.
     </p>
   </section>

@@ -5,27 +5,25 @@
  * paper from the application chrome, the way a print preview does, so the
  * operator can see the actual page edge.
  *
- * Zoom scales a wrapper rather than the fabric canvas itself, which keeps
- * fabric's own coordinate space (and therefore hit-testing) untouched.
+ * The page is always shown whole: `stageRef` hands the inner area to the
+ * canvas hook, which observes its size and fits the page into it. There is no
+ * scrolling here; whatever the window, the panels or the art, the whole
+ * certificate is what the operator sees.
  */
 import React from "react";
 import Icon from "../../ui/Icon";
 
 interface EditorCanvasProps {
   canvasRef: React.Ref<HTMLCanvasElement>;
+  stageRef: React.Ref<HTMLDivElement>;
   backgroundUrl: string | null;
-  zoom: number;
 }
 
-export default function EditorCanvas({
-  canvasRef,
-  backgroundUrl,
-  zoom,
-}: EditorCanvasProps) {
+export default function EditorCanvas({ canvasRef, stageRef, backgroundUrl }: EditorCanvasProps) {
   return (
-    <div className="flex min-w-0 flex-1 flex-col items-center overflow-auto bg-[var(--neutral-300)] p-4 sm:p-6">
+    <div className="flex min-w-0 flex-1 flex-col bg-[var(--neutral-300)]">
       {!backgroundUrl && (
-        <div className="mb-4 flex max-w-md flex-col items-center gap-2 rounded-[var(--radius-md)] border border-dashed border-[color:var(--neutral-500)] bg-[var(--neutral-100)] px-6 py-5 text-center">
+        <div className="mx-auto mt-4 flex max-w-md shrink-0 flex-col items-center gap-2 rounded-[var(--radius-md)] border border-dashed border-[color:var(--neutral-500)] bg-[var(--neutral-100)] px-6 py-5 text-center">
           <Icon name="image" size={22} className="text-[color:var(--ink-muted)]" />
           <p className="text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]">
             Envie a arte de fundo do certificado
@@ -38,11 +36,9 @@ export default function EditorCanvas({
       )}
 
       <div
-        style={{
-          transform: `scale(${zoom})`,
-          transformOrigin: "top center",
-        }}
-        className="motion-safe:transition-transform motion-safe:duration-150"
+        ref={stageRef}
+        data-testid="editor-stage"
+        className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden"
       >
         <canvas
           ref={canvasRef}

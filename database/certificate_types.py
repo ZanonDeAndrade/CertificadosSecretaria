@@ -39,14 +39,10 @@ class CertificateTypeTraits:
     #: One certificate per work, valid for every author listed on it: the first
     #: author is the holder, the others travel with the certificate.
     per_work_authors: bool = False
-    #: Workload may be left blank on the spreadsheet.
-    optional_workload: bool = False
 
 
 CERTIFICATE_TYPE_TRAITS: dict[CertificateType, CertificateTypeTraits] = {
-    CertificateType.SCIENTIFIC_INITIATION: CertificateTypeTraits(
-        per_work_authors=True, optional_workload=True
-    ),
+    CertificateType.SCIENTIFIC_INITIATION: CertificateTypeTraits(per_work_authors=True),
 }
 _DEFAULT_TRAITS = CertificateTypeTraits()
 

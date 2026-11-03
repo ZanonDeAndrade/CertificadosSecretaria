@@ -41,8 +41,6 @@ export type IconName =
   | "duplicate"
   | "undo"
   | "redo"
-  | "zoom-in"
-  | "zoom-out"
   | "grid"
   | "eye"
   | "save"
@@ -98,8 +96,6 @@ const PATHS: Record<IconName, string> = {
     "M9 9V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-4M5 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z",
   undo: "M4 9h10a5 5 0 0 1 0 10h-6M4 9l4-4M4 9l4 4",
   redo: "M20 9H10a5 5 0 0 0 0 10h6m4-10-4-4m4 4-4 4",
-  "zoom-in": "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Zm5.2-1.8L21 21M8.5 11h5M11 8.5v5",
-  "zoom-out": "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Zm5.2-1.8L21 21M8.5 11h5",
   grid: "M4 9h16M4 15h16M9 4v16M15 4v16",
   eye: "M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Zm9.5 2.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z",
   save: "M5 4h11l3 3v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm3 0v5h7V4M8 14h8v7H8z",

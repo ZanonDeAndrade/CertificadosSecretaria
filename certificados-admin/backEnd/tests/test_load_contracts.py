@@ -27,6 +27,7 @@ def _maximum_sheet(count: int) -> bytes:
     pd.DataFrame(
         {
             "nome": [f"Participante Sintético {index:04d}" for index in range(count)],
+            "email": [f"participante{index:04d}@exemplo.com" for index in range(count)],
             "carga_horaria": [8] * count,
             "curso": ["Curso de Carga"] * count,
             "evento": ["Evento de Carga"] * count,

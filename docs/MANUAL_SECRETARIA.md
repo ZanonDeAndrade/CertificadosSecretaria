@@ -16,17 +16,22 @@ o modelo e participantes sintéticos.
    conectado**, conecte a conta na tela oficial do Google antes de preparar o
    lote; assim o redirect não interrompe uma planilha já selecionada.
 2. Baixe a planilha modelo.
-3. Preencha ao menos `nome` e `carga_horaria`; revise curso, evento e datas.
+3. Preencha ao menos `nome` e `email`; revise curso, evento, datas e
+   `carga_horaria`. A carga horária só é obrigatória quando o texto padrão usa
+   `{{carga_horaria}}`: nesse caso a linha sem carga fica inválida. O e-mail é
+   o que o participante usa na consulta pública para encontrar e baixar o
+   certificado; ele nunca aparece para ninguém.
    Na Mostra de Iniciação Científica sai um certificado por trabalho, válido
-   para todos os autores: use as colunas `autor1` a `autor8` (só `autor1` é
-   obrigatória), `evento` e `titulo_trabalho` (obrigatórias) e, se quiser,
-   `equipe` e `carga_horaria`. Baixe o modelo com o tipo já selecionado para
-   receber as colunas certas; a aba `Instruções` explica cada uma. Deixe o
-   texto padrão em branco para usar o texto automático da Mostra. A Mostra
-   precisa de um template próprio ativo, sem o nome do participante e com o
-   bloco Autores; sem ele, a Conferência bloqueia o lote.
-4. Preencha `registro_academico` quando o participante precisar pesquisar ou
-   liberar certificados pelo RA na consulta pública.
+   para todos os autores: use as colunas `autor1`/`email1` a `autor8`/`email8`
+   (só `autor1` e `email1` são obrigatórias, mas cada autor preenchido precisa
+   do e-mail de mesmo número), `evento` e `titulo_trabalho` (obrigatórias) e,
+   se quiser, `equipe` e `carga_horaria`. Baixe o modelo com o tipo já
+   selecionado para receber as colunas certas; a aba `Instruções` explica cada
+   uma. Deixe o texto padrão em branco para usar o texto automático da Mostra.
+   A Mostra precisa de um template próprio ativo, sem o nome do participante e
+   com o bloco Autores; sem ele, a Conferência bloqueia o lote.
+4. `registro_academico` é opcional. Na consulta pública ele só libera o
+   download de certificados emitidos antes do cadastro de e-mail.
 5. Salve como `.xlsx` e envie por seletor ou arrastar/soltar.
 
 ## 3. Validar e escolher os destinos
@@ -76,10 +81,13 @@ nem altera certificados existentes.
 ## 7. Validação pública
 
 O QR abre `/validar/<código>`. Um certificado ativo exibe metadados mínimos;
-revogado exibe seu estado e não permite download. Busca por nome não revela o
-código, nome ou RA; os dois últimos exigem confirmar o Registro Acadêmico (RA)
-para liberar o arquivo. Um trabalho da Mostra aparece na busca pelo título, com
-os autores mascarados.
+revogado exibe seu estado e não permite download. A busca é por nome ou por
+e-mail cadastrado; nenhuma delas revela o código, o e-mail ou o RA. Para
+liberar o arquivo após a busca por nome, o participante confirma o e-mail
+cadastrado na emissão (certificados antigos, sem e-mail, aceitam o RA); após a
+busca por e-mail, digita o e-mail de novo e o nome completo. Um trabalho da
+Mostra aparece na busca pelo título, com os autores mascarados, e é encontrado
+pelo e-mail de qualquer autor.
 
 ## 8. Encerrar e comunicar incidente
 

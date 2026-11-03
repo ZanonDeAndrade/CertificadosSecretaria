@@ -20,8 +20,10 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _xlsx(rows) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buf = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buf, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buf, index=False)
     return buf.getvalue()
 
 
@@ -31,6 +33,7 @@ def _files(rows):
 
 VALID = {
     "nome": "Ana Souza",
+    "email": "ana.souza@exemplo.com",
     "curso": "Direito",
     "evento": "Semana Jurídica",
     "carga_horaria": 40,

@@ -15,8 +15,10 @@ ADMIN_PASSWORD = "Senha-Sintetica-1!"
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buffer = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buffer, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buffer, index=False)
     return buffer.getvalue()
 
 
@@ -233,7 +235,7 @@ def test_auditor_is_read_only_and_secretaria_has_operational_matrix(client, auth
         client.post("/certificates/download-zip", json={"codes": ["CERT-NAO-EXISTE"]}).status_code
         == 403
     )
-    assert client.get("/templates/versions").status_code == 403
+    assert client.get("/templates").status_code == 403
     assert client.get("/admin/users").status_code == 403
 
 

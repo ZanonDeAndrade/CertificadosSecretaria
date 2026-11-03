@@ -1,9 +1,9 @@
-"""Seed the single global certificate template (idempotent).
+"""Seed the default certificate model (idempotent).
 
 Run once after applying the database migrations (``alembic upgrade head``). If no
-template version exists yet, it creates version 1 from the bundled default
-background (``templates/certificado_base.png``) and activates it. Existing
-versions are left untouched.
+template version exists yet, it creates the generic model "Modelo padrão" from
+the bundled default background (``templates/certificado_base.png``) and
+activates it. Existing models are left untouched.
 
 Usage:
     python seed_template.py
@@ -30,10 +30,10 @@ def main() -> int:
     active = db.get_active_template_version()
 
     if before == 0 and after > 0 and active is not None:
-        print(f"Template global padrao criado e ativado (v{active['version_number']}).")
+        print(f"Modelo padrao criado e ativado (v{active['version_number']}).")
     else:
         label = f"v{active['version_number']}" if active else "nenhuma"
-        print(f"Nada a fazer: {after} versao(oes) ja existem (ativa: {label}).")
+        print(f"Nada a fazer: {after} revisao(oes) ja existem (ativa: {label}).")
     return 0
 
 

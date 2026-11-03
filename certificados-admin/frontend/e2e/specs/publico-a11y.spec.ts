@@ -21,6 +21,7 @@ const STATES = [
   "busca-inicial",
   "busca-por-codigo",
   "busca-por-nome",
+  "busca-por-email",
   "sem-resultados",
   "erro",
   "valido",

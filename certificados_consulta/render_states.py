@@ -88,6 +88,26 @@ STATES: dict[str, tuple[str, dict]] = {
             total_pages=3,
         ),
     ),
+    "busca-por-email": (
+        "index.html",
+        _index_ctx(
+            search_type="email",
+            query="",
+            results=[
+                _cert(),
+                _cert(
+                    participant_name="A••• C•••",
+                    event_name="Mostra de Iniciação Científica",
+                    unique_code="CERT-2026-MM0001",
+                    result_ref="ghi789",
+                    per_work=True,
+                    work_title="Horta vertical automatizada",
+                    authors=["A••• C•••", "B••• L•••"],
+                ),
+            ],
+            total=2,
+        ),
+    ),
     "sem-resultados": (
         "index.html",
         _index_ctx(search_type="nome", query="Fulano de Tal", results=[], total=0),
@@ -142,6 +162,9 @@ def main() -> int:
     )
     env.globals["url_for"] = _url_for
     env.globals["institution_name"] = "Instituição Acadêmica de Demonstração"
+    # The search page titles itself with the app name; without it the rendered
+    # state has an empty <title>, which the accessibility check rejects.
+    env.globals["app_name"] = "Consulta de Certificados"
 
     for name, (template_name, context) in STATES.items():
         html = env.get_template(template_name).render(**context)

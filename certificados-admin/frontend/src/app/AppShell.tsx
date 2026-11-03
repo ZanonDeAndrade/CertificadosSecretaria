@@ -9,8 +9,13 @@
  *    and marks the rest of the shell inert while open;
  *  - route changes move focus to the main region and announce the page name,
  *    which is what a SPA otherwise loses compared with real page loads.
+ *
+ * A page may take the whole viewport ("immersive": the template editor). The
+ * sidebar and topbar are then hidden and the drawer serves every screen size,
+ * opened from a button the page provides. A page with unsaved work registers a
+ * leave guard, and every exit through the shell asks first.
  */
-import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "../ui/cn";
 import Icon from "../ui/Icon";
@@ -19,6 +24,7 @@ import { useAuth } from "./AuthContext";
 import { NAV_GROUPS, NAV_ITEMS, NavItem } from "./navigation";
 import { roleLabel } from "./permissions";
 import { useInstitution } from "./InstitutionContext";
+import { LeaveGuard, ShellContext, ShellControls } from "./ShellContext";
 
 /* ── Brand mark ──────────────────────────────────────────────────────────────
  * The product name and AMF logo live here so every authenticated layout uses
@@ -46,15 +52,30 @@ function useVisibleNav(): NavItem[] {
   return NAV_ITEMS.filter((item) => !item.permission || can(item.permission));
 }
 
+/** A plain left click, the only kind a leave guard may intercept. */
+function isPlainClick(event: React.MouseEvent): boolean {
+  return (
+    event.button === 0 &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.shiftKey &&
+    !event.altKey
+  );
+}
+
 function NavList({
   items,
   onNavigate,
+  leave,
   variant,
 }: {
   items: NavItem[];
   onNavigate?: () => void;
+  /** Runs the navigation now, or after the current page allows leaving. */
+  leave: (action: () => void) => void;
   variant: "sidebar" | "drawer";
 }) {
+  const navigate = useNavigate();
   return (
     <>
       {NAV_GROUPS.map((group) => {
@@ -70,7 +91,14 @@ function NavList({
                 <li key={item.to}>
                   <NavLink
                     to={item.to}
-                    onClick={onNavigate}
+                    onClick={(event) => {
+                      onNavigate?.();
+                      if (event.defaultPrevented || !isPlainClick(event)) return;
+                      // Route through the leave guard; a modified click keeps
+                      // the browser's own behaviour (new tab).
+                      event.preventDefault();
+                      leave(() => navigate(item.to));
+                    }}
                     className={({ isActive }) =>
                       cn(
                         "flex items-start gap-2.5 rounded-[var(--radius)] px-3 transition-colors duration-[var(--duration-fast)]",
@@ -123,13 +151,44 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
 
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [immersive, setImmersive] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
   const drawerToggleRef = useRef<HTMLButtonElement>(null);
+  /* Whoever opened the drawer gets the focus back when it closes: the topbar
+   * button, or the one an immersive page provides. */
+  const drawerTriggerRef = useRef<HTMLElement | null>(null);
+  const leaveGuardRef = useRef<LeaveGuard | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const firstRender = useRef(true);
 
   const currentItem = items.find((item) => location.pathname.startsWith(item.to));
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    (drawerTriggerRef.current ?? drawerToggleRef.current)?.focus();
+  }, []);
+
+  const openDrawer = useCallback((trigger?: HTMLElement | null) => {
+    drawerTriggerRef.current = trigger ?? null;
+    setDrawerOpen(true);
+  }, []);
+
+  const setLeaveGuard = useCallback((guard: LeaveGuard | null) => {
+    leaveGuardRef.current = guard;
+  }, []);
+
+  /** Run `action` now, or once the page with unsaved work confirms leaving. */
+  const leave = useCallback((action: () => void) => {
+    const guard = leaveGuardRef.current;
+    if (guard) guard(action);
+    else action();
+  }, []);
+
+  const shell = useMemo<ShellControls>(
+    () => ({ immersive, setImmersive, drawerOpen, openDrawer, setLeaveGuard }),
+    [immersive, drawerOpen, openDrawer, setLeaveGuard],
+  );
 
   /* Close the drawer on navigation. */
   useEffect(() => {
@@ -161,8 +220,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setDrawerOpen(false);
-        drawerToggleRef.current?.focus();
+        closeDrawer();
         return;
       }
       if (event.key !== "Tab") return;
@@ -186,63 +244,68 @@ export default function AppShell({ children }: { children: ReactNode }) {
       document.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [drawerOpen]);
+  }, [drawerOpen, closeDrawer]);
 
-  const handleSignOut = useCallback(async () => {
-    setSigningOut(true);
-    try {
-      await signOut();
-      navigate("/entrar", { replace: true });
-    } finally {
-      setSigningOut(false);
-    }
-  }, [signOut, navigate]);
+  const handleSignOut = useCallback(() => {
+    // Signing out discards unsaved work like any other exit: ask first.
+    leave(() => {
+      void (async () => {
+        setSigningOut(true);
+        try {
+          await signOut();
+          navigate("/entrar", { replace: true });
+        } finally {
+          setSigningOut(false);
+        }
+      })();
+    });
+  }, [leave, signOut, navigate]);
 
   return (
+    <ShellContext.Provider value={shell}>
     <div className="min-h-screen bg-[var(--surface-sunken)]">
       <a href="#conteudo" className="skip-link">
         Ir para o conteúdo
       </a>
 
       {/* ── Desktop sidebar ─────────────────────────────────────────────── */}
-      <div
-        className={cn(
-          "on-dark fixed inset-y-0 left-0 z-[var(--z-sticky)] hidden w-[var(--sidebar-width)] lg:flex",
-          "flex-col border-r border-[color:var(--line-nav)] bg-[var(--surface-nav)]",
-        )}
-      >
-        <div className="flex h-[var(--topbar-height)] items-center gap-2.5 border-b border-[color:var(--line-nav)] px-4 text-[color:var(--ink-inverse)]">
-          <BrandMark className="h-10 w-10" />
-          <span className="min-w-0">
-            <span className="block text-[length:var(--text-sm)] font-semibold leading-tight">
-              {APP_NAME}
+      {!immersive && (
+        <div
+          className={cn(
+            "on-dark fixed inset-y-0 left-0 z-[var(--z-sticky)] hidden w-[var(--sidebar-width)] lg:flex",
+            "flex-col border-r border-[color:var(--line-nav)] bg-[var(--surface-nav)]",
+          )}
+        >
+          <div className="flex h-[var(--topbar-height)] items-center gap-2.5 border-b border-[color:var(--line-nav)] px-4 text-[color:var(--ink-inverse)]">
+            <BrandMark className="h-10 w-10" />
+            <span className="min-w-0">
+              <span className="block text-[length:var(--text-sm)] font-semibold leading-tight">
+                {APP_NAME}
+              </span>
+              <span className="block truncate text-[length:var(--text-2xs)] leading-tight text-[color:var(--ink-nav-muted)]">
+                {institutionName}
+              </span>
             </span>
-            <span className="block truncate text-[length:var(--text-2xs)] leading-tight text-[color:var(--ink-nav-muted)]">
-              {institutionName}
-            </span>
-          </span>
+          </div>
+
+          <nav aria-label="Navegação principal" className="flex-1 overflow-y-auto p-3">
+            <NavList items={items} leave={leave} variant="sidebar" />
+          </nav>
+
+          <div className="border-t border-[color:var(--line-nav)] p-3">
+            <p className="px-3 text-[length:var(--text-2xs)] text-[color:var(--ink-nav-muted)]">
+              Ambiente administrativo. As ações realizadas aqui são registradas.
+            </p>
+          </div>
         </div>
+      )}
 
-        <nav aria-label="Navegação principal" className="flex-1 overflow-y-auto p-3">
-          <NavList items={items} variant="sidebar" />
-        </nav>
-
-        <div className="border-t border-[color:var(--line-nav)] p-3">
-          <p className="px-3 text-[length:var(--text-2xs)] text-[color:var(--ink-nav-muted)]">
-            Ambiente administrativo. As ações realizadas aqui são registradas.
-          </p>
-        </div>
-      </div>
-
-      {/* ── Mobile drawer ───────────────────────────────────────────────── */}
+      {/* ── Drawer: mobile always; every size while a page is immersive ── */}
       {drawerOpen && (
-        <div className="fixed inset-0 z-[var(--z-drawer)] lg:hidden">
+        <div className={cn("fixed inset-0 z-[var(--z-drawer)]", !immersive && "lg:hidden")}>
           <div
             className="absolute inset-0 bg-[rgba(20,32,43,0.55)]"
-            onClick={() => {
-              setDrawerOpen(false);
-              drawerToggleRef.current?.focus();
-            }}
+            onClick={closeDrawer}
             aria-hidden="true"
           />
           <div
@@ -271,16 +334,18 @@ export default function AppShell({ children }: { children: ReactNode }) {
               <IconButton
                 icon="close"
                 label="Fechar menu"
-                onClick={() => {
-                  setDrawerOpen(false);
-                  drawerToggleRef.current?.focus();
-                }}
+                onClick={closeDrawer}
                 className="text-[color:var(--ink-nav)] hover:bg-[var(--surface-nav-hover)] hover:text-[color:var(--ink-inverse)]"
               />
             </div>
 
             <nav aria-label="Navegação principal" className="flex-1 overflow-y-auto p-3">
-              <NavList items={items} variant="drawer" />
+              <NavList
+                items={items}
+                leave={leave}
+                variant="drawer"
+                onNavigate={() => setDrawerOpen(false)}
+              />
             </nav>
 
             <div className="border-t border-[color:var(--line-nav)] p-3">
@@ -295,7 +360,10 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 icon="logout"
                 block
                 loading={signingOut}
-                onClick={handleSignOut}
+                onClick={() => {
+                  setDrawerOpen(false);
+                  handleSignOut();
+                }}
               >
                 Sair
               </Button>
@@ -305,118 +373,125 @@ export default function AppShell({ children }: { children: ReactNode }) {
       )}
 
       {/* ── Content column ──────────────────────────────────────────────── */}
-      <div className="lg:pl-[var(--sidebar-width)]">
-        <header
-          className={cn(
-            "sticky top-0 z-[var(--z-sticky)] flex h-[var(--topbar-height)] items-center gap-2",
-            "border-b border-[color:var(--line)] bg-[var(--surface)] px-3 sm:px-4",
-          )}
-        >
-          <IconButton
-            ref={drawerToggleRef}
-            icon="menu"
-            label="Abrir menu de navegação"
-            aria-expanded={drawerOpen}
-            aria-controls="menu-navegacao"
-            onClick={() => setDrawerOpen(true)}
-            className="lg:hidden"
-          />
-
-          {/* Mobile: the brand sits in the topbar since the sidebar is hidden. */}
-          <Link
-            to={can("dashboard.read") ? "/painel" : "/historico"}
-            className="flex min-w-0 items-center gap-2 rounded-[var(--radius)] text-[color:var(--ink)] lg:hidden"
+      <div className={cn(!immersive && "lg:pl-[var(--sidebar-width)]")}>
+        {!immersive && (
+          <header
+            className={cn(
+              "sticky top-0 z-[var(--z-sticky)] flex h-[var(--topbar-height)] items-center gap-2",
+              "border-b border-[color:var(--line)] bg-[var(--surface)] px-3 sm:px-4",
+            )}
           >
-            <BrandMark className="h-9 w-9" />
-            <span className="truncate text-[length:var(--text-base)] font-semibold">
-              {APP_NAME}
-            </span>
-          </Link>
+            <IconButton
+              ref={drawerToggleRef}
+              icon="menu"
+              label="Abrir menu de navegação"
+              aria-expanded={drawerOpen}
+              aria-controls="menu-navegacao"
+              onClick={() => openDrawer(drawerToggleRef.current)}
+              className="lg:hidden"
+            />
 
-          {/* Desktop: current section, so the topbar states where you are. */}
-          <p className="hidden min-w-0 truncate text-[length:var(--text-base)] font-medium text-[color:var(--ink)] lg:block">
-            {currentItem?.label ?? APP_NAME}
-          </p>
-
-          <div className="ml-auto flex items-center gap-1 sm:gap-2">
+            {/* Mobile: the brand sits in the topbar since the sidebar is hidden. */}
             <Link
-              to="/ajuda"
-              className={cn(
-                "inline-flex h-10 items-center gap-1.5 rounded-[var(--radius)] px-2.5",
-                "text-[length:var(--text-sm)] font-medium text-[color:var(--ink-muted)]",
-                "hover:bg-[var(--surface-inset)] hover:text-[color:var(--ink)]",
-              )}
+              to={can("dashboard.read") ? "/painel" : "/historico"}
+              className="flex min-w-0 items-center gap-2 rounded-[var(--radius)] text-[color:var(--ink)] lg:hidden"
             >
-              <Icon name="help" size={17} />
-              {/* Below `sm` the label is hidden, which would leave an
-                  icon-only link with no accessible name. The sr-only copy keeps
-                  the name present at every width. */}
-              <span className="hidden sm:inline">Ajuda</span>
-              <span className="sr-only sm:hidden">Ajuda</span>
+              <BrandMark className="h-9 w-9" />
+              <span className="truncate text-[length:var(--text-base)] font-semibold">
+                {APP_NAME}
+              </span>
             </Link>
 
-            <div className="hidden h-6 w-px bg-[var(--line)] sm:block" />
+            {/* Desktop: current section, so the topbar states where you are. */}
+            <p className="hidden min-w-0 truncate text-[length:var(--text-base)] font-medium text-[color:var(--ink)] lg:block">
+              {currentItem?.label ?? APP_NAME}
+            </p>
 
-            <Link
-              to="/perfil"
-              className={cn(
-                "inline-flex items-center gap-2 rounded-[var(--radius)] px-1.5 py-1",
-                "hover:bg-[var(--surface-inset)]",
-              )}
-            >
-              <span
-                aria-hidden="true"
+            <div className="ml-auto flex items-center gap-1 sm:gap-2">
+              <Link
+                to="/ajuda"
                 className={cn(
-                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-full)]",
-                  "bg-[var(--brand-100)] text-[length:var(--text-sm)] font-semibold text-[color:var(--brand-800)]",
+                  "inline-flex h-10 items-center gap-1.5 rounded-[var(--radius)] px-2.5",
+                  "text-[length:var(--text-sm)] font-medium text-[color:var(--ink-muted)]",
+                  "hover:bg-[var(--surface-inset)] hover:text-[color:var(--ink)]",
                 )}
               >
-                {(user?.username ?? "?").slice(0, 2).toUpperCase()}
-              </span>
-              <span className="hidden min-w-0 text-left sm:block">
-                <span className="block max-w-[10rem] truncate text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]">
-                  {user?.username}
-                </span>
-                <span className="block text-[length:var(--text-2xs)] text-[color:var(--ink-muted)]">
-                  {roleLabel(user?.role)}
-                </span>
-              </span>
-              {/* The avatar is decorative initials, so below `sm` this link
-                  would otherwise have no accessible name at all. */}
-              <span className="sr-only sm:hidden">
-                Meu perfil — {user?.username}, {roleLabel(user?.role)}
-              </span>
-            </Link>
+                <Icon name="help" size={17} />
+                {/* Below `sm` the label is hidden, which would leave an
+                    icon-only link with no accessible name. The sr-only copy keeps
+                    the name present at every width. */}
+                <span className="hidden sm:inline">Ajuda</span>
+                <span className="sr-only sm:hidden">Ajuda</span>
+              </Link>
 
-            <Button
-              size="sm"
-              variant="secondary"
-              icon="logout"
-              loading={signingOut}
-              onClick={handleSignOut}
-              className="hidden sm:inline-flex"
-            >
-              Sair
-            </Button>
-            <IconButton
-              icon="logout"
-              label="Sair"
-              onClick={handleSignOut}
-              disabled={signingOut}
-              className="sm:hidden"
-            />
-          </div>
-        </header>
+              <div className="hidden h-6 w-px bg-[var(--line)] sm:block" />
+
+              <Link
+                to="/perfil"
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-[var(--radius)] px-1.5 py-1",
+                  "hover:bg-[var(--surface-inset)]",
+                )}
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-full)]",
+                    "bg-[var(--brand-100)] text-[length:var(--text-sm)] font-semibold text-[color:var(--brand-800)]",
+                  )}
+                >
+                  {(user?.username ?? "?").slice(0, 2).toUpperCase()}
+                </span>
+                <span className="hidden min-w-0 text-left sm:block">
+                  <span className="block max-w-[10rem] truncate text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]">
+                    {user?.username}
+                  </span>
+                  <span className="block text-[length:var(--text-2xs)] text-[color:var(--ink-muted)]">
+                    {roleLabel(user?.role)}
+                  </span>
+                </span>
+                {/* The avatar is decorative initials, so below `sm` this link
+                    would otherwise have no accessible name at all. */}
+                <span className="sr-only sm:hidden">
+                  Meu perfil — {user?.username}, {roleLabel(user?.role)}
+                </span>
+              </Link>
+
+              <Button
+                size="sm"
+                variant="secondary"
+                icon="logout"
+                loading={signingOut}
+                onClick={handleSignOut}
+                className="hidden sm:inline-flex"
+              >
+                Sair
+              </Button>
+              <IconButton
+                icon="logout"
+                label="Sair"
+                onClick={handleSignOut}
+                disabled={signingOut}
+                className="sm:hidden"
+              />
+            </div>
+          </header>
+        )}
 
         <main
           id="conteudo"
           ref={mainRef}
           tabIndex={-1}
-          className="mx-auto w-full max-w-[var(--content-max)] px-3 py-5 outline-none sm:px-5 sm:py-6 lg:px-8"
+          className={
+            immersive
+              ? "w-full outline-none"
+              : "mx-auto w-full max-w-[var(--content-max)] px-3 py-5 outline-none sm:px-5 sm:py-6 lg:px-8"
+          }
         >
           {children}
         </main>
       </div>
     </div>
+    </ShellContext.Provider>
   );
 }

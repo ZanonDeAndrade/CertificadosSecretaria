@@ -23,15 +23,19 @@ const TOPICS: Topic[] = [
       <>
         Abra <strong>Emitir certificados</strong>, baixe a planilha modelo e
         preencha uma linha por participante. As colunas <code>nome</code> e{" "}
-        <code>carga_horaria</code> são obrigatórias; as demais podem ficar em
-        branco. Na Mostra de Iniciação Científica sai um certificado por
+        <code>email</code> são obrigatórias; as demais podem ficar em branco. A{" "}
+        <code>carga_horaria</code> só é obrigatória se o texto do certificado
+        usar <code>{"{{carga_horaria}}"}</code>. O e-mail é o que o participante
+        usa na consulta pública para encontrar e baixar o certificado; ele nunca
+        é exibido. Na Mostra de Iniciação Científica sai um certificado por
         trabalho, válido para todos os autores: preencha <code>autor1</code> a{" "}
-        <code>autor8</code> (só <code>autor1</code> é obrigatório),{" "}
-        <code>evento</code> e <code>titulo_trabalho</code> (obrigatórios) e, se
-        quiser, <code>equipe</code> e <code>carga_horaria</code>. A aba
-        “Instruções” do modelo explica cada coluna. Envie a planilha, confira a
-        prévia do texto e a lista de linhas com erro, e só então confirme a
-        emissão.
+        <code>autor8</code>, cada um com o e-mail de mesmo número (
+        <code>email1</code> a <code>email8</code>; só <code>autor1</code> e{" "}
+        <code>email1</code> são obrigatórios), <code>evento</code> e{" "}
+        <code>titulo_trabalho</code> (obrigatórios) e, se quiser,{" "}
+        <code>equipe</code> e <code>carga_horaria</code>. A aba “Instruções” do
+        modelo explica cada coluna. Envie a planilha, confira a prévia do texto e
+        a lista de linhas com erro, e só então confirme a emissão.
       </>
     ),
   },
@@ -74,14 +78,17 @@ const TOPICS: Topic[] = [
     question: "Como mudar o layout do certificado?",
     answer: (
       <>
-        Em <strong>Template do certificado</strong>. Cada alteração cria uma nova
-        versão e a versão anterior é preservada — nada é sobrescrito. Uma versão
-        só passa a valer para novas emissões depois de ser ativada, e a ativação
-        pede confirmação porque afeta todos os certificados emitidos a partir
-        daquele momento. A Mostra de Iniciação Científica precisa de uma versão
-        própria, sem o nome do participante e com o bloco Autores acima do QR
-        Code: escolher esse tipo no editor já monta o ponto de partida. Sem ela,
-        a emissão da Mostra fica bloqueada.
+        Em <strong>Template do certificado</strong>, cada modelo é um item da lista,
+        com nome, tipo e curso. “Editar” abre o modelo e “Salvar” atualiza esse
+        mesmo item; um modelo que já gerou certificados guarda o layout anterior em
+        “Ver histórico”, porque cada certificado continua ligado ao layout com que
+        foi emitido. Um modelo só vale para novas emissões depois de ativado, e
+        salvar o modelo ativo pede confirmação, porque muda os próximos
+        certificados. Excluir um modelo com certificados apenas o arquiva. A
+        Mostra de Iniciação Científica precisa de um modelo próprio, sem o nome do
+        participante e com o bloco Autores acima do QR Code: escolher esse tipo em
+        “Dados do modelo” já monta o ponto de partida. Sem ele, a emissão da Mostra
+        fica bloqueada.
       </>
     ),
   },

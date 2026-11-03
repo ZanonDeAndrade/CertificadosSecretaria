@@ -569,8 +569,8 @@ export default function EmitirCertificados() {
               title="1. Planilha do lote"
               description={
                 perWork
-                  ? `Um certificado por trabalho, válido para todos os autores. Colunas obrigatórias: autor1, evento e titulo_trabalho; use autor1 a autor${MAX_WORK_AUTHORS} (colunas vazias são ignoradas). Equipe, carga_horaria e datas são opcionais.`
-                  : "Colunas obrigatórias: nome e carga_horaria. Curso, evento, datas, e-mail, Registro Acadêmico (RA), equipe e titulo_trabalho são opcionais."
+                  ? `Um certificado por trabalho, válido para todos os autores. Colunas obrigatórias: autor1, email1, evento e titulo_trabalho; use autor1 a autor${MAX_WORK_AUTHORS}, cada um com o e-mail de mesmo número (colunas vazias são ignoradas). Equipe, carga_horaria e datas são opcionais.`
+                  : "Colunas obrigatórias: nome e e-mail. Carga horária, curso, evento, datas, Registro Acadêmico (RA), equipe e titulo_trabalho são opcionais; a carga horária passa a ser obrigatória se o texto usar {{carga_horaria}}."
               }
               actions={
                 <AnchorButton

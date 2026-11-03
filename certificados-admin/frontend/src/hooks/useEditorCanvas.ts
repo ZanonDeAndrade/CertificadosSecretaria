@@ -21,8 +21,13 @@ import {
   wrapsAtPageBound,
 } from "../lib/textBoxLayout";
 import { TEXT_BOX_MIN_SIZE, clampBoxHeight, clampBoxWidth } from "../lib/textBoxResize";
+import { Size, fitSize } from "../lib/canvasFit";
 import { TemplateTextbox, applyHandleSize } from "../components/editor/TemplateTextbox";
 
+/* Scene width of the fabric canvas: objects live in this coordinate space
+ * (`scale` = scene px per art px) whatever the window size. The viewport
+ * transform then shows the scene at the scale that fits the stage, so a
+ * resize never moves an object. */
 const CANVAS_MAX_WIDTH = 900;
 const MIN_SCALE = 0.01;
 /** Wait for the operator to pause before asking the backend for line breaks. */
@@ -191,6 +196,11 @@ function normalizeTemplateElement(raw: any): TemplateElement | null {
   };
 }
 
+export interface LoadTemplateOptions {
+  /** Element to leave selected once the layout is on the canvas, if it exists. */
+  selectId?: string | null;
+}
+
 export interface EditorAPI {
   /**
    * Callback ref to attach to the `<canvas>` element. Fabric is initialized the
@@ -199,14 +209,21 @@ export interface EditorAPI {
    * mounts in "list" mode.
    */
   canvasRef: React.RefCallback<HTMLCanvasElement>;
+  /**
+   * Callback ref for the element the canvas must fit into. Its size is
+   * observed, so the page is redrawn whole whenever the stage changes.
+   */
+  stageRef: React.RefCallback<HTMLElement>;
   elements: TemplateElement[];
   selectedId: string | null;
   backgroundUrl: string | null;
   imageSize: { width: number; height: number };
+  /** Scene px per art px (internal coordinate scale). */
   scale: number;
+  /** Screen px per art px: how large the page currently appears. */
+  displayScale: number;
   showMockData: boolean;
   showGrid: boolean;
-  zoom: number;
   canvasError: string | null;
   /** Where each text element's lines break, as the PDF will break them. */
   textLayouts: Record<string, TextBoxLayoutInfo>;
@@ -227,11 +244,16 @@ export interface EditorAPI {
   deleteElement: (id: string) => void;
   duplicateElement: (id: string) => void;
   selectElement: (id: string | null) => void;
+  /**
+   * Set or replace the background art. Over an existing art every element
+   * keeps its coordinates in art pixels, whatever the new art's size.
+   */
   setBackground: (url: string, width: number, height: number) => void;
-  loadTemplate: (layout: TemplateLayout) => void;
+  loadTemplate: (layout: TemplateLayout, options?: LoadTemplateOptions) => void;
   setShowMockData: (v: boolean) => void;
   setShowGrid: (v: boolean) => void;
-  setZoom: (v: number) => void;
+  /** Fit the page to an area of this size (what the stage observer calls). */
+  fitToArea: (area: Size) => void;
   getLayout: () => TemplateLayout;
   clearAll: () => void;
   exportJSON: () => string;
@@ -245,12 +267,24 @@ export function useEditorCanvas(): EditorAPI {
   const scaleRef = useRef(1);
   const showMockRef = useRef(true);
   const showGridRef = useRef(false);
+  /* Scene size of the canvas (art × scale), the area it must fit, and the
+   * viewport zoom that makes it fit. */
+  const sceneSizeRef = useRef<Size>({
+    width: CANVAS_MAX_WIDTH,
+    height: Math.round(CANVAS_MAX_WIDTH * 0.707),
+  });
+  const areaRef = useRef<Size>({ width: 0, height: 0 });
   const zoomRef = useRef(1);
+  const stageObserverRef = useRef<ResizeObserver | null>(null);
   const elementsRef = useRef<TemplateElement[]>([]);
   const bgUrlRef = useRef<string | null>(null);
   const imageSizeRef = useRef({ width: 1, height: 1 });
   const layoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const layoutSeqRef = useRef(0);
+  /* Each loadTemplate takes a number; a load that was overtaken by a newer
+   * one must not put its objects on the canvas when its image resolves. */
+  const loadSeqRef = useRef(0);
+  const selectedIdRef = useRef<string | null>(null);
   const sampleRef = useRef<Record<string, string>>({ ...MOCK_DATA });
 
   const [elements, setElements] = useState<TemplateElement[]>([]);
@@ -260,7 +294,7 @@ export function useEditorCanvas(): EditorAPI {
   const [scale, setScale] = useState(1);
   const [showMockData, setShowMockDataState] = useState(true);
   const [showGrid, setShowGridState] = useState(false);
-  const [zoom, setZoomState] = useState(1);
+  const [displayScale, setDisplayScale] = useState(1);
   const [canvasError, setCanvasError] = useState<string | null>(null);
   const [textLayouts, setTextLayouts] = useState<Record<string, TextBoxLayoutInfo>>({});
   const [layoutSource, setLayoutSource] = useState<LayoutSource>("pending");
@@ -275,6 +309,9 @@ export function useEditorCanvas(): EditorAPI {
     elementsRef.current = elements;
   }, [elements]);
   useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useEffect(() => {
     bgUrlRef.current = backgroundUrl;
   }, [backgroundUrl]);
   useEffect(() => {
@@ -284,15 +321,66 @@ export function useEditorCanvas(): EditorAPI {
     scaleRef.current = scale;
   }, [scale]);
 
-  /* Art-space page size the text boxes must respect. Before a background is
-   * loaded the canvas itself stands in for the page (scale is 1 then). */
-  const artPageSize = useCallback(() => {
+  /* ── Fit the page to the stage ───────────────────────────────────────────
+   * The canvas element takes the size at which the whole scene fits the
+   * stage, and fabric's viewport zoom maps the scene onto it. Objects keep
+   * their scene coordinates, so nothing moves; pointer events are converted
+   * by fabric itself and the controls are drawn in screen pixels. */
+  const applyFit = useCallback(() => {
     const canvas = fabricRef.current;
+    if (!canvas) return;
+    const scene = sceneSizeRef.current;
+    const fit = fitSize(scene, areaRef.current);
+    // Until the stage is measured the scene is shown 1:1.
+    const zoom = fit.scale > 0 ? fit.scale : 1;
+    const width = fit.scale > 0 ? fit.width : scene.width;
+    const height = fit.scale > 0 ? fit.height : scene.height;
+    if (canvas.getWidth() !== width || canvas.getHeight() !== height) {
+      canvas.setDimensions({ width, height });
+    }
+    if (canvas.getZoom() !== zoom) canvas.setZoom(zoom);
+    zoomRef.current = zoom;
+    // Handles and hit areas live in screen space: recompute them for the new
+    // viewport, for every object and not only the selected one.
+    canvas.getObjects().forEach((object) => object.setCoords());
+    setDisplayScale(zoom * Math.max(scaleRef.current, MIN_SCALE));
+    canvas.requestRenderAll();
+  }, []);
+
+  const fitToArea = useCallback(
+    (area: Size) => {
+      areaRef.current = { width: area.width, height: area.height };
+      applyFit();
+    },
+    [applyFit],
+  );
+
+  const attachStage = useCallback(
+    (el: HTMLElement | null) => {
+      stageObserverRef.current?.disconnect();
+      stageObserverRef.current = null;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      fitToArea({ width: rect.width, height: rect.height });
+      if (typeof ResizeObserver === "undefined") return;
+      const observer = new ResizeObserver((entries) => {
+        const box = entries[0]?.contentRect;
+        if (box) fitToArea({ width: box.width, height: box.height });
+      });
+      observer.observe(el);
+      stageObserverRef.current = observer;
+    },
+    [fitToArea],
+  );
+
+  /* Art-space page size the text boxes must respect. Before a background is
+   * loaded the scene itself stands in for the page (scale is 1 then). */
+  const artPageSize = useCallback(() => {
     const sc = Math.max(scaleRef.current, MIN_SCALE);
     if (imageSizeRef.current.width > 1) return imageSizeRef.current;
     return {
-      width: (canvas ? canvas.getWidth() : CANVAS_MAX_WIDTH) / sc,
-      height: (canvas ? canvas.getHeight() : CANVAS_MAX_WIDTH * 0.707) / sc,
+      width: sceneSizeRef.current.width / sc,
+      height: sceneSizeRef.current.height / sc,
     };
   }, []);
 
@@ -456,6 +544,8 @@ export function useEditorCanvas(): EditorAPI {
         enablePointerEvents: true,
       });
       fabricRef.current = canvas;
+      // The stage may already be measured (it mounts with the canvas).
+      applyFit();
 
       const onSelect = (event: { selected?: fabric.FabricObject[] }) => {
         const selected = event.selected?.[0];
@@ -541,7 +631,7 @@ export function useEditorCanvas(): EditorAPI {
         });
       });
     },
-    [cancelTextLayoutSync, scheduleTextLayoutSync],
+    [applyFit, cancelTextLayoutSync, scheduleTextLayoutSync],
   );
 
   const _addFabricTextObject = useCallback(
@@ -577,7 +667,7 @@ export function useEditorCanvas(): EditorAPI {
           box.fontSize,
           box._fontSizeMult,
         );
-        applyHandleSize(box, zoomRef.current);
+        applyHandleSize(box);
         box.relayout();
         obj = box;
       }
@@ -618,7 +708,7 @@ export function useEditorCanvas(): EditorAPI {
         hasBorders: true,
         opacity: element.opacity ?? 1,
       });
-      applyHandleSize(img, zoomRef.current);
+      applyHandleSize(img);
       (img as any).data = { elementId: element.id };
 
       canvas.add(img);
@@ -670,7 +760,6 @@ export function useEditorCanvas(): EditorAPI {
         });
         if (fabricRef.current !== canvas) return;
 
-        canvas.setDimensions({ width: displayW, height: displayH });
         img.set({
           selectable: false,
           evented: false,
@@ -684,6 +773,10 @@ export function useEditorCanvas(): EditorAPI {
         scaleRef.current = sc;
         imageSizeRef.current = { width, height };
         bgUrlRef.current = url;
+
+        // A new art may have another proportion: refit the scene to the stage.
+        sceneSizeRef.current = { width: displayW, height: displayH };
+        applyFit();
 
         setScale(sc);
         setImageSize({ width, height });
@@ -709,43 +802,48 @@ export function useEditorCanvas(): EditorAPI {
         );
       }
     },
-    [reportCanvasError, scheduleTextLayoutSync],
-  );
-
-  const setBackground = useCallback(
-    (url: string, width: number, height: number) => {
-      void _applyBackground(url, width, height);
-    },
-    [_applyBackground],
+    [applyFit, reportCanvasError, scheduleTextLayoutSync],
   );
 
   const loadTemplate = useCallback(
-    (layout: TemplateLayout) => {
+    (layout: TemplateLayout, options?: LoadTemplateOptions) => {
       const canvas = fabricRef.current;
       if (!canvas) return;
 
       cancelTextLayoutSync();
-      canvas.getObjects().forEach((obj) => canvas.remove(obj));
-      objectMapRef.current.clear();
-      setElements([]);
-      setSelectedId(null);
-      setTextLayouts({});
-
+      const seq = ++loadSeqRef.current;
       const normalizedElements = (layout.elements ?? [])
         .map((el) => normalizeTemplateElement(el))
         .filter((el): el is TemplateElement => Boolean(el));
 
+      // What is on the canvas stays there until the new art has loaded: the
+      // operator never sees an empty page, and the history never records one.
       _applyBackground(
         layout.background,
         layout.image_width,
         layout.image_height,
         async () => {
+          const superseded = () => seq !== loadSeqRef.current || fabricRef.current !== canvas;
+          if (superseded()) return;
+          canvas.getObjects().forEach((obj) => canvas.remove(obj));
+          objectMapRef.current.clear();
+          setTextLayouts({});
+
           const sc = scaleRef.current;
           for (const el of normalizedElements) {
+            if (superseded()) return;
             await _addElementObject(el, sc, showMockRef.current);
           }
+          if (superseded()) return;
           elementsRef.current = normalizedElements;
           setElements(normalizedElements);
+
+          const keep = options?.selectId
+            ? objectMapRef.current.get(options.selectId)
+            : undefined;
+          if (keep) canvas.setActiveObject(keep);
+          else canvas.discardActiveObject();
+          setSelectedId(keep ? (options?.selectId ?? null) : null);
           canvas.requestRenderAll();
         },
       );
@@ -768,8 +866,9 @@ export function useEditorCanvas(): EditorAPI {
         type: "text",
         key,
         label: KEY_LABELS[key] ?? key,
-        x: Math.round(canvas.getWidth() / 2 / sc),
-        y: Math.round(canvas.getHeight() / 2 / sc),
+        // Centre of the page, in art px.
+        x: Math.round(sceneSizeRef.current.width / 2 / sc),
+        y: Math.round(sceneSizeRef.current.height / 2 / sc),
         fontSize: authorsBlock ? 20 : 32,
         fontFamily: "Times New Roman",
         color: "#000000",
@@ -805,13 +904,15 @@ export function useEditorCanvas(): EditorAPI {
         const naturalW = Math.max(probe.width ?? 1, 1);
         const naturalH = Math.max(probe.height ?? 1, 1);
 
-        const maxDisplayW = canvas.getWidth() * 0.35;
-        const maxDisplayH = canvas.getHeight() * 0.35;
+        // Up to 35% of the page, centred — in scene px, whatever the stage.
+        const scene = sceneSizeRef.current;
+        const maxDisplayW = scene.width * 0.35;
+        const maxDisplayH = scene.height * 0.35;
         const fitScale = Math.min(maxDisplayW / naturalW, maxDisplayH / naturalH, 1);
         const displayW = Math.max(naturalW * fitScale, 1);
         const displayH = Math.max(naturalH * fitScale, 1);
-        const displayX = Math.max((canvas.getWidth() - displayW) / 2, 0);
-        const displayY = Math.max((canvas.getHeight() - displayH) / 2, 0);
+        const displayX = Math.max((scene.width - displayW) / 2, 0);
+        const displayY = Math.max((scene.height - displayH) / 2, 0);
 
         const id = createUuid();
         const element: ImageTemplateElement = {
@@ -1110,15 +1211,6 @@ export function useEditorCanvas(): EditorAPI {
     setShowGridState(value);
   }, []);
 
-  const setZoom = useCallback((value: number) => {
-    zoomRef.current = value;
-    setZoomState(value);
-    // The page is zoomed with CSS, so handles must shrink to stay the same
-    // size on screen.
-    objectMapRef.current.forEach((object) => applyHandleSize(object, value));
-    fabricRef.current?.requestRenderAll();
-  }, []);
-
   const getLayout = useCallback((): TemplateLayout => {
     const sc = Math.max(scaleRef.current, MIN_SCALE);
 
@@ -1166,6 +1258,26 @@ export function useEditorCanvas(): EditorAPI {
     };
   }, []);
 
+  /* "Trocar arte" keeps every element at its coordinates in art pixels. The
+   * layout is read at the old scale and loaded again over the new art, so
+   * text, QR and image objects are rebuilt at the new scale and the state the
+   * panels read matches the canvas; the selection survives. A model's first
+   * art keeps the direct path: there is no page yet for coordinates to be
+   * relative to, so what is on the canvas simply stays where it is shown. */
+  const setBackground = useCallback(
+    (url: string, width: number, height: number) => {
+      if (!bgUrlRef.current) {
+        void _applyBackground(url, width, height);
+        return;
+      }
+      loadTemplate(
+        { ...getLayout(), background: url, image_width: width, image_height: height },
+        { selectId: selectedIdRef.current },
+      );
+    },
+    [_applyBackground, getLayout, loadTemplate],
+  );
+
   const clearAll = useCallback(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
@@ -1197,14 +1309,15 @@ export function useEditorCanvas(): EditorAPI {
 
   return {
     canvasRef: attachCanvas,
+    stageRef: attachStage,
     elements,
     selectedId,
     backgroundUrl,
     imageSize,
     scale,
+    displayScale,
     showMockData,
     showGrid,
-    zoom,
     textLayouts,
     layoutSource,
     setSampleData,
@@ -1220,7 +1333,7 @@ export function useEditorCanvas(): EditorAPI {
     loadTemplate,
     setShowMockData,
     setShowGrid,
-    setZoom,
+    fitToArea,
     getLayout,
     clearAll,
     exportJSON,

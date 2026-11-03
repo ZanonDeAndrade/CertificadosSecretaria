@@ -16,6 +16,14 @@ CATEGORY_ACTIONS: dict[str, tuple[str, ...]] = {
     "reissue": ("certificate_reissued", "reissue", "reissue_failed"),
     "download": ("certificate_downloaded", "certificates_downloaded", "download_zip"),
     "template": (
+        "template_created",
+        "template_saved",
+        "template_duplicated",
+        "template_activated",
+        "template_deleted",
+        "template_archived",
+        "template_restored",
+        # Actions recorded before models existed (one row per version).
         "template_version_created",
         "template_version_activated",
         "template_version_renamed",
@@ -40,7 +48,7 @@ CATEGORY_ACTIONS: dict[str, tuple[str, ...]] = {
         "reconcile_active_without_file",
         "reconcile_compensation_error",
     ),
-    "settings": ("institutional_settings_updated",),
+    "settings": ("institutional_settings_updated", "course_created", "course_updated"),
     "google_drive": (
         "google_drive_connected",
         "google_drive_folder_selected",

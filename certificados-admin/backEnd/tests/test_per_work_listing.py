@@ -48,8 +48,13 @@ _KEYS = count(1)
 
 
 def _work(title: str, authors: tuple[str, ...]) -> dict:
-    row: dict = {f"autor{index}": "" for index in range(1, 9)}
-    row.update({f"autor{index}": name for index, name in enumerate(authors, start=1)})
+    row: dict = {}
+    for index in range(1, 9):
+        row[f"autor{index}"] = ""
+        row[f"email{index}"] = ""
+    for index, name in enumerate(authors, start=1):
+        row[f"autor{index}"] = name
+        row[f"email{index}"] = f"autor{index}@exemplo.com"
     row.update(
         evento=EVENT,
         titulo_trabalho=title,

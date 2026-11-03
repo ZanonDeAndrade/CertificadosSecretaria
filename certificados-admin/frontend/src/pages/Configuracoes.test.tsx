@@ -16,6 +16,19 @@ vi.mock("../services/api", () => ({
     error instanceof Error ? error.message : fallback,
 }));
 
+vi.mock("../services/templateApi", () => ({
+  listCourses: vi.fn(async () => [
+    { id: 3, name: "Direito", is_active: true },
+    { id: 5, name: "Hotelaria", is_active: false },
+  ]),
+  createCourse: vi.fn(async (name: string) => ({ id: 9, name, is_active: true })),
+  updateCourse: vi.fn(async (id: number, input: { is_active?: boolean; name?: string }) => ({
+    id,
+    name: input.name ?? "Curso",
+    is_active: input.is_active ?? true,
+  })),
+}));
+
 const SETTINGS = {
   id: 1,
   institution_name: "Instituição Original",
@@ -84,4 +97,23 @@ test("o local de emissão é apresentado como a cidade que sai no certificado", 
   )) as HTMLInputElement;
   await waitFor(() => expect(field.value).toBe(SETTINGS.issue_location));
   expect(screen.getByText(/Sai como “Cidade, data\.” nos certificados/)).toBeTruthy();
+});
+
+test("o painel de cursos lista, cadastra e desativa cursos", async () => {
+  const user = userEvent.setup();
+  const { createCourse, updateCourse } = await import("../services/templateApi");
+  renderWithProviders(<Configuracoes />);
+
+  expect(await screen.findByText("Direito")).toBeTruthy();
+  expect(screen.getByText("Hotelaria")).toBeTruthy();
+  expect(screen.getByText("Inativo")).toBeTruthy();
+
+  await user.type(screen.getByLabelText("Novo curso"), "  Engenharia   de Software ");
+  await user.click(screen.getByRole("button", { name: "Adicionar curso" }));
+  await waitFor(() => expect(createCourse).toHaveBeenCalledWith("Engenharia   de Software"));
+  expect(await screen.findByText(/Curso “Engenharia de Software” cadastrado/)).toBeTruthy();
+
+  await user.click(screen.getAllByRole("button", { name: "Desativar" })[0]);
+  await waitFor(() => expect(updateCourse).toHaveBeenCalledWith(3, { is_active: false }));
+  expect(await screen.findByText(/Curso “Direito” desativado/)).toBeTruthy();
 });

@@ -7,12 +7,16 @@ import {
   InstitutionalSettingsInput,
   updateInstitutionalSettings,
 } from "../services/api";
+import { Course, createCourse, listCourses, updateCourse } from "../services/templateApi";
 import Alert from "../ui/Alert";
 import Button from "../ui/Button";
+import ConfirmDialog from "../ui/ConfirmDialog";
 import { Checkbox, Field, TextInput } from "../ui/Field";
 import { ErrorState, Skeleton } from "../ui/Feedback";
 import PageHeader from "../ui/PageHeader";
 import Panel, { PanelBody, PanelHeader, PanelSection } from "../ui/Panel";
+import StatusBadge from "../ui/StatusBadge";
+import { cn } from "../ui/cn";
 
 const EMPTY: InstitutionalSettingsInput = {
   institution_name: "",
@@ -270,6 +274,199 @@ export default function Configuracoes() {
           )}
         </form>
       )}
+
+      <CoursesPanel canManage={can("settings.manage")} />
     </>
+  );
+}
+
+/**
+ * Registered courses. Templates are filed under one of them, so the same
+ * spelling is used everywhere. A course is deactivated, never deleted: a
+ * template may still point at it. The spreadsheet keeps its own fixed list.
+ */
+function CoursesPanel({ canManage }: { canManage: boolean }) {
+  const state = useAsyncData(() => listCourses(true), []);
+  const [newName, setNewName] = useState("");
+  const [busy, setBusy] = useState<number | "new" | null>(null);
+  const [renaming, setRenaming] = useState<Course | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  const add = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!newName.trim() || busy) return;
+    setBusy("new");
+    setError("");
+    setNotice("");
+    try {
+      const created = await createCourse(newName.trim());
+      setNewName("");
+      setNotice(`Curso “${created.name}” cadastrado.`);
+      state.reload();
+    } catch (requestError) {
+      setError(failureMessage(requestError, "Não foi possível cadastrar o curso."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggle = async (course: Course) => {
+    setBusy(course.id);
+    setError("");
+    setNotice("");
+    try {
+      await updateCourse(course.id, { is_active: !course.is_active });
+      setNotice(
+        course.is_active
+          ? `Curso “${course.name}” desativado. Ele deixa de aparecer ao escolher o curso de um modelo.`
+          : `Curso “${course.name}” reativado.`,
+      );
+      state.reload();
+    } catch (requestError) {
+      setError(failureMessage(requestError, "Não foi possível alterar o curso."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rename = async () => {
+    if (!renaming) return;
+    const clean = renameName.trim();
+    if (!clean) {
+      setRenameError("Informe o nome do curso.");
+      return;
+    }
+    setBusy(renaming.id);
+    setRenameError("");
+    try {
+      await updateCourse(renaming.id, { name: clean });
+      setRenaming(null);
+      setNotice(`Curso renomeado para “${clean}”.`);
+      state.reload();
+    } catch (requestError) {
+      setRenameError(failureMessage(requestError, "Não foi possível renomear o curso."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Panel className="mt-6">
+      <PanelHeader
+        title="Cursos"
+        description="Lista usada para classificar os modelos de certificado. O curso de um modelo só organiza a lista de modelos; a emissão escolhe o modelo pelo tipo de certificado."
+      />
+      <PanelBody className="space-y-4">
+        {notice && <Alert tone="ok">{notice}</Alert>}
+        {error && <Alert tone="danger">{error}</Alert>}
+        {state.failure && (
+          <ErrorState
+            offline={state.failure === "offline"}
+            description={state.error}
+            onRetry={state.reload}
+          />
+        )}
+        {state.initialLoading && <Skeleton className="h-24" />}
+        {state.data && (
+          <ul className="divide-y divide-[color:var(--line)] rounded-[var(--radius)] border border-[color:var(--line)]">
+            {state.data.map((course) => (
+              <li key={course.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 text-[length:var(--text-sm)]",
+                    course.is_active
+                      ? "text-[color:var(--ink)]"
+                      : "text-[color:var(--ink-muted)] line-through",
+                  )}
+                >
+                  {course.name}
+                </span>
+                {!course.is_active && <StatusBadge tone="neutral">Inativo</StatusBadge>}
+                {canManage && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setRenameError("");
+                        setRenameName(course.name);
+                        setRenaming(course);
+                      }}
+                    >
+                      Renomear
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      loading={busy === course.id}
+                      onClick={() => toggle(course)}
+                    >
+                      {course.is_active ? "Desativar" : "Reativar"}
+                    </Button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {canManage && (
+          <form onSubmit={add} className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <Field label="Novo curso" className="flex-1">
+              {(props) => (
+                <TextInput
+                  {...props}
+                  value={newName}
+                  maxLength={255}
+                  autoComplete="off"
+                  placeholder="Nome do curso"
+                  onChange={(event) => setNewName(event.target.value)}
+                />
+              )}
+            </Field>
+            <Button
+              type="submit"
+              variant="secondary"
+              icon="plus"
+              loading={busy === "new"}
+              disabled={!newName.trim()}
+            >
+              Adicionar curso
+            </Button>
+          </form>
+        )}
+      </PanelBody>
+
+      <ConfirmDialog
+        open={Boolean(renaming)}
+        title={`Renomear curso “${renaming?.name ?? ""}”`}
+        description="Os modelos classificados neste curso passam a mostrar o novo nome. A leitura da planilha não muda."
+        confirmLabel="Salvar novo nome"
+        tone="primary"
+        busy={busy === renaming?.id}
+        error={renameError}
+        onConfirm={rename}
+        onClose={() => {
+          if (busy === null) {
+            setRenaming(null);
+            setRenameError("");
+          }
+        }}
+      >
+        <Field label="Nome do curso">
+          {(props) => (
+            <TextInput
+              {...props}
+              value={renameName}
+              maxLength={255}
+              autoComplete="off"
+              onChange={(event) => setRenameName(event.target.value)}
+            />
+          )}
+        </Field>
+      </ConfirmDialog>
+    </Panel>
   );
 }

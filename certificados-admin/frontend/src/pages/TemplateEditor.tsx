@@ -1,38 +1,51 @@
 /**
- * Template do certificado — version list and visual editor.
+ * Template do certificado — the list of models and the visual editor.
  *
- * Two views in one route. The list is the safe, default view; the editor is
- * entered deliberately. Key behaviours the brief asked for:
+ * Two views in one route. The list is the safe, default view: one item per
+ * model (name, type, course, status, certificates issued), filtered by course,
+ * type, name and "Mostrar arquivados", the active ones first. The editor is
+ * entered deliberately. Key behaviours:
  *
- *  - Undo/redo (Ctrl+Z / Ctrl+Shift+Z) via useTemplateHistory.
- *  - An unsaved-changes guard on both browser exit and in-app "Voltar".
- *  - Zoom with keyboard shortcuts and a reset.
- *  - Activation of a version is confirmed with a typed phrase, because it
- *    changes every certificate issued from that moment on.
- *  - Versions can be compared side by side before activating one.
+ *  - "Editar" opens the model and "Salvar" updates the same item. The server
+ *    keeps a new internal revision when the model already issued certificates
+ *    or was ever active; those revisions appear in "Ver histórico".
+ *  - Saving the active model changes the next emissions, so it asks for a
+ *    typed confirmation ("APLICAR"), like activation ("ATIVAR") does.
+ *  - Deleting a model without certificates removes it; with certificates it
+ *    is archived (hidden, restorable), and the dialog says which will happen.
+ *  - Undo/redo (Ctrl+Z / Ctrl+Shift+Z) via useTemplateHistory; an
+ *    unsaved-changes guard on browser exit, on "Voltar" and on every exit
+ *    through the navigation drawer.
+ *  - The certificate is always shown whole, at the scale that fits the stage;
+ *    there is no zoom control.
  *
- * Layout: on notebooks (≤1279px) the two side panels collapse into a tabbed
- * strip so the canvas keeps usable width at 1366×768.
+ * Layout: the editor hides the system sidebar and topbar (the drawer opens
+ * from its own menu button), keeps the toolbar to one row and lets both side
+ * panels collapse, so the page stays large on a 1366×768 notebook. Below
+ * 1280px the two panels share one tabbed strip.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import EditorCanvas from "../components/editor/EditorCanvas";
 import EditorTopbar from "../components/editor/EditorTopbar";
 import ElementList from "../components/editor/ElementList";
+import ModelDetailsDialog, { ModelDetails } from "../components/editor/ModelDetailsDialog";
 import PropertiesPanel from "../components/editor/PropertiesPanel";
 import PerWorkNotice from "../components/editor/PerWorkNotice";
 import SettingsNotice from "../components/editor/SettingsNotice";
-import { certificateTypeLabel, isPerWorkType } from "../domain/certificateTypes";
+import SidePanel from "../components/editor/SidePanel";
+import TemplateHistoryDialog, {
+  formatDateTime,
+} from "../components/editor/TemplateHistoryDialog";
+import { CERTIFICATE_TYPES, certificateTypeLabel, isPerWorkType } from "../domain/certificateTypes";
 import { perWorkStartingPoint } from "../domain/perWorkTemplate";
-import { getTemplateSampleData, TemplateSampleData } from "../services/templateApi";
 import AccessibleModal from "../components/AccessibleModal";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import PageHeader from "../ui/PageHeader";
 import Panel, { PanelHeader } from "../ui/Panel";
 import Alert from "../ui/Alert";
 import Button from "../ui/Button";
-import Icon from "../ui/Icon";
 import StatusBadge from "../ui/StatusBadge";
-import { Field, TextInput } from "../ui/Field";
+import { Checkbox, Field, Select, TextInput } from "../ui/Field";
 import { EmptyState, ErrorState, Skeleton } from "../ui/Feedback";
 import { cn } from "../ui/cn";
 import { useEditorCanvas } from "../hooks/useEditorCanvas";
@@ -41,91 +54,204 @@ import {
   useUnsavedChangesWarning,
 } from "../hooks/useTemplateHistory";
 import { useAuth } from "../app/AuthContext";
+import { useShell } from "../app/ShellContext";
 import { useMediaQuery } from "../app/useMediaQuery";
 import { failureMessage } from "../app/useAsyncData";
 import {
+  CertificateTemplate,
+  Course,
+  GENERIC_TYPE,
+  SaveOutcome,
   TemplateVersion,
-  activateVersion,
-  createVersion,
-  deleteVersion,
-  getVersion,
-  listVersions,
-  renameVersion,
+  activateTemplate,
+  createTemplate,
+  deleteTemplate,
+  duplicateTemplate,
+  getTemplate,
+  getTemplateHistory,
+  getTemplateSampleData,
+  listCourses,
+  listTemplates,
+  restoreTemplate,
+  saveTemplate,
+  TemplateSampleData,
 } from "../services/templateApi";
 import { API_BASE_URL } from "../services/api";
+import { KEY_LABELS, TemplateElement } from "../types/template";
 
 type EditorMode = "list" | "edit";
 
-function bgUrl(version: TemplateVersion): string {
-  return `${API_BASE_URL.replace(/\/$/, "")}${version.background_url}`;
+/** Course filter: every model, the ones for all courses, or one course. */
+type CourseFilter = "" | "none" | number;
+
+/** Shown after "Trocar arte" when the new art has another size than the old one. */
+interface ArtNotice {
+  previous: { width: number; height: number };
+  next: { width: number; height: number };
+  /** Labels of the elements whose anchor now lies beyond the page. */
+  outside: string[];
 }
 
-/** "Genérico" or the type the version is dedicated to. */
-function versionTypeLabel(version: Pick<TemplateVersion, "certificate_type">): string {
-  return version.certificate_type
-    ? certificateTypeLabel(version.certificate_type)
-    : "Genérico (todos os tipos)";
+function artNoticeText({ previous, next, outside }: ArtNotice): string {
+  const base =
+    `A nova arte tem ${next.width}×${next.height} px; a anterior tinha ` +
+    `${previous.width}×${previous.height} px. Os elementos continuam nas mesmas ` +
+    "coordenadas em pixels da arte e não foram reposicionados.";
+  if (outside.length === 0) return `${base} Confira as posições antes de salvar.`;
+  return `${base} Fora da nova página: ${outside.join(", ")}.`;
 }
 
-function formatDate(value?: string | null): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime())
-    ? "—"
-    : parsed.toLocaleString("pt-BR", {
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+function elementLabel(element: TemplateElement): string {
+  return element.label || KEY_LABELS[element.key] || element.key;
+}
+
+function bgUrl(template: Pick<CertificateTemplate, "background_url">): string {
+  return `${API_BASE_URL.replace(/\/$/, "")}${template.background_url ?? ""}`;
+}
+
+/** "Genérico" or the type the model is dedicated to. */
+function typeLabel(certificateType: string | null | undefined): string {
+  return certificateType ? certificateTypeLabel(certificateType) : "Genérico";
+}
+
+function courseLabel(courseName: string | null | undefined): string {
+  return courseName || "Todos os cursos";
+}
+
+function certificateCountLabel(count: number): string {
+  if (count === 0) return "Nenhum certificado";
+  return count === 1 ? "1 certificado" : `${count} certificados`;
+}
+
+const SAVE_NOTICES: Record<SaveOutcome, string> = {
+  unchanged: "Dados do modelo salvos.",
+  updated: "Modelo salvo.",
+  revised:
+    "Modelo salvo. Como ele já gerou certificados ou já esteve ativo, o layout anterior ficou guardado em “Ver histórico”.",
+  applied: "Modelo salvo e aplicado: os próximos certificados emitidos usarão este layout.",
+};
+
+/** What the editor is working on; null id = a model not created yet. */
+interface EditingState {
+  id: number | null;
+  revision: number | null;
+  isActive: boolean;
+  typeLocked: boolean;
+  original: ModelDetails;
+}
+
+/** Pending exit from a dirty editor; `proceed` continues a guarded navigation. */
+interface LeaveRequest {
+  proceed?: () => void;
+}
+
+function isApplyRequired(error: unknown): boolean {
+  const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })
+    ?.response;
+  return (
+    response?.status === 409 &&
+    typeof response.data?.detail === "string" &&
+    /aplicar/i.test(response.data.detail)
+  );
+}
+
+function isStale(error: unknown): boolean {
+  const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })
+    ?.response;
+  return (
+    response?.status === 409 &&
+    typeof response.data?.detail === "string" &&
+    /outra pessoa/i.test(response.data.detail)
+  );
 }
 
 export default function TemplateEditor() {
   const { can } = useAuth();
   const canManage = can("templates.manage");
+  const { setImmersive, openDrawer, drawerOpen, setLeaveGuard } = useShell();
 
   const [mode, setMode] = useState<EditorMode>("list");
-  const [versions, setVersions] = useState<TemplateVersion[]>([]);
-  const [active, setActive] = useState<TemplateVersion | null>(null);
+  const [templates, setTemplates] = useState<CertificateTemplate[]>([]);
+  const [courses, setCourses] = useState<Course[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-
-  const [templateName, setTemplateName] = useState("Nova versão");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
   const [notice, setNotice] = useState("");
 
+  /* List filters. Course, type and archived go to the server; the name is
+   * filtered here, as the operator types. */
+  const [query, setQuery] = useState("");
+  const [courseFilter, setCourseFilter] = useState<CourseFilter>("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+
+  /* Editor state. */
+  const [editing, setEditing] = useState<EditingState | null>(null);
+  const [details, setDetails] = useState<ModelDetails>({
+    name: "",
+    certificateType: null,
+    courseId: null,
+  });
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [applyConfirm, setApplyConfirm] = useState(false);
+  const [staleConflict, setStaleConflict] = useState(false);
   const [message, setMessage] = useState<{ title: string; body: string } | null>(null);
   const [clearing, setClearing] = useState(false);
-  const [leaving, setLeaving] = useState(false);
+  const [leaving, setLeaving] = useState<LeaveRequest | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [activating, setActivating] = useState<TemplateVersion | null>(null);
-  const [activateBusy, setActivateBusy] = useState(false);
-  const [activateError, setActivateError] = useState("");
-  const [renaming, setRenaming] = useState<TemplateVersion | null>(null);
-  const [renameName, setRenameName] = useState("");
-  const [renameBusy, setRenameBusy] = useState(false);
-  const [renameError, setRenameError] = useState("");
-  const [deleting, setDeleting] = useState<TemplateVersion | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-  const [compare, setCompare] = useState<TemplateVersion[] | null>(null);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
   const [sample, setSample] = useState<TemplateSampleData | null>(null);
   const [sampleFailed, setSampleFailed] = useState(false);
-  /* Type the version being edited is dedicated to; null = generic. */
-  const [templateType, setTemplateType] = useState<string | null>(null);
+
+  /* List dialogs. */
+  const [activating, setActivating] = useState<CertificateTemplate | null>(null);
+  const [activateBusy, setActivateBusy] = useState(false);
+  const [activateError, setActivateError] = useState("");
+  const [deleting, setDeleting] = useState<CertificateTemplate | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [historyFor, setHistoryFor] = useState<CertificateTemplate | null>(null);
+  const [history, setHistory] = useState<TemplateVersion[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [rowBusy, setRowBusy] = useState<number | null>(null);
 
   const editor = useEditorCanvas();
-  const history = useTemplateHistory(editor);
+  const undoHistory = useTemplateHistory(editor);
+  const [artNotice, setArtNotice] = useState<ArtNotice | null>(null);
   const isEditing = mode === "edit";
-  useUnsavedChangesWarning(isEditing && history.isDirty);
+  const metaDirty = Boolean(
+    editing &&
+      (details.name !== editing.original.name ||
+        details.certificateType !== editing.original.certificateType ||
+        details.courseId !== editing.original.courseId),
+  );
+  const isDirty = undoHistory.isDirty || metaDirty;
+  useUnsavedChangesWarning(isEditing && isDirty);
+
+  /* The editor owns the viewport: sidebar and topbar leave with it. A layout
+   * effect avoids one frame of the editor inside the padded content column. */
+  useLayoutEffect(() => {
+    setImmersive(isEditing);
+    return () => setImmersive(false);
+  }, [isEditing, setImmersive]);
+
+  /* While there are unsaved changes, every exit through the shell (a drawer
+   * link, "Sair") goes through the same "Sair sem salvar?" dialog as "Voltar". */
+  useEffect(() => {
+    if (!isEditing || !isDirty) {
+      setLeaveGuard(null);
+      return;
+    }
+    setLeaveGuard((proceed) => setLeaving({ proceed }));
+    return () => setLeaveGuard(null);
+  }, [isEditing, isDirty, setLeaveGuard]);
 
   /* Every canvas mutation is routed through `noteUserEdit` so the history layer
-   * can tell a real change apart from the layout settling after a load. Wrapped
-   * here rather than inside useEditorCanvas to keep that hook (and its tests)
-   * untouched. */
-  const { noteUserEdit } = history;
+   * can tell a real change apart from the layout settling after a load. */
+  const { noteUserEdit } = undoHistory;
   const edited = useCallback(
     <Args extends unknown[], R>(action: (...args: Args) => R) =>
       (...args: Args): R => {
@@ -171,18 +297,23 @@ export default function TemplateEditor() {
     setLoading(true);
     setLoadError("");
     try {
-      const list = await listVersions();
-      setVersions(list);
-      // The generic active version serves every type without one of its own.
-      setActive(list.find((version) => version.is_active && !version.certificate_type) ?? null);
+      const [list, courseList] = await Promise.all([
+        listTemplates({
+          course_id: typeof courseFilter === "number" ? courseFilter : null,
+          without_course: courseFilter === "none",
+          certificate_type: typeFilter || null,
+          include_archived: showArchived,
+        }),
+        listCourses(),
+      ]);
+      setTemplates(list);
+      setCourses(courseList);
     } catch (error) {
-      setLoadError(
-        failureMessage(error, "Não foi possível carregar as versões do template."),
-      );
+      setLoadError(failureMessage(error, "Não foi possível carregar os modelos."));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [courseFilter, typeFilter, showArchived]);
 
   useEffect(() => {
     let cancelled = false;
@@ -193,6 +324,12 @@ export default function TemplateEditor() {
       cancelled = true;
     };
   }, [mode, refreshList]);
+
+  const visibleTemplates = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return templates;
+    return templates.filter((template) => template.name.toLowerCase().includes(needle));
+  }, [templates, query]);
 
   /* Sample values come from the backend so the preview shows what the PDF
    * will print, institutional data included. Without the backend the editor
@@ -209,41 +346,53 @@ export default function TemplateEditor() {
     }
   };
 
-  const openEditor = async (
-    versionId: number | null,
-    name: string,
-    certificateType: string | null = null,
-  ) => {
+  const openEditor = async (template: CertificateTemplate | null) => {
     setSaveError("");
-    setTemplateName(name);
-    setTemplateType(certificateType);
+    setNotice("");
+    setArtNotice(null);
+    const initial: ModelDetails = template
+      ? {
+          name: template.name,
+          certificateType: template.certificate_type,
+          courseId: template.course_id,
+        }
+      : { name: "Novo modelo", certificateType: null, courseId: null };
+    setDetails(initial);
+    setEditing({
+      id: template?.id ?? null,
+      revision: template?.revision ?? null,
+      isActive: Boolean(template?.is_active),
+      typeLocked: Boolean(template?.type_locked),
+      original: initial,
+    });
     setMode("edit");
-    history.reset();
+    undoHistory.reset();
     // Whatever settles on the canvas next is the clean starting point, whether
-    // that is an empty canvas or a loaded version.
-    history.markNextAsBaseline();
+    // that is an empty canvas or a loaded model.
+    undoHistory.markNextAsBaseline();
     void loadSampleData();
-    if (versionId == null) {
+    if (!template) {
       editor.clearAll();
       return;
     }
     try {
-      const full = await getVersion(versionId);
+      const full = await getTemplate(template.id);
+      setEditing((current) =>
+        current ? { ...current, revision: full.revision, isActive: full.is_active } : current,
+      );
       if (full.layout) editor.loadTemplate(full.layout);
     } catch (error) {
-      setSaveError(
-        failureMessage(error, "Não foi possível carregar esta versão para edição."),
-      );
+      setSaveError(failureMessage(error, "Não foi possível carregar este modelo para edição."));
     }
   };
 
   /* Choosing a per-work type turns the layout being edited (usually a copy of
-   * the generic template) into that type's starting point: no participant
-   * name, the body moved up, the authors block above the QR code. It is an
+   * the generic model) into that type's starting point: no participant name,
+   * the body moved up, the authors block above the QR code. It is an
    * ordinary edit, so Ctrl+Z brings the previous layout back. */
-  const handleCertificateTypeChange = (next: string | null) => {
-    const entering = isPerWorkType(next) && !isPerWorkType(templateType);
-    setTemplateType(next);
+  const handleDetailsChange = (next: ModelDetails) => {
+    const entering = isPerWorkType(next.certificateType) && !isPerWorkType(details.certificateType);
+    setDetails(next);
     if (!entering) return;
     const current = editor.getLayout();
     const start = perWorkStartingPoint(current);
@@ -252,27 +401,102 @@ export default function TemplateEditor() {
     editor.loadTemplate(start);
   };
 
-  const handleSave = async () => {
-    const name = templateName.trim();
+  /* "Trocar arte" keeps every element at its coordinates in art pixels. When
+   * the new art has another size the operator is told so, and which elements
+   * now fall beyond the page; nothing is moved for them. */
+  const handleBackgroundUploaded = (url: string, width: number, height: number) => {
+    const previous = editor.imageSize;
+    const replacing = Boolean(editor.backgroundUrl);
+    const sameSize = previous.width === width && previous.height === height;
+    const layout = editor.getLayout();
+    editorActions.setBackground(url, width, height);
+    if (!replacing || sameSize) {
+      setArtNotice(null);
+      return;
+    }
+    const outside = layout.elements
+      .filter((element) => element.x > width || element.y > height)
+      .map(elementLabel);
+    setArtNotice({ previous, next: { width, height }, outside });
+  };
+
+  const finishSave = async (outcome: SaveOutcome | "created") => {
+    undoHistory.markSaved();
+    setArtNotice(null);
+    setApplyConfirm(false);
+    setMode("list");
+    setNotice(
+      outcome === "created"
+        ? "Modelo criado. Ele ainda não está ativo — ative-o quando quiser que valha para as próximas emissões."
+        : SAVE_NOTICES[outcome],
+    );
+  };
+
+  const performSave = async (apply: boolean) => {
+    if (!editing) return;
+    const name = details.name.trim() || "Novo modelo";
     const layout = editor.getLayout();
     if (!layout.background) {
-      setSaveError("Envie a arte de fundo antes de salvar a versão.");
+      setSaveError("Envie a arte de fundo antes de salvar o modelo.");
       return;
     }
     setSaving(true);
     setSaveError("");
     try {
-      await createVersion(name || "Nova versão", layout, templateType);
-      history.markSaved();
-      setMode("list");
-      setNotice(
-        "Nova versão salva. Ela ainda não está ativa — ative-a quando quiser que valha para as próximas emissões.",
-      );
-      await refreshList();
+      if (editing.id == null) {
+        await createTemplate({
+          name,
+          layout,
+          certificate_type: details.certificateType,
+          course_id: details.courseId,
+        });
+        await finishSave("created");
+        return;
+      }
+      const saved = await saveTemplate(editing.id, {
+        name,
+        ...(editing.typeLocked ? {} : { certificate_type: details.certificateType }),
+        course_id: details.courseId,
+        // Only a changed layout is sent, so a save of the name alone never
+        // touches the revision.
+        ...(undoHistory.isDirty ? { layout } : {}),
+        revision: editing.revision ?? 1,
+        apply,
+      });
+      await finishSave(saved.outcome);
     } catch (error) {
-      setSaveError(failureMessage(error, "Erro ao salvar a versão."));
+      if (!apply && isApplyRequired(error)) {
+        setApplyConfirm(true);
+      } else if (isStale(error)) {
+        setStaleConflict(true);
+      } else {
+        setSaveError(failureMessage(error, "Erro ao salvar o modelo."));
+      }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSave = () => {
+    if (!editing) return;
+    // The active model: a changed layout reaches the next emissions, so the
+    // operator confirms before anything is sent.
+    if (editing.id != null && editing.isActive && undoHistory.isDirty) {
+      setApplyConfirm(true);
+      return;
+    }
+    void performSave(false);
+  };
+
+  const reloadAfterConflict = async () => {
+    if (!editing?.id) return;
+    setStaleConflict(false);
+    const current = templates.find((template) => template.id === editing.id) ?? null;
+    try {
+      const full = await getTemplate(editing.id);
+      await openEditor({ ...(current ?? full), ...full });
+    } catch (error) {
+      setSaveError(failureMessage(error, "Não foi possível recarregar o modelo."));
     }
   };
 
@@ -281,37 +505,14 @@ export default function TemplateEditor() {
     setActivateBusy(true);
     setActivateError("");
     try {
-      await activateVersion(activating.id);
+      await activateTemplate(activating.id);
       setActivating(null);
-      setNotice(
-        `Versão ${activating.version_number} ativada. Os próximos certificados usarão este layout.`,
-      );
+      setNotice(`Modelo “${activating.name}” ativado. Os próximos certificados usarão este layout.`);
       await refreshList();
     } catch (error) {
-      setActivateError(failureMessage(error, "Não foi possível ativar esta versão."));
+      setActivateError(failureMessage(error, "Não foi possível ativar este modelo."));
     } finally {
       setActivateBusy(false);
-    }
-  };
-
-  const handleRename = async () => {
-    if (!renaming) return;
-    const cleanName = renameName.trim();
-    if (!cleanName) {
-      setRenameError("Informe um nome para a versão.");
-      return;
-    }
-    setRenameBusy(true);
-    setRenameError("");
-    try {
-      await renameVersion(renaming.id, cleanName);
-      setRenaming(null);
-      setNotice(`Versão ${renaming.version_number} renomeada com sucesso.`);
-      await refreshList();
-    } catch (error) {
-      setRenameError(failureMessage(error, "Não foi possível renomear esta versão."));
-    } finally {
-      setRenameBusy(false);
     }
   };
 
@@ -320,20 +521,83 @@ export default function TemplateEditor() {
     setDeleteBusy(true);
     setDeleteError("");
     try {
-      await deleteVersion(deleting.id);
+      const result = await deleteTemplate(deleting.id);
       setDeleting(null);
-      setNotice(`Versão ${deleting.version_number} excluída.`);
+      setNotice(
+        result.outcome === "archived"
+          ? `Modelo “${deleting.name}” arquivado. Os certificados emitidos com ele continuam válidos; use “Mostrar arquivados” para vê-lo ou restaurá-lo.`
+          : `Modelo “${deleting.name}” excluído.`,
+      );
       await refreshList();
     } catch (error) {
-      setDeleteError(failureMessage(error, "Não foi possível excluir esta versão."));
+      setDeleteError(failureMessage(error, "Não foi possível excluir este modelo."));
     } finally {
       setDeleteBusy(false);
     }
   };
 
+  const handleRestore = async (template: CertificateTemplate) => {
+    setRowBusy(template.id);
+    setLoadError("");
+    try {
+      await restoreTemplate(template.id);
+      setNotice(`Modelo “${template.name}” restaurado. Ele volta à lista e continua inativo.`);
+      await refreshList();
+    } catch (error) {
+      setLoadError(failureMessage(error, "Não foi possível restaurar este modelo."));
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const handleDuplicate = async (template: CertificateTemplate, version?: TemplateVersion) => {
+    setRowBusy(template.id);
+    setLoadError("");
+    try {
+      const copy = await duplicateTemplate(
+        template.id,
+        version ? { version_id: version.id, name: `${template.name} (revisão ${version.version_number})` } : {},
+      );
+      setHistoryFor(null);
+      setNotice(`Cópia criada como “${copy.name}”. Ela está inativa; edite e ative quando quiser.`);
+      await refreshList();
+    } catch (error) {
+      setLoadError(failureMessage(error, "Não foi possível duplicar este modelo."));
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const loadHistory = useCallback(async (template: CertificateTemplate) => {
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      setHistory(await getTemplateHistory(template.id));
+    } catch (error) {
+      setHistory(null);
+      setHistoryError(failureMessage(error, "Não foi possível carregar o histórico."));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  const openHistory = (template: CertificateTemplate) => {
+    setHistory(null);
+    setHistoryFor(template);
+    void loadHistory(template);
+  };
+
   const requestBack = () => {
-    if (history.isDirty) setLeaving(true);
+    if (isDirty) setLeaving({});
     else setMode("list");
+  };
+
+  const confirmLeave = () => {
+    const pending = leaving?.proceed;
+    setLeaving(null);
+    undoHistory.reset();
+    setMode("list");
+    pending?.();
   };
 
   /* Keyboard shortcuts — only while the editor view is open, and never while
@@ -372,34 +636,19 @@ export default function TemplateEditor() {
       if (mod && event.key.toLowerCase() === "z") {
         if (typing) return;
         event.preventDefault();
-        if (event.shiftKey) history.redo();
-        else history.undo();
+        if (event.shiftKey) undoHistory.redo();
+        else undoHistory.undo();
         return;
       }
       if (mod && event.key.toLowerCase() === "y") {
         if (typing) return;
         event.preventDefault();
-        history.redo();
+        undoHistory.redo();
         return;
       }
       if (mod && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        void handleSave();
-        return;
-      }
-      if (mod && (event.key === "=" || event.key === "+")) {
-        event.preventDefault();
-        editor.setZoom(Math.min(3, editor.zoom + 0.25));
-        return;
-      }
-      if (mod && event.key === "-") {
-        event.preventDefault();
-        editor.setZoom(Math.max(0.25, editor.zoom - 0.25));
-        return;
-      }
-      if (mod && event.key === "0") {
-        event.preventDefault();
-        editor.setZoom(1);
+        handleSave();
         return;
       }
       if (event.key === "?" && !typing) {
@@ -410,28 +659,27 @@ export default function TemplateEditor() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing, history, editor.zoom, editor.selectedId, editorActions]);
+  }, [isEditing, undoHistory, editor.selectedId, editorActions, editing, details]);
 
   /* ── List view ──────────────────────────────────────────────────────── */
   if (mode === "list") {
+    const filtersActive = Boolean(query.trim() || courseFilter !== "" || typeFilter || showArchived);
+    const currentActiveFor = (template: CertificateTemplate) =>
+      templates.find(
+        (candidate) =>
+          candidate.is_active &&
+          (candidate.certificate_type ?? null) === (template.certificate_type ?? null),
+      );
+
     return (
       <>
         <PageHeader
           title="Template do certificado"
-          description="O template genérico vale para todos os tipos; um tipo pode ter a própria versão ativa. Cada alteração cria uma nova versão imutável; ative a que deve valer para as próximas emissões."
+          description="Um modelo por item. O modelo genérico ativo vale para todos os tipos; um tipo pode ter o próprio modelo ativo. O curso só organiza a lista."
           actions={
             canManage ? (
-              <Button
-                variant="primary"
-                icon={active ? "duplicate" : "plus"}
-                onClick={() =>
-                  openEditor(
-                    active ? active.id : null,
-                    active ? `Cópia de v${active.version_number}` : "Nova versão",
-                  )
-                }
-              >
-                {active ? "Editar (nova versão)" : "Criar template"}
+              <Button variant="primary" icon="plus" onClick={() => openEditor(null)}>
+                Novo modelo
               </Button>
             ) : undefined
           }
@@ -451,100 +699,75 @@ export default function TemplateEditor() {
 
         {!canManage && (
           <Alert tone="info" live={false} className="mb-4">
-            Seu perfil permite consultar o template, mas não criar nem ativar
-            versões.
+            Seu perfil permite consultar os modelos, mas não criar, editar nem ativar.
           </Alert>
         )}
 
-        {/* Active version */}
-        <Panel className="mb-4">
-          <PanelHeader
-            title="Versão ativa (genérica)"
-            description="Usada por todos os tipos de certificado que não têm uma versão própria ativa."
-          />
-          <div className="px-4 py-4 sm:px-5">
-            {loading ? (
-              <div className="flex gap-4">
-                <Skeleton className="h-28 w-44" />
-                <div className="flex-1 space-y-2">
-                  <Skeleton width="12rem" />
-                  <Skeleton width="8rem" />
-                </div>
-              </div>
-            ) : active ? (
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-                <img
-                  src={bgUrl(active)}
-                  alt={`Arte de fundo da versão ${active.version_number}`}
-                  className="h-28 w-full max-w-[16rem] rounded-[var(--radius)] border border-[color:var(--line)] object-contain sm:w-44"
-                />
-                <div className="min-w-0">
-                  <p className="text-[length:var(--text-md)] font-semibold text-[color:var(--ink)]">
-                    Versão {active.version_number}
-                    {active.name ? ` — ${active.name}` : ""}
-                  </p>
-                  <div className="mt-1.5">
-                    <StatusBadge tone="ok">Ativa (genérica)</StatusBadge>
-                  </div>
-                  <dl className="mt-3 space-y-1 text-[length:var(--text-sm)] text-[color:var(--ink-muted)]">
-                    <div className="flex gap-2">
-                      <dt>Criada em:</dt>
-                      <dd className="text-[color:var(--ink)]">{formatDate(active.created_at)}</dd>
-                    </div>
-                    <div className="flex gap-2">
-                      <dt>Ativada em:</dt>
-                      <dd className="text-[color:var(--ink)]">
-                        {formatDate(active.activated_at)}
-                      </dd>
-                    </div>
-                    <div className="flex gap-2">
-                      <dt>Dimensões:</dt>
-                      <dd className="text-[color:var(--ink)]">
-                        {active.image_width} × {active.image_height} px
-                      </dd>
-                    </div>
-                  </dl>
-                </div>
-              </div>
-            ) : (
-              <EmptyState
-                icon="template"
-                title="Nenhuma versão ativa"
-                description="Sem um template ativo os certificados não podem ser gerados. Crie um template e ative-o."
-                action={
-                  canManage ? (
-                    <Button
-                      variant="primary"
-                      icon="plus"
-                      onClick={() => openEditor(null, "Nova versão")}
-                    >
-                      Criar template
-                    </Button>
-                  ) : undefined
-                }
-              />
-            )}
-          </div>
-        </Panel>
-
-        {/* Version history */}
         <Panel>
           <PanelHeader
-            title="Histórico de versões"
-            description="Versões anteriores são preservadas. Compare duas lado a lado antes de ativar."
-            actions={
-              versions.length > 1 ? (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon="eye"
-                  onClick={() => setCompare(versions.slice(0, 2))}
-                >
-                  Comparar versões
-                </Button>
-              ) : undefined
-            }
+            title="Modelos"
+            description="Os ativos aparecem primeiro. Excluir um modelo que já gerou certificados apenas o arquiva."
           />
+
+          {/* Filters */}
+          <div className="grid gap-3 border-b border-[color:var(--line)] px-4 py-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)] sm:px-5">
+            <Field label="Buscar por nome" labelHidden>
+              {(props) => (
+                <TextInput
+                  {...props}
+                  type="search"
+                  placeholder="Buscar por nome"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              )}
+            </Field>
+            <Field label="Curso" labelHidden>
+              {(props) => (
+                <Select
+                  {...props}
+                  value={courseFilter === "" ? "" : String(courseFilter)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setCourseFilter(value === "" ? "" : value === "none" ? "none" : Number(value));
+                  }}
+                >
+                  <option value="">Curso: todos</option>
+                  <option value="none">Curso: todos os cursos (sem curso)</option>
+                  {courses.map((course) => (
+                    <option key={course.id} value={course.id}>
+                      Curso: {course.name}
+                      {course.is_active ? "" : " (inativo)"}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Tipo de certificado" labelHidden>
+              {(props) => (
+                <Select
+                  {...props}
+                  value={typeFilter}
+                  onChange={(event) => setTypeFilter(event.target.value)}
+                >
+                  <option value="">Tipo: todos</option>
+                  <option value={GENERIC_TYPE}>Tipo: genérico</option>
+                  {CERTIFICATE_TYPES.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      Tipo: {option.label}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <div className="sm:col-span-3">
+              <Checkbox
+                label="Mostrar arquivados"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+            </div>
+          </div>
 
           {loading ? (
             <div className="space-y-3 px-4 py-4 sm:px-5">
@@ -552,40 +775,55 @@ export default function TemplateEditor() {
                 <Skeleton key={row} className="h-14" />
               ))}
             </div>
-          ) : versions.length === 0 ? (
+          ) : visibleTemplates.length === 0 ? (
             <EmptyState
               icon="template"
-              title="Nenhuma versão criada"
-              description="A primeira versão aparecerá aqui assim que você salvar o template."
+              title={filtersActive ? "Nenhum modelo corresponde aos filtros" : "Nenhum modelo"}
+              description={
+                filtersActive
+                  ? "Limpe a busca ou os filtros para ver os outros modelos."
+                  : "Sem um modelo ativo os certificados não podem ser gerados. Crie um modelo e ative-o."
+              }
+              action={
+                canManage && !filtersActive ? (
+                  <Button variant="primary" icon="plus" onClick={() => openEditor(null)}>
+                    Novo modelo
+                  </Button>
+                ) : undefined
+              }
             />
           ) : (
             <ul className="divide-y divide-[color:var(--line)]">
-              {versions.map((version) => (
+              {visibleTemplates.map((template) => (
                 <li
-                  key={version.id}
-                  className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5"
+                  key={template.id}
+                  className={cn(
+                    "flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5",
+                    template.is_archived && "bg-[var(--surface-sunken)]",
+                  )}
                 >
                   <img
-                    src={bgUrl(version)}
+                    src={bgUrl(template)}
                     alt=""
                     className="h-14 w-24 shrink-0 rounded-[var(--radius)] border border-[color:var(--line)] object-contain"
                   />
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium text-[color:var(--ink)]">
-                      Versão {version.version_number}
-                      {version.name ? ` — ${version.name}` : ""}
-                    </p>
+                    <p className="font-medium text-[color:var(--ink)]">{template.name}</p>
                     <p className="mt-0.5 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
-                      {versionTypeLabel(version)} · Criada em {formatDate(version.created_at)}
+                      {typeLabel(template.certificate_type)} · {courseLabel(template.course_name)} ·{" "}
+                      {certificateCountLabel(template.certificate_count)} · Atualizado em{" "}
+                      {formatDateTime(template.updated_at)}
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    {version.is_active ? (
+                    {template.is_archived ? (
+                      <StatusBadge tone="neutral">Arquivado</StatusBadge>
+                    ) : template.is_active ? (
                       <StatusBadge tone="ok">
-                        {version.certificate_type
-                          ? `Ativa para ${certificateTypeLabel(version.certificate_type)}`
-                          : "Ativa (genérica)"}
+                        {template.certificate_type
+                          ? `Ativo para ${certificateTypeLabel(template.certificate_type)}`
+                          : "Ativo (genérico)"}
                       </StatusBadge>
                     ) : (
                       canManage && (
@@ -594,37 +832,16 @@ export default function TemplateEditor() {
                           variant="secondary"
                           onClick={() => {
                             setActivateError("");
-                            setActivating(version);
+                            setActivating(template);
                           }}
                         >
                           Ativar
                         </Button>
                       )
                     )}
-                    {canManage && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setRenameError("");
-                          setRenameName(version.name || `Versão ${version.version_number}`);
-                          setRenaming(version);
-                        }}
-                      >
-                        Renomear
-                      </Button>
-                    )}
-                    {canManage && !version.is_active && (
-                      <Button
-                        size="sm"
-                        variant="danger-quiet"
-                        icon="trash"
-                        onClick={() => {
-                          setDeleteError("");
-                          setDeleting(version);
-                        }}
-                      >
-                        Excluir
+                    {canManage && !template.is_archived && (
+                      <Button size="sm" variant="ghost" onClick={() => openEditor(template)}>
+                        Editar
                       </Button>
                     )}
                     {canManage && (
@@ -632,15 +849,37 @@ export default function TemplateEditor() {
                         size="sm"
                         variant="ghost"
                         icon="duplicate"
-                        onClick={() =>
-                          openEditor(
-                            version.id,
-                            `Cópia de v${version.version_number}`,
-                            version.certificate_type ?? null,
-                          )
-                        }
+                        loading={rowBusy === template.id}
+                        onClick={() => handleDuplicate(template)}
                       >
-                        Editar como nova
+                        Duplicar
+                      </Button>
+                    )}
+                    <Button size="sm" variant="ghost" icon="history" onClick={() => openHistory(template)}>
+                      Ver histórico
+                    </Button>
+                    {canManage && template.is_archived && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon="refresh"
+                        loading={rowBusy === template.id}
+                        onClick={() => handleRestore(template)}
+                      >
+                        Restaurar
+                      </Button>
+                    )}
+                    {canManage && !template.is_active && !template.is_archived && (
+                      <Button
+                        size="sm"
+                        variant="danger-quiet"
+                        icon="trash"
+                        onClick={() => {
+                          setDeleteError("");
+                          setDeleting(template);
+                        }}
+                      >
+                        Excluir
                       </Button>
                     )}
                   </div>
@@ -653,13 +892,13 @@ export default function TemplateEditor() {
         {/* Activation — typed confirmation, since it affects every future issue */}
         <ConfirmDialog
           open={Boolean(activating)}
-          title={`Ativar versão ${activating?.version_number ?? ""}`}
+          title={`Ativar modelo “${activating?.name ?? ""}”`}
           description={
             activating?.certificate_type
               ? `Todos os certificados do tipo ${certificateTypeLabel(activating.certificate_type)} emitidos a partir de agora usarão este layout.`
-              : "Todos os certificados emitidos a partir de agora usarão este layout, exceto os tipos com versão própria ativa."
+              : "Todos os certificados emitidos a partir de agora usarão este layout, exceto os tipos com modelo próprio ativo."
           }
-          confirmLabel="Ativar esta versão"
+          confirmLabel="Ativar este modelo"
           tone="primary"
           busy={activateBusy}
           error={activateError}
@@ -681,63 +920,35 @@ export default function TemplateEditor() {
               />
               <div className="min-w-0 text-[length:var(--text-sm)]">
                 <p className="text-[color:var(--ink)]">
-                  A versão ativa {versionTypeLabel(activating).toLowerCase()} passará de{" "}
-                  <strong>
-                    {(() => {
-                      const current = versions.find(
-                        (version) =>
-                          version.is_active &&
-                          (version.certificate_type ?? null) ===
-                            (activating.certificate_type ?? null),
-                      );
-                      return current ? `v${current.version_number}` : "nenhuma";
-                    })()}
-                  </strong>{" "}
-                  para <strong>v{activating.version_number}</strong>.
+                  O modelo ativo {typeLabel(activating.certificate_type).toLowerCase()} passará de{" "}
+                  <strong>{currentActiveFor(activating)?.name ?? "nenhum"}</strong> para{" "}
+                  <strong>{activating.name}</strong>.
                 </p>
                 <p className="mt-1.5 text-[color:var(--ink-muted)]">
-                  Certificados já emitidos não mudam — eles mantêm o layout com
-                  que foram gerados.
+                  Certificados já emitidos não mudam — eles mantêm o layout com que foram
+                  gerados.
                 </p>
               </div>
             </div>
           )}
         </ConfirmDialog>
 
-        <ConfirmDialog
-          open={Boolean(renaming)}
-          title={`Renomear versão ${renaming?.version_number ?? ""}`}
-          description="O nome é apenas uma identificação administrativa; o layout e os certificados emitidos não serão alterados."
-          confirmLabel="Salvar novo nome"
-          tone="primary"
-          busy={renameBusy}
-          error={renameError}
-          onConfirm={handleRename}
-          onClose={() => {
-            if (!renameBusy) {
-              setRenaming(null);
-              setRenameError("");
-            }
-          }}
-        >
-          <Field label="Nome da versão">
-            {(props) => (
-              <TextInput
-                {...props}
-                value={renameName}
-                maxLength={255}
-                autoComplete="off"
-                onChange={(event) => setRenameName(event.target.value)}
-              />
-            )}
-          </Field>
-        </ConfirmDialog>
-
+        {/* Delete or archive: the dialog says which, from the certificate count. */}
         <ConfirmDialog
           open={Boolean(deleting)}
-          title={`Excluir versão ${deleting?.version_number ?? ""}`}
-          description="Esta ação remove permanentemente esta versão não utilizada."
-          confirmLabel="Excluir esta versão"
+          title={
+            deleting && deleting.reference_count > 0
+              ? `Arquivar modelo “${deleting.name}”`
+              : `Excluir modelo “${deleting?.name ?? ""}”`
+          }
+          description={
+            deleting && deleting.reference_count > 0
+              ? `Este modelo já gerou ${certificateCountLabel(deleting.certificate_count).toLowerCase()}, por isso não será apagado: ele sai da lista e dos seletores, mas o registro fica guardado e os certificados, a validação pública e a reemissão continuam funcionando.`
+              : "Este modelo nunca gerou certificados e será apagado de verdade, com todas as suas revisões."
+          }
+          confirmLabel={
+            deleting && deleting.reference_count > 0 ? "Arquivar este modelo" : "Excluir este modelo"
+          }
           busy={deleteBusy}
           error={deleteError}
           requireTyped="EXCLUIR"
@@ -749,124 +960,88 @@ export default function TemplateEditor() {
             }
           }}
         >
-          <Alert tone="warn">
-            A versão ativa e qualquer versão já usada em certificados não podem ser
-            excluídas. Nesses casos, o sistema preserva o histórico automaticamente.
-          </Alert>
+          {deleting && deleting.reference_count > 0 && (
+            <Alert tone="info" live={false}>
+              Para ver ou restaurar um modelo arquivado, marque “Mostrar arquivados” na lista.
+            </Alert>
+          )}
         </ConfirmDialog>
 
-        {/* Comparison */}
-        <AccessibleModal
-          open={Boolean(compare)}
-          title="Comparar versões"
-          description="Escolha duas versões para ver as artes lado a lado."
-          size="lg"
-          onClose={() => setCompare(null)}
-          footer={
-            <Button variant="secondary" onClick={() => setCompare(null)}>
-              Fechar
-            </Button>
-          }
-        >
-          {compare && (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {[0, 1].map((slot) => (
-                <div key={slot}>
-                  <label
-                    htmlFor={`compare-${slot}`}
-                    className="text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]"
-                  >
-                    {slot === 0 ? "Versão A" : "Versão B"}
-                  </label>
-                  <select
-                    id={`compare-${slot}`}
-                    value={compare[slot]?.id ?? ""}
-                    onChange={(event) => {
-                      const picked = versions.find(
-                        (version) => version.id === Number(event.target.value),
-                      );
-                      if (!picked) return;
-                      const next = [...compare];
-                      next[slot] = picked;
-                      setCompare(next);
-                    }}
-                    className="mt-1 h-10 w-full rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2.5 text-[length:var(--text-sm)]"
-                  >
-                    {versions.map((version) => (
-                      <option key={version.id} value={version.id}>
-                        v{version.version_number}
-                        {version.name ? ` — ${version.name}` : ""}
-                        {version.is_active ? " (ativa)" : ""}
-                      </option>
-                    ))}
-                  </select>
-
-                  {compare[slot] && (
-                    <>
-                      <img
-                        src={bgUrl(compare[slot])}
-                        alt={`Arte da versão ${compare[slot].version_number}`}
-                        className="mt-2 w-full rounded-[var(--radius)] border border-[color:var(--line)] object-contain"
-                      />
-                      <dl className="mt-2 space-y-0.5 text-[length:var(--text-xs)] text-[color:var(--ink-muted)]">
-                        <div className="flex justify-between gap-2">
-                          <dt>Criada em</dt>
-                          <dd className="text-[color:var(--ink)]">
-                            {formatDate(compare[slot].created_at)}
-                          </dd>
-                        </div>
-                        <div className="flex justify-between gap-2">
-                          <dt>Dimensões</dt>
-                          <dd className="text-[color:var(--ink)]">
-                            {compare[slot].image_width} × {compare[slot].image_height}
-                          </dd>
-                        </div>
-                      </dl>
-                    </>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </AccessibleModal>
+        <TemplateHistoryDialog
+          template={historyFor}
+          versions={history}
+          loading={historyLoading}
+          error={historyError}
+          canManage={canManage}
+          onDuplicate={(version) => historyFor && handleDuplicate(historyFor, version)}
+          onRetry={() => historyFor && loadHistory(historyFor)}
+          onClose={() => setHistoryFor(null)}
+        />
       </>
     );
   }
 
   /* ── Editor view ────────────────────────────────────────────────────── */
+  const reportError = (body: string) => setMessage({ title: "Erro no editor", body });
+  const elementList = (
+    <ElementList
+      elements={editor.elements}
+      selectedId={editor.selectedId}
+      certificateType={details.certificateType}
+      onAdd={editorActions.addTextElement}
+      onAddImage={editorActions.addImageElement}
+      onError={reportError}
+      onSelect={editor.selectElement}
+      onDelete={editorActions.deleteElement}
+      onDuplicate={editorActions.duplicateElement}
+    />
+  );
+  const propertiesPanel = (
+    <PropertiesPanel
+      elements={editor.elements}
+      selectedId={editor.selectedId}
+      certificateType={details.certificateType}
+      onUpdate={editorActions.updateElement}
+      onDelete={editorActions.deleteElement}
+      onDuplicate={editorActions.duplicateElement}
+      textLayouts={editor.textLayouts}
+      layoutSource={editor.layoutSource}
+      imageSize={editor.imageSize}
+    />
+  );
+  const currentCourse = courses.find((course) => course.id === details.courseId);
+
   return (
     <>
-      {/* Break out of the shell's padded container: the editor wants the whole
-          viewport, and a canvas inside a max-width column wastes the screen. */}
-      <div className="-mx-3 -my-5 flex h-[calc(100vh-var(--topbar-height))] flex-col sm:-mx-5 sm:-my-6 lg:-mx-8">
+      {/* The shell is immersive here: no sidebar, no topbar, no padding. The
+          editor is the viewport, and the stage fits the whole page into
+          whatever is left after the toolbar, the notices and the panels. */}
+      <div className="flex h-[100dvh] flex-col">
         <EditorTopbar
-          templateName={templateName}
-          certificateType={templateType}
-          onCertificateTypeChange={handleCertificateTypeChange}
+          templateName={details.name}
+          typeLabel={typeLabel(details.certificateType)}
+          courseLabel={courseLabel(currentCourse?.name)}
+          onOpenModelDetails={() => setDetailsOpen(true)}
           saving={saving}
           hasBackground={Boolean(editor.backgroundUrl)}
-          isDirty={history.isDirty}
-          canUndo={history.canUndo}
-          canRedo={history.canRedo}
+          isDirty={isDirty}
+          canUndo={undoHistory.canUndo}
+          canRedo={undoHistory.canRedo}
           showMockData={editor.showMockData}
           showGrid={editor.showGrid}
-          zoom={editor.zoom}
-          onNameChange={setTemplateName}
+          menuOpen={drawerOpen}
+          onOpenMenu={openDrawer}
           onSave={handleSave}
           onBack={requestBack}
-          onUndo={history.undo}
-          onRedo={history.redo}
+          onUndo={undoHistory.undo}
+          onRedo={undoHistory.redo}
           onRequestClear={() => setClearing(true)}
-          onError={(body) => setMessage({ title: "Erro no editor", body })}
+          onError={reportError}
           onSetMock={editor.setShowMockData}
           onSetGrid={editor.setShowGrid}
-          onSetZoom={editor.setZoom}
           onExport={editor.exportJSON}
           onImport={editorActions.importJSON}
-          onBackgroundUploaded={(url, width, height) =>
-            editorActions.setBackground(url, width, height)
-          }
-          onImageUploaded={editorActions.addImageElement}
+          onBackgroundUploaded={handleBackgroundUploaded}
           onShowShortcuts={() => setShortcutsOpen(true)}
         />
 
@@ -888,8 +1063,21 @@ export default function TemplateEditor() {
             {editor.canvasError}
           </Alert>
         )}
+        {artNotice && (
+          <Alert
+            tone="info"
+            className="rounded-none border-x-0 border-t-0"
+            actions={
+              <Button size="sm" variant="secondary" onClick={() => setArtNotice(null)}>
+                Fechar
+              </Button>
+            }
+          >
+            {artNoticeText(artNotice)}
+          </Alert>
+        )}
 
-        <PerWorkNotice certificateType={templateType} elements={editor.elements} />
+        <PerWorkNotice certificateType={details.certificateType} elements={editor.elements} />
 
         <SettingsNotice
           emptySettings={sample?.empty_settings ?? []}
@@ -901,103 +1089,137 @@ export default function TemplateEditor() {
         <div className="flex min-h-0 flex-1">
           {isWideEditor ? (
             <>
-              <aside className="w-56 shrink-0 border-r border-[color:var(--line)]">
-                <ElementList
-                  elements={editor.elements}
-                  selectedId={editor.selectedId}
-                  certificateType={templateType}
-                  onAdd={editorActions.addTextElement}
-                  onSelect={editor.selectElement}
-                  onDelete={editorActions.deleteElement}
-                  onDuplicate={editorActions.duplicateElement}
-                />
-              </aside>
+              <SidePanel
+                title="Elementos"
+                side="left"
+                widthClass="w-56"
+                collapsed={leftCollapsed}
+                onToggle={() => setLeftCollapsed((value) => !value)}
+              >
+                {elementList}
+              </SidePanel>
 
               <EditorCanvas
                 canvasRef={editor.canvasRef}
+                stageRef={editor.stageRef}
                 backgroundUrl={editor.backgroundUrl}
-                zoom={editor.zoom}
               />
 
-              <aside className="w-64 shrink-0 border-l border-[color:var(--line)]">
-                <PropertiesPanel
-                  elements={editor.elements}
-                  selectedId={editor.selectedId}
-                  certificateType={templateType}
-                  onUpdate={editorActions.updateElement}
-                  onDelete={editorActions.deleteElement}
-                  onDuplicate={editorActions.duplicateElement}
-                  textLayouts={editor.textLayouts}
-                  layoutSource={editor.layoutSource}
-                  imageSize={editor.imageSize}
-                />
-              </aside>
+              <SidePanel
+                title="Propriedades"
+                side="right"
+                widthClass="w-60"
+                collapsed={rightCollapsed}
+                onToggle={() => setRightCollapsed((value) => !value)}
+              >
+                {propertiesPanel}
+              </SidePanel>
             </>
           ) : (
             <>
               <EditorCanvas
                 canvasRef={editor.canvasRef}
+                stageRef={editor.stageRef}
                 backgroundUrl={editor.backgroundUrl}
-                zoom={editor.zoom}
               />
 
               {/* One shared side strip on smaller screens. */}
-              <aside className="flex w-60 shrink-0 flex-col border-l border-[color:var(--line)] bg-[var(--surface)]">
-                <div
-                  role="tablist"
-                  aria-label="Painéis do editor"
-                  className="flex border-b border-[color:var(--line)]"
-                >
-                  {(["elements", "properties"] as const).map((panel) => (
-                    <button
-                      key={panel}
-                      role="tab"
-                      type="button"
-                      aria-selected={activeSidePanel === panel}
-                      onClick={() => setActiveSidePanel(panel)}
-                      className={cn(
-                        "flex-1 px-3 py-2 text-[length:var(--text-xs)] font-medium",
-                        activeSidePanel === panel
-                          ? "border-b-2 border-[color:var(--brand-700)] text-[color:var(--ink)]"
-                          : "text-[color:var(--ink-muted)] hover:text-[color:var(--ink)]",
-                      )}
-                    >
-                      {panel === "elements" ? "Elementos" : "Propriedades"}
-                    </button>
-                  ))}
+              <SidePanel
+                title="Painéis"
+                side="right"
+                widthClass="w-60"
+                collapsed={rightCollapsed}
+                onToggle={() => setRightCollapsed((value) => !value)}
+              >
+                <div className="flex h-full flex-col bg-[var(--surface)]">
+                  <div
+                    role="tablist"
+                    aria-label="Painéis do editor"
+                    className="flex border-b border-[color:var(--line)] pr-9"
+                  >
+                    {(["elements", "properties"] as const).map((panel) => (
+                      <button
+                        key={panel}
+                        role="tab"
+                        type="button"
+                        aria-selected={activeSidePanel === panel}
+                        onClick={() => setActiveSidePanel(panel)}
+                        className={cn(
+                          "flex-1 px-3 py-2 text-[length:var(--text-xs)] font-medium",
+                          activeSidePanel === panel
+                            ? "border-b-2 border-[color:var(--brand-700)] text-[color:var(--ink)]"
+                            : "text-[color:var(--ink-muted)] hover:text-[color:var(--ink)]",
+                        )}
+                      >
+                        {panel === "elements" ? "Elementos" : "Propriedades"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    {activeSidePanel === "elements" ? elementList : propertiesPanel}
+                  </div>
                 </div>
-                <div className="min-h-0 flex-1">
-                  {activeSidePanel === "elements" ? (
-                    <ElementList
-                      elements={editor.elements}
-                      selectedId={editor.selectedId}
-                      certificateType={templateType}
-                      onAdd={editorActions.addTextElement}
-                      onSelect={editor.selectElement}
-                      onDelete={editorActions.deleteElement}
-                      onDuplicate={editorActions.duplicateElement}
-                    />
-                  ) : (
-                    <PropertiesPanel
-                      elements={editor.elements}
-                      selectedId={editor.selectedId}
-                      certificateType={templateType}
-                      onUpdate={editorActions.updateElement}
-                      onDelete={editorActions.deleteElement}
-                      onDuplicate={editorActions.duplicateElement}
-                      textLayouts={editor.textLayouts}
-                      layoutSource={editor.layoutSource}
-                      imageSize={editor.imageSize}
-                    />
-                  )}
-                </div>
-              </aside>
+              </SidePanel>
             </>
           )}
         </div>
       </div>
 
       {/* Dialogs */}
+      <ModelDetailsDialog
+        open={detailsOpen}
+        details={details}
+        courses={courses}
+        typeLocked={Boolean(editing?.typeLocked)}
+        onChange={handleDetailsChange}
+        onClose={() => setDetailsOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={applyConfirm}
+        title="Salvar e aplicar às próximas emissões?"
+        description={
+          details.certificateType
+            ? `Este modelo está ativo para ${certificateTypeLabel(details.certificateType)}: ao salvar, todos os certificados desse tipo emitidos a partir de agora usarão o novo layout, inclusive lotes que já estão na fila.`
+            : "Este é o modelo genérico ativo: ao salvar, todos os certificados emitidos a partir de agora usarão o novo layout (exceto os tipos com modelo próprio ativo), inclusive lotes que já estão na fila."
+        }
+        confirmLabel="Salvar e aplicar às próximas emissões"
+        tone="primary"
+        busy={saving}
+        error={saveError}
+        requireTyped="APLICAR"
+        onConfirm={() => void performSave(true)}
+        onClose={() => {
+          if (!saving) setApplyConfirm(false);
+        }}
+      >
+        <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
+          O layout atual fica guardado em “Ver histórico”, e os certificados já emitidos
+          não mudam.
+        </p>
+      </ConfirmDialog>
+
+      <AccessibleModal
+        open={staleConflict}
+        title="Este modelo foi alterado por outra pessoa"
+        description="Desde que você o abriu, o modelo foi salvo em outra sessão. Para não sobrescrever esse trabalho, recarregue o modelo e refaça as suas alterações."
+        onClose={() => setStaleConflict(false)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setStaleConflict(false)}>
+              Continuar editando
+            </Button>
+            <Button variant="primary" icon="refresh" onClick={() => void reloadAfterConflict()}>
+              Recarregar o modelo
+            </Button>
+          </>
+        }
+      >
+        <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
+          Se preferir guardar o que fez, use “Mais → Exportar JSON” antes de recarregar.
+        </p>
+      </AccessibleModal>
+
       <ConfirmDialog
         open={clearing}
         title="Limpar todos os elementos"
@@ -1016,20 +1238,16 @@ export default function TemplateEditor() {
       </ConfirmDialog>
 
       <ConfirmDialog
-        open={leaving}
+        open={Boolean(leaving)}
         title="Sair sem salvar?"
-        description="As alterações feitas nesta versão serão perdidas."
+        description="As alterações feitas neste modelo serão perdidas."
         confirmLabel="Sair sem salvar"
-        onConfirm={() => {
-          setLeaving(false);
-          history.reset();
-          setMode("list");
-        }}
+        onConfirm={confirmLeave}
         cancelLabel="Continuar editando"
-        onClose={() => setLeaving(false)}
+        onClose={() => setLeaving(null)}
       >
         <p className="text-[length:var(--text-sm)] text-[color:var(--ink)]">
-          Há alterações que ainda não foram salvas como uma nova versão.
+          Há alterações que ainda não foram salvas.
         </p>
       </ConfirmDialog>
 
@@ -1047,10 +1265,7 @@ export default function TemplateEditor() {
           {[
             ["Ctrl + Z", "Desfazer"],
             ["Ctrl + Shift + Z", "Refazer"],
-            ["Ctrl + S", "Salvar versão"],
-            ["Ctrl + +", "Aumentar zoom"],
-            ["Ctrl + −", "Diminuir zoom"],
-            ["Ctrl + 0", "Zoom 100%"],
+            ["Ctrl + S", "Salvar"],
             ["Setas", "Mover o elemento selecionado em 1 px"],
             ["Shift + Setas", "Mover o elemento selecionado em 10 px"],
             ["Delete", "Excluir o elemento selecionado"],

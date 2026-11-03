@@ -71,8 +71,10 @@ def _record_text_calls(monkeypatch) -> list[str]:
 
 
 def _xlsx(rows: list[dict]) -> bytes:
+    from certificados_backend.tests._emails import with_emails
+
     buffer = io.BytesIO()
-    pd.DataFrame(rows).to_excel(buffer, index=False)
+    pd.DataFrame(with_emails(rows)).to_excel(buffer, index=False)
     return buffer.getvalue()
 
 
@@ -83,6 +85,7 @@ def _files(rows: list[dict]) -> dict:
 def _row(nome: str, **extra) -> dict:
     row = {
         "nome": nome,
+        "email": "pessoa.sintetica@exemplo.com",
         "curso": "Direito",
         "evento": "Semana Jurídica",
         "carga_horaria": 40,
@@ -282,7 +285,7 @@ def test_blank_row_fields_only_warn_with_their_rows(client, auth_headers):
         ],
     }
     version = template_service.create_version(name="Com evento", layout=layout)
-    assert client.post(f"/templates/versions/{version['id']}/activate").status_code == 200
+    assert client.post(f"/templates/{version['template_id']}/activate").status_code == 200
 
     preview = _preview(client, [_row("Ana Souza"), _row("Carla Dias", evento="")])
     assert preview["missing_settings"] == []
@@ -366,7 +369,7 @@ def test_blank_event_is_listed_once_when_template_and_body_both_use_it(client, a
         ],
     }
     version = template_service.create_version(name="Evento duas vezes", layout=layout)
-    assert client.post(f"/templates/versions/{version['id']}/activate").status_code == 200
+    assert client.post(f"/templates/{version['template_id']}/activate").status_code == 200
 
     rows = [_row("Ana Souza"), _row("Carla Dias", evento="")]
     preview = _preview_with(client, rows, "participou de {{evento}}.", "listener")

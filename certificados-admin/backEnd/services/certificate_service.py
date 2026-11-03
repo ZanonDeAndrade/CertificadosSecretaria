@@ -229,6 +229,9 @@ class CertificateBatchService:
             fields = {
                 "participant_name": row.nome,
                 "participant_email": row.email or None,
+                # Hashed by the repository: the public site searches and
+                # confirms downloads by exact e-mail, the holder's or any author's.
+                "emails": list(row.emails),
                 "participant_document": row.documento or None,
                 "course_name": row.curso,
                 "event_name": row.evento,  # event_name = evento (NUNCA o curso)

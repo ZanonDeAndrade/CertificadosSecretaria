@@ -8,11 +8,48 @@ from database import config
 from database.privacy import (
     active_document_key_id,
     document_hash,
+    email_hash,
+    email_hash_candidates,
+    is_valid_email,
     matching_document_key_id,
+    matching_email_key_id,
     normalize_document,
+    normalize_email,
     normalize_name,
+    pseudonymous_rate_limit_key,
     validate_production_privacy_config,
 )
+
+
+def test_email_normalisation_validation_and_keyed_hash(monkeypatch):
+    monkeypatch.setenv("DOCUMENT_HASH_SECRET", "s" * 32 + "abcdefghijkl")
+    monkeypatch.setenv("DOCUMENT_HASH_ACTIVE_KEY_ID", "v1")
+    assert normalize_email("  Ana.Silva @Exemplo.COM ") == "ana.silva@exemplo.com"
+    assert is_valid_email("ana.silva@exemplo.com")
+    assert is_valid_email(" Ana.Silva@Exemplo.com ")
+    assert not is_valid_email("ana@exemplo")
+    assert not is_valid_email("ana@@exemplo.com")
+    assert not is_valid_email("ana exemplo.com")
+    assert not is_valid_email("a" * 250 + "@exemplo.com")
+    assert not is_valid_email("")
+
+    digest = email_hash("Ana.Silva@Exemplo.com")
+    assert digest == email_hash("ana.silva@exemplo.com")
+    assert email_hash("") is None
+    # Domain-separated from the document HMAC under the same key.
+    assert digest != document_hash("ana.silva@exemplo.com")
+    assert email_hash_candidates("ANA.silva@exemplo.com") == {"v1": digest}
+    assert matching_email_key_id(digest, "ana.silva@exemplo.com", key_id="v1") == "v1"
+    assert matching_email_key_id(digest, "ana.silva@exemplo.com") == "v1"
+    assert matching_email_key_id(digest, "outra@exemplo.com", key_id="v1") is None
+    assert matching_email_key_id(None, "ana.silva@exemplo.com") is None
+    # The rate-limit pseudonym follows the same normalisation.
+    assert pseudonymous_rate_limit_key("search-email", "Ana@Exemplo.com ") == (
+        pseudonymous_rate_limit_key("search-email", "ana@exemplo.com")
+    )
+    assert pseudonymous_rate_limit_key("search-email", "ana@exemplo.com") != (
+        pseudonymous_rate_limit_key("search-name", "ana@exemplo.com")
+    )
 
 
 def test_name_and_document_normalization(monkeypatch):

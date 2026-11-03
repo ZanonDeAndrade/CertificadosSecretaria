@@ -49,7 +49,7 @@ def test_upgrade_repairs_compatible_tables_precreated_before_0007(tmp_path, monk
     with engine.connect() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            == "0013"
+            == "0015"
         )
         assert (
             connection.execute(

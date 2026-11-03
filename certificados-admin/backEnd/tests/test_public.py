@@ -30,7 +30,12 @@ def _seed_certificate(
     include_private_storage=False,
     document="99999999999",
     certificate_type=None,
+    emails=None,
+    authors=None,
+    work_title=None,
 ):
+    """A certificate as the worker records it. Without ``emails`` it stands for
+    one issued before e-mails were recorded: only the document hash confirms it."""
     pdfs = tmp_path / "pdfs"
     pdfs.mkdir(parents=True, exist_ok=True)
     (pdfs / "j.pdf").write_bytes(b"%PDF-1.4 test certificate")
@@ -46,6 +51,9 @@ def _seed_certificate(
                 "pdf_path": "pdfs/j.pdf",
                 "participant_email": "segredo@exemplo.com",
                 "participant_document": document,
+                "emails": list(emails or []),
+                "authors_json": json.dumps(list(authors)) if authors else None,
+                "work_title": work_title,
                 "drive_file_id": "private-drive-id" if include_private_storage else None,
                 "drive_folder_id": "private-folder-id" if include_private_storage else None,
                 "original_filename": (
@@ -313,81 +321,237 @@ def test_name_search_is_accent_insensitive_and_html_offers_download(public):
     assert "J••• D•••" in html
     assert CODE not in html
     assert "/public/certificates/CERT-" not in html
-    assert "Registro Acadêmico (RA)" in html
+    assert "E-mail cadastrado" in html
     assert "Confirmar e baixar" in html
+    assert "segredo@exemplo.com" not in html
     assert html_response.headers["cache-control"] == "no-store, private"
 
 
-def test_academic_record_search_returns_every_related_certificate(public):
+EMAIL = "pessoa.academica@exemplo.com"
+
+
+def test_email_search_returns_every_certificate_of_the_person_as_holder_or_author(public):
     client, db, tmp_path = public
-    academic_record = "RA-2026-0042"
     _seed_certificate(
-        db,
-        tmp_path,
-        code="CERT-2026-RA0001",
-        name="Pessoa Acadêmica",
-        document=academic_record,
+        db, tmp_path, code="CERT-2026-EM0001", name="Pessoa Acadêmica", emails=[EMAIL]
     )
     _seed_certificate(
         db,
         tmp_path,
-        code="CERT-2026-RA0002",
-        name="Pessoa Acadêmica",
-        document=academic_record,
+        code="CERT-2026-EM0002",
+        name="Primeira Autora",
+        certificate_type="scientific_initiation",
+        authors=["Primeira Autora", "Pessoa Acadêmica"],
+        work_title="Horta vertical automatizada",
+        emails=["primeira.autora@exemplo.com", EMAIL],
     )
     _seed_certificate(
-        db,
-        tmp_path,
-        code="CERT-2026-OTHER1",
-        name="Outra Pessoa",
-        document="RA-OUTRO",
+        db, tmp_path, code="CERT-2026-OTHER1", name="Outra Pessoa", emails=["outra@exemplo.com"]
     )
 
-    api = client.post(
-        "/public/search/academic-record",
-        json={"registro_academico": academic_record},
-    )
+    # Exact match, after the same normalisation the spreadsheet applies.
+    api = client.post("/public/search/email", json={"email": "  Pessoa.Academica@EXEMPLO.com "})
     assert api.status_code == 200
     assert api.json()["total"] == 2
-    assert len(api.json()["items"]) == 2
-    assert academic_record not in api.text
-    assert "CERT-2026-RA0001" not in api.text
+    assert {item["work_title"] for item in api.json()["items"]} == {
+        None,
+        "Horta vertical automatizada",
+    }
+    assert "exemplo.com" not in api.text
+    assert "CERT-2026-EM0001" not in api.text
+    assert "participant_document_hash" not in api.text
 
-    page = client.post("/", data={"registro_academico": academic_record})
+    page = client.post("/", data={"email": EMAIL})
     assert page.status_code == 200
     assert re.search(r"2\s+certificados encontrados", page.text)
-    assert "Registro Acadêmico (RA)" in page.text
-    assert academic_record not in page.text
+    # The e-mail is never echoed: the confirmation asks for it again, with the name.
+    assert "exemplo.com" not in page.text
+    assert "Nome completo" in page.text and "Confirmar e baixar" in page.text
+    assert client.post("/public/search/email", json={"email": "sem-arroba"}).status_code == 422
 
 
-def test_academic_record_search_can_confirm_and_download_selected_certificate(public):
+def test_academic_record_search_is_gone_from_the_public_site(public):
     client, db, tmp_path = public
-    academic_record = "2026007788"
-    _seed_certificate(db, tmp_path, document=academic_record)
-    item = client.post(
-        "/public/search/academic-record",
-        json={"registro_academico": academic_record},
-    ).json()["items"][0]
+    _seed_certificate(db, tmp_path, document="2026007788")
+    assert (
+        client.post(
+            "/public/search/academic-record", json={"registro_academico": "2026007788"}
+        ).status_code
+        == 404
+    )
+    page = client.post("/", data={"registro_academico": "2026007788"})
+    assert page.status_code == 400
+    assert "Informe o nome ou o e-mail" in page.text
+    assert "2026007788" not in page.text
+    assert 'name="registro_academico"' not in client.get("/").text
+
+
+def test_email_search_download_confirms_with_the_email_again_and_the_full_name(public):
+    client, db, tmp_path = public
+    _seed_certificate(db, tmp_path, name="João Público", emails=["joao@exemplo.com"])
+    item = client.post("/public/search/email", json={"email": "joao@exemplo.com"}).json()["items"][
+        0
+    ]
+    base = {"search_type": "email", "result_ref": item["result_ref"]}
+
+    wrong_name = client.post(
+        "/public/certificates/download-by-search",
+        data={**base, "confirmacao": "joao@exemplo.com", "nome": "Outra Pessoa"},
+    )
+    assert wrong_name.status_code == 404
+    without_name = client.post(
+        "/public/certificates/download-by-search",
+        data={**base, "confirmacao": "joao@exemplo.com"},
+    )
+    assert without_name.status_code == 404
+    wrong_email = client.post(
+        "/public/certificates/download-by-search",
+        data={**base, "confirmacao": "outro@exemplo.com", "nome": "João Público"},
+    )
+    assert wrong_email.status_code == 404
 
     response = client.post(
         "/public/certificates/download-by-search",
+        data={**base, "confirmacao": " JOAO@Exemplo.com", "nome": "joao publico"},
+    )
+    assert response.status_code == 200
+    assert response.content.startswith(b"%PDF")
+
+
+def test_coauthor_confirms_a_work_with_the_own_name_and_email(public):
+    client, db, tmp_path = public
+    _seed_certificate(
+        db,
+        tmp_path,
+        name="Primeira Autora",
+        certificate_type="scientific_initiation",
+        authors=["Primeira Autora", "Segundo Autor"],
+        work_title="Robô seguidor de linha",
+        emails=["primeira@exemplo.com", "segundo@exemplo.com"],
+    )
+    item = client.post("/public/search/email", json={"email": "segundo@exemplo.com"}).json()[
+        "items"
+    ][0]
+    response = client.post(
+        "/public/certificates/download-by-search",
         data={
-            "search_type": "ra",
+            "search_type": "email",
             "result_ref": item["result_ref"],
-            "registro_academico": academic_record,
+            "confirmacao": "segundo@exemplo.com",
+            "nome": "Segundo Autor",
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_name_search_download_confirms_with_the_email_not_the_document(public):
+    client, db, tmp_path = public
+    _seed_certificate(db, tmp_path, emails=["joao@exemplo.com"], document="99999999999")
+    item = client.post("/public/search", json={"nome": "João"}).json()["items"][0]
+    base = {"search_type": "nome", "nome": "João", "result_ref": item["result_ref"], "page": 1}
+
+    # The certificate has an e-mail on record: the document no longer confirms it.
+    by_document = client.post(
+        "/public/certificates/download-by-search", data={**base, "confirmacao": "99999999999"}
+    )
+    assert by_document.status_code == 404
+    by_email = client.post(
+        "/public/certificates/download-by-search", data={**base, "confirmacao": "Joao@exemplo.com"}
+    )
+    assert by_email.status_code == 200
+    assert by_email.content.startswith(b"%PDF")
+
+
+def test_certificate_issued_before_emails_still_confirms_with_the_document(public):
+    client, db, tmp_path = public
+    _seed_certificate(db, tmp_path, document="2026007788")  # no e-mail hash on record
+    item = client.post("/public/search", json={"nome": "João"}).json()["items"][0]
+    response = client.post(
+        "/public/certificates/download-by-search",
+        data={
+            "search_type": "nome",
+            "nome": "João",
+            "result_ref": item["result_ref"],
+            "page": 1,
+            "confirmacao": "2026007788",
         },
     )
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF")
 
 
-def test_academic_record_search_rejects_unknown_ra_without_leaking_it(public):
+def test_email_search_rejects_unknown_email_without_leaking_it(public):
     client, _, _ = public
-    unknown = "RA-NAO-EXISTE-999"
-    response = client.post("/", data={"registro_academico": unknown})
+    unknown = "ninguem.conhece@exemplo.com"
+    response = client.post("/", data={"email": unknown})
     assert response.status_code == 200
     assert "Nenhum certificado ativo ou revogado" in response.text
     assert unknown not in response.text
+
+
+def test_successful_email_confirmation_lazily_rotates_the_email_hmac(public, monkeypatch, tmp_path):
+    client, db, storage_path = public
+    _seed_certificate(db, storage_path, emails=["joao@exemplo.com"])
+    keyring = tmp_path / "keyring.json"
+    keyring.write_text(
+        json.dumps(
+            {
+                "v1": "T8v!mZ2#qL9@pR4$xN7&cB1*eK6-wY3+",
+                "v2": "Current-Key-For-Tests-0987654321!Bb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCUMENT_HASH_KEYRING_FILE", str(keyring))
+    monkeypatch.setenv("DOCUMENT_HASH_ACTIVE_KEY_ID", "v2")
+    certificate_id = int(db.get_by_code(CODE)["id"])
+    assert [row["hash_key_id"] for row in db.certificate_email_hashes(certificate_id)] == ["v1"]
+
+    # Found under the old key, confirmed, and moved to the active one.
+    item = client.post("/public/search/email", json={"email": "joao@exemplo.com"}).json()["items"][
+        0
+    ]
+    response = client.post(
+        "/public/certificates/download-by-search",
+        data={
+            "search_type": "email",
+            "result_ref": item["result_ref"],
+            "confirmacao": "joao@exemplo.com",
+            "nome": "João Público",
+        },
+    )
+    assert response.status_code == 200
+    assert [row["hash_key_id"] for row in db.certificate_email_hashes(certificate_id)] == ["v2"]
+    assert (
+        client.post("/public/search/email", json={"email": "joao@exemplo.com"}).json()["total"] == 1
+    )
+
+
+def test_public_email_search_and_confirmation_never_log_or_return_the_email(public, caplog):
+    client, db, tmp_path = public
+    private_email = "marcador.privado@exemplo.com"
+    _seed_certificate(db, tmp_path, name="Pessoa Marcadora", emails=[private_email])
+    with caplog.at_level("INFO"):
+        search = client.post("/public/search/email", json={"email": private_email})
+        item = search.json()["items"][0]
+        page = client.post("/", data={"email": private_email})
+        denied = client.post(
+            "/public/certificates/download-by-search",
+            data={
+                "search_type": "email",
+                "result_ref": item["result_ref"],
+                "confirmacao": private_email,
+                "nome": "Nome Errado",
+            },
+        )
+    assert search.status_code == 200 and page.status_code == 200
+    assert denied.status_code == 404
+    for body in (search.text, page.text, denied.text):
+        assert private_email not in body
+        assert "marcador" not in body.lower()
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_email not in rendered_logs
+    assert "marcador" not in rendered_logs.lower()
 
 
 @pytest.mark.parametrize("term", ["%", "_", "\\", "ab"])

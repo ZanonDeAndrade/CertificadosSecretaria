@@ -1,19 +1,21 @@
 /**
  * Editor toolbar.
  *
- * Grouped by purpose (navigate · file · history · view · save) with hairline
- * separators, and it wraps onto a second row instead of overflowing — the old
- * single flex row pushed the save button off-screen on a 1366×768 notebook,
- * which is the machine this is actually used on.
+ * One row on the 1366×768 notebook this is used on, so the certificate below
+ * keeps the height: navigation · name and type · art · history · view · save.
+ * Rarely used actions (import, export, clear, shortcuts) live under "Mais".
+ * The row still wraps on narrower windows instead of overflowing, and the
+ * canvas refits whenever it does.
  *
- * The primary action is separated from the destructive one, and "Limpar" is
- * never adjacent to "Salvar".
+ * The menu button opens the system navigation, which the editor hides to
+ * give the page the whole viewport. The primary action is separated from the
+ * destructive one: "Limpar" sits in the menu, never next to "Salvar".
  */
 import { useRef } from "react";
-import { CERTIFICATE_TYPES } from "../../domain/certificateTypes";
 import { EditorAPI } from "../../hooks/useEditorCanvas";
 import Button, { IconButton } from "../../ui/Button";
 import Icon from "../../ui/Icon";
+import Menu from "../../ui/Menu";
 import { cn } from "../../ui/cn";
 
 /** Read an image file as a data URL and resolve its natural pixel dimensions. */
@@ -35,12 +37,13 @@ function readImageAsDataUrl(
   });
 }
 
-const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3];
-
 interface EditorTopbarProps {
   templateName: string;
-  /** Type the version is dedicated to; null keeps it generic. */
-  certificateType: string | null;
+  /** "Ouvinte", "Genérico"… and "Direito"/"Todos os cursos", for the model button. */
+  typeLabel: string;
+  courseLabel: string;
+  /** Opens the "Dados do modelo" dialog (name, type, course). */
+  onOpenModelDetails: () => void;
   saving: boolean;
   hasBackground: boolean;
   isDirty: boolean;
@@ -48,9 +51,9 @@ interface EditorTopbarProps {
   canRedo: boolean;
   showMockData: boolean;
   showGrid: boolean;
-  zoom: number;
-  onNameChange: (name: string) => void;
-  onCertificateTypeChange: (value: string | null) => void;
+  /** Whether the navigation drawer is open (for the menu button's state). */
+  menuOpen: boolean;
+  onOpenMenu: (trigger: HTMLElement) => void;
   onSave: () => void;
   onBack: () => void;
   onUndo: () => void;
@@ -59,18 +62,17 @@ interface EditorTopbarProps {
   onError: (message: string) => void;
   onSetMock: EditorAPI["setShowMockData"];
   onSetGrid: EditorAPI["setShowGrid"];
-  onSetZoom: EditorAPI["setZoom"];
   onExport: EditorAPI["exportJSON"];
   onImport: EditorAPI["importJSON"];
   onBackgroundUploaded: (url: string, width: number, height: number) => void;
-  onImageUploaded: (file: File) => void | Promise<void>;
   onShowShortcuts: () => void;
 }
 
 export default function EditorTopbar({
   templateName,
-  certificateType,
-  onCertificateTypeChange,
+  typeLabel,
+  courseLabel,
+  onOpenModelDetails,
   saving,
   hasBackground,
   isDirty,
@@ -78,8 +80,8 @@ export default function EditorTopbar({
   canRedo,
   showMockData,
   showGrid,
-  zoom,
-  onNameChange,
+  menuOpen,
+  onOpenMenu,
   onSave,
   onBack,
   onUndo,
@@ -88,15 +90,12 @@ export default function EditorTopbar({
   onError,
   onSetMock,
   onSetGrid,
-  onSetZoom,
   onExport,
   onImport,
   onBackgroundUploaded,
-  onImageUploaded,
   onShowShortcuts,
 }: EditorTopbarProps) {
   const bgInputRef = useRef<HTMLInputElement>(null);
-  const imageInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   const handleBgUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -109,17 +108,6 @@ export default function EditorTopbar({
       onBackgroundUploaded(dataUrl, width, height);
     } catch {
       onError("Erro ao carregar o fundo. Selecione um PNG ou JPG válido.");
-    }
-    event.target.value = "";
-  };
-
-  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      await onImageUploaded(file);
-    } catch {
-      onError("Erro ao carregar imagem no editor.");
     }
     event.target.value = "";
   };
@@ -152,73 +140,52 @@ export default function EditorTopbar({
     URL.revokeObjectURL(url);
   };
 
-  const stepZoom = (direction: 1 | -1) => {
-    const currentIndex = ZOOM_STEPS.findIndex((step) => step >= zoom - 0.001);
-    const nextIndex = Math.min(
-      ZOOM_STEPS.length - 1,
-      Math.max(0, (currentIndex === -1 ? 3 : currentIndex) + direction),
-    );
-    onSetZoom(ZOOM_STEPS[nextIndex]);
-  };
-
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-b border-[color:var(--line)] bg-[var(--surface)] px-3 py-2">
+    <div
+      data-testid="editor-toolbar"
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-1.5 border-b border-[color:var(--line)] bg-[var(--surface)] px-2 py-2"
+    >
+      <IconButton
+        size="sm"
+        icon="menu"
+        label="Abrir menu de navegação"
+        aria-expanded={menuOpen}
+        aria-controls="menu-navegacao"
+        onClick={(event) => onOpenMenu(event.currentTarget)}
+      />
       <Button variant="ghost" size="sm" icon="chevron-left" onClick={onBack}>
         Voltar
       </Button>
 
       <Divider />
 
-      <div className="flex min-w-0 items-center gap-2">
-        <label
-          htmlFor="template-name"
-          className="whitespace-nowrap text-[length:var(--text-xs)] font-medium text-[color:var(--ink-muted)]"
-        >
-          Nome
-        </label>
-        <input
-          id="template-name"
-          type="text"
-          value={templateName}
-          onChange={(event) => onNameChange(event.target.value)}
-          className={cn(
-            "h-8 w-40 rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2.5",
-            "text-[length:var(--text-sm)] text-[color:var(--ink)] lg:w-52",
-          )}
-        />
-      </div>
-
-      <div className="flex min-w-0 items-center gap-2">
-        <label
-          htmlFor="template-type"
-          className="whitespace-nowrap text-[length:var(--text-xs)] font-medium text-[color:var(--ink-muted)]"
-        >
-          Tipo
-        </label>
-        {/* A dedicated version only serves batches of its type; the generic one
-            serves every type without a dedicated active version. */}
-        <select
-          id="template-type"
-          value={certificateType ?? ""}
-          onChange={(event) => onCertificateTypeChange(event.target.value || null)}
-          className={cn(
-            "h-8 max-w-56 rounded-[var(--radius)] border border-[color:var(--line-strong)] bg-[var(--surface)] px-2",
-            "text-[length:var(--text-sm)] text-[color:var(--ink)]",
-          )}
-        >
-          <option value="">Genérico (todos os tipos)</option>
-          {CERTIFICATE_TYPES.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Name, type and course live in a dialog: the toolbar keeps one row. */}
+      <button
+        type="button"
+        onClick={onOpenModelDetails}
+        title="Dados do modelo: nome, tipo e curso"
+        className={cn(
+          "flex h-8 min-w-0 max-w-[22rem] items-center gap-2 rounded-[var(--radius)] border px-2.5 text-left",
+          "border-[color:var(--line-strong)] bg-[var(--surface)] hover:bg-[var(--surface-sunken)]",
+        )}
+      >
+        <Icon name="template" size={14} className="shrink-0 text-[color:var(--ink-muted)]" />
+        <span className="min-w-0 truncate text-[length:var(--text-sm)] font-medium text-[color:var(--ink)]">
+          {templateName || "Novo modelo"}
+        </span>
+        <span className="hidden min-w-0 truncate text-[length:var(--text-xs)] text-[color:var(--ink-muted)] xl:inline">
+          {typeLabel} · {courseLabel}
+        </span>
+        <span className="sr-only">Dados do modelo</span>
+      </button>
 
       {isDirty && (
-        <span className="inline-flex items-center gap-1.5 rounded-[var(--radius)] border border-[color:var(--warn-line)] bg-[var(--warn-bg)] px-2 py-1 text-[length:var(--text-xs)] font-medium text-[color:var(--warn-fg)]">
+        <span
+          title="Alterações não salvas"
+          className="inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border border-[color:var(--warn-line)] bg-[var(--warn-bg)] px-2 text-[length:var(--text-xs)] font-medium text-[color:var(--warn-fg)]"
+        >
           <Icon name="warning" size={13} />
-          Alterações não salvas
+          Não salvo
         </span>
       )}
 
@@ -239,23 +206,6 @@ export default function EditorTopbar({
         className="sr-only"
         onChange={handleBgUpload}
         aria-label="Arquivo da arte de fundo"
-      />
-
-      <Button
-        variant="secondary"
-        size="sm"
-        icon="plus"
-        onClick={() => imageInputRef.current?.click()}
-      >
-        Imagem
-      </Button>
-      <input
-        ref={imageInputRef}
-        type="file"
-        accept="image/*"
-        className="sr-only"
-        onChange={handleImageUpload}
-        aria-label="Arquivo de imagem para inserir"
       />
 
       <Divider />
@@ -279,60 +229,42 @@ export default function EditorTopbar({
 
       <Divider />
 
-      <div className="flex items-center gap-0.5">
-        <IconButton
-          size="sm"
-          icon="zoom-out"
-          label="Diminuir zoom"
-          disabled={zoom <= ZOOM_STEPS[0]}
-          onClick={() => stepZoom(-1)}
-        />
-        <button
-          type="button"
-          onClick={() => onSetZoom(1)}
-          title="Restaurar zoom para 100%"
-          className="h-8 w-14 rounded-[var(--radius)] text-center text-[length:var(--text-xs)] font-medium tabular-nums text-[color:var(--ink-muted)] hover:bg-[var(--surface-inset)] hover:text-[color:var(--ink)]"
-        >
-          {Math.round(zoom * 100)}%
-        </button>
-        <IconButton
-          size="sm"
-          icon="zoom-in"
-          label="Aumentar zoom"
-          disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
-          onClick={() => stepZoom(1)}
-        />
-      </div>
-
       <Toggle
-        label="Dados de exemplo"
+        label="Exemplo"
+        title="Mostrar dados de exemplo no lugar das variáveis"
         pressed={showMockData}
         icon="eye"
         onClick={() => onSetMock(!showMockData)}
       />
       <Toggle
         label="Grade"
+        title="Encaixar os elementos numa grade de 10 px da arte"
         pressed={showGrid}
         icon="grid"
         onClick={() => onSetGrid(!showGrid)}
       />
 
-      {/* Everything after this pushes right on wide screens. */}
-      <div className="ml-auto flex flex-wrap items-center gap-2">
-        <IconButton
+      {/* Everything after this pushes right. */}
+      <div className="ml-auto flex items-center gap-1.5">
+        <Menu
+          label="Mais"
           size="sm"
-          icon="help"
-          label="Atalhos de teclado"
-          onClick={onShowShortcuts}
+          items={[
+            {
+              label: "Importar JSON",
+              icon: "upload",
+              onSelect: () => importInputRef.current?.click(),
+            },
+            { label: "Exportar JSON", icon: "download", onSelect: handleExport },
+            { label: "Atalhos de teclado", icon: "help", onSelect: onShowShortcuts },
+            {
+              label: "Limpar elementos",
+              icon: "trash",
+              tone: "danger",
+              onSelect: onRequestClear,
+            },
+          ]}
         />
-        <Button
-          variant="ghost"
-          size="sm"
-          icon="upload"
-          onClick={() => importInputRef.current?.click()}
-        >
-          Importar
-        </Button>
         <input
           ref={importInputRef}
           type="file"
@@ -341,23 +273,11 @@ export default function EditorTopbar({
           onChange={handleImportFile}
           aria-label="Arquivo JSON do template"
         />
-        <Button variant="ghost" size="sm" icon="download" onClick={handleExport}>
-          Exportar
-        </Button>
-        <Button variant="danger-quiet" size="sm" icon="trash" onClick={onRequestClear}>
-          Limpar
-        </Button>
 
         <Divider />
 
-        <Button
-          variant="primary"
-          size="sm"
-          icon="save"
-          onClick={onSave}
-          loading={saving}
-        >
-          {saving ? "Salvando…" : "Salvar versão"}
+        <Button variant="primary" size="sm" icon="save" onClick={onSave} loading={saving}>
+          {saving ? "Salvando…" : "Salvar"}
         </Button>
       </div>
     </div>
@@ -370,11 +290,13 @@ function Divider() {
 
 function Toggle({
   label,
+  title,
   pressed,
   icon,
   onClick,
 }: {
   label: string;
+  title: string;
   pressed: boolean;
   icon: "eye" | "grid";
   onClick: () => void;
@@ -383,6 +305,7 @@ function Toggle({
     <button
       type="button"
       aria-pressed={pressed}
+      title={title}
       onClick={onClick}
       className={cn(
         "inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] border px-2.5",
