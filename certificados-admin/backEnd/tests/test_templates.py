@@ -308,7 +308,7 @@ def test_new_certificate_is_stored_under_holder_event_and_code(monkeypatch, tmp_
     db = _point_db(monkeypatch, tmp_path)
     service = _service(tmp_path, storage=RecordingDriveStorage())
     cert = _generate_one(db, service)
-    assert cert["original_filename"] == (f"Ana Souza - Semana Jurídica - {cert['unique_code']}.pdf")
+    assert cert["original_filename"] == (f"Ana Souza_Semana Jurídica_{cert['unique_code']}.pdf")
 
 
 def _set_original_filename(db, code: str, name: str | None) -> None:
@@ -343,9 +343,7 @@ def test_reissue_without_a_stored_name_uses_the_current_format(monkeypatch, tmp_
 
     service.reissue_certificate(db.get_by_code(code))
 
-    assert db.get_by_code(code)["original_filename"] == (
-        f"Ana Souza - Semana Jurídica - {code}.pdf"
-    )
+    assert db.get_by_code(code)["original_filename"] == (f"Ana Souza_Semana Jurídica_{code}.pdf")
 
 
 def test_reissue_never_writes_a_tampered_stored_name_outside_the_pdf_folder(monkeypatch, tmp_path):

@@ -125,7 +125,7 @@ test("seleciona apenas disponíveis e informa download ZIP parcial", async () =>
 
 test("salva o certificado com o nome sugerido pela API", async () => {
   const user = userEvent.setup();
-  const filename = "Ana Ativa - Evento de Inovação - CERT-2026-ACTIVE.pdf";
+  const filename = "Ana Ativa_Evento de Inovação_CERT-2026-ACTIVE.pdf";
   vi.mocked(downloadCertificateFile).mockResolvedValue({ blob: new Blob(["pdf"]), filename });
   const saved: string[] = [];
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (

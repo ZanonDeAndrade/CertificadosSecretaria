@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { filenameFromContentDisposition } from "./contentDisposition";
 
-const UTF8_NAME = "Lisieli Rorato Dotto - Semana de Inovação - CERT-2026-3ETWK9.pdf";
+const UTF8_NAME = "Lisieli Rorato Dotto_Semana de Inovação_CERT-2026-3ETWK9.pdf";
 const HEADER =
-  'attachment; filename="Lisieli Rorato Dotto - Semana de Inovacao - CERT-2026-3ETWK9.pdf"; ' +
+  'attachment; filename="Lisieli Rorato Dotto_Semana de Inovacao_CERT-2026-3ETWK9.pdf"; ' +
   `filename*=UTF-8''${encodeURIComponent(UTF8_NAME)}`;
 
 describe("filenameFromContentDisposition", () => {

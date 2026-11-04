@@ -466,7 +466,7 @@ def test_history_event_and_course_filters_take_wildcards_literally(client, auth_
 
 def test_emission_stores_readable_filename_and_admin_download_uses_it(client, auth_headers):
     code = _emit(client, auth_headers, [VALID])["generated"][0]["code"]
-    expected = f"Ana Souza - Semana Jurídica - {code}.pdf"
+    expected = f"Ana Souza_Semana Jurídica_{code}.pdf"
 
     stored = db.get_by_code(code)
     assert stored["original_filename"] == expected
@@ -477,8 +477,8 @@ def test_emission_stores_readable_filename_and_admin_download_uses_it(client, au
     assert response.status_code == 200
     disposition = response.headers["content-disposition"]
     assert disposition == content_disposition(expected)
-    assert f'filename="Ana Souza - Semana Juridica - {code}.pdf"' in disposition
-    assert "filename*=UTF-8''Ana%20Souza%20-%20Semana%20Jur%C3%ADdica%20-%20" in disposition
+    assert f'filename="Ana Souza_Semana Juridica_{code}.pdf"' in disposition
+    assert "filename*=UTF-8''Ana%20Souza_Semana%20Jur%C3%ADdica_" in disposition
 
 
 def test_certificate_issued_before_the_format_downloads_under_it_without_renaming(
@@ -506,7 +506,7 @@ def test_certificate_issued_before_the_format_downloads_under_it_without_renamin
     response = client.get(f"/certificate-file/{code}", headers=auth_headers)
     assert response.status_code == 200
     assert response.headers["content-disposition"] == content_disposition(
-        f"João Antigo - Semana de Inovação - {code}.pdf"
+        f"João Antigo_Semana de Inovação_{code}.pdf"
     )
     # Only the suggested name changes: the stored file and its record stay put.
     assert db.get_by_code(code)["original_filename"] == legacy_name
@@ -529,9 +529,9 @@ def test_history_zip_names_entries_with_holder_event_and_code(client, auth_heade
         names = sorted(archive.namelist())
     assert names == sorted(
         [
-            f"Ana Souza - Semana Jurídica - {codes[0]}.pdf",
-            f"Ana Souza - Semana Jurídica - {codes[1]}.pdf",
-            f"Lúcia Ávila - Jornada Ética Direito - {codes[2]}.pdf",
+            f"Ana Souza_Semana Jurídica_{codes[0]}.pdf",
+            f"Ana Souza_Semana Jurídica_{codes[1]}.pdf",
+            f"Lúcia Ávila_Jornada Ética Direito_{codes[2]}.pdf",
         ]
     )
 

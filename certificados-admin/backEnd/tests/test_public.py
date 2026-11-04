@@ -280,10 +280,10 @@ def test_public_download_names_file_with_holder_event_and_code(public):
     _seed_certificate(db, tmp_path)
     resp = client.get(f"/public/certificates/{CODE}/download")
     assert resp.status_code == 200
-    expected = f"João Público - Semana Acadêmica - {CODE}.pdf"
+    expected = f"João Público_Semana Acadêmica_{CODE}.pdf"
     assert resp.headers["content-disposition"] == content_disposition(expected)
     assert (
-        f'filename="Joao Publico - Semana Academica - {CODE}.pdf"'
+        f'filename="Joao Publico_Semana Academica_{CODE}.pdf"'
         in (resp.headers["content-disposition"])
     )
     assert db.get_by_code(CODE)["original_filename"] == "j.pdf"

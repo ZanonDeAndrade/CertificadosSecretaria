@@ -40,7 +40,8 @@ válido para todos os autores dele:
 - `carga_horaria` é opcional; se o texto padrão usar `{{carga_horaria}}` e a
   célula vier vazia, a linha é inválida (o texto sairia sem o número);
 - o Autor 1 é o titular do registro; o nome do arquivo usa o título do
-  trabalho, ou o Autor 1 quando o trabalho não tem título; os demais autores
+  trabalho (`Título do trabalho_Evento_CÓDIGO.pdf`), ou o Autor 1 quando o
+  trabalho não tem título; os demais autores
   ficam gravados no certificado, aparecem na página pública de validação e
   também são encontrados pela busca por nome e, pelo e-mail de cada um, pela
   busca por e-mail;

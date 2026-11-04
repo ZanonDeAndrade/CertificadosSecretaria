@@ -665,7 +665,7 @@ const server = createServer(async (req, res) => {
     const code = decodeURIComponent(path.slice("/certificate-file/".length));
     const row = LISTED.find((item) => item.unique_code === code);
     const holder = row?.work_title && row.certificate_type === "scientific_initiation" ? row.work_title : row?.participant_name;
-    const filename = row ? `${holder} - ${row.event_name} - ${code}.pdf` : `${code}.pdf`;
+    const filename = row ? `${holder}_${row.event_name}_${code}.pdf` : `${code}.pdf`;
     return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", filename);
   }
   if (path === "/certificates" && req.method === "GET") {

@@ -1,9 +1,10 @@
 """Readable certificate filenames and the download headers that carry them.
 
-A new certificate is stored as ``<titular> - <evento> - <código>.pdf`` so the
-secretaria can find it by name in the event's Drive folder or on disk. The code
-always closes the name and is never shortened: it keeps the name unique for the
-same person twice in one event and for two people with the same name.
+A new certificate is stored as ``<titular>_<evento>_<código>.pdf`` so the
+secretaria can find it by name in the event's Drive folder or on disk. Spaces
+inside the holder and the event are kept; ``_`` only separates the parts. The
+code always closes the name and is never shortened: it keeps the name unique
+for the same person twice in one event and for two people with the same name.
 
 Downloads (admin panel, ZIP and public site) are named by the same rule, so a
 certificate issued before this format existed is also offered under it. Only the
@@ -19,7 +20,7 @@ from urllib.parse import quote
 
 from database.certificate_types import CERTIFICATE_TYPE_LABELS, is_per_work_type
 
-SEPARATOR = " - "
+SEPARATOR = "_"
 EXTENSION = ".pdf"
 ELLIPSIS = "…"
 DEFAULT_FILENAME = "certificado.pdf"
@@ -83,7 +84,7 @@ def _shorten(text: str, size: int) -> str:
     boundary = cut.rfind(" ")
     if boundary >= size // 2:
         cut = cut[:boundary]
-    cut = cut.rstrip(" .-")
+    cut = cut.rstrip(" .-" + SEPARATOR)
     return f"{cut}{ELLIPSIS}" if cut else ""
 
 
@@ -98,9 +99,9 @@ def _fits(filename: str) -> bool:
 
 
 def build_certificate_filename(holder: object, event: object, code: object) -> str:
-    """``<titular> - <evento> - <código>.pdf`` within the length limits.
+    """``<titular>_<evento>_<código>.pdf`` within the length limits.
 
-    Without an event the name is ``<titular> - <código>.pdf``. A name that is
+    Without an event the name is ``<titular>_<código>.pdf``. A name that is
     too long loses characters from the event first, then from the holder; the
     code is never cut.
     """

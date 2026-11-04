@@ -265,7 +265,7 @@ test.describe("histórico", () => {
       .and(page.locator(":enabled"))
       .first();
     const [file] = await Promise.all([page.waitForEvent("download"), download.click()]);
-    expect(file.suggestedFilename()).toMatch(/^.+ - .+ - CERT-2026-\d{4}A\.pdf$/);
+    expect(file.suggestedFilename()).toMatch(/^[^_]+ [^_]+_[^_]+ [^_]+_CERT-2026-\d{4}A\.pdf$/);
   });
 
   test("seleção em lote habilita o ZIP", async ({ page }) => {

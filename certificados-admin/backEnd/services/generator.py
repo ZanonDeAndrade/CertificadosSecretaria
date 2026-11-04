@@ -166,7 +166,7 @@ class CertificateGeneratorConfig:
 
 
 def build_pdf_filename(participant: ParticipantRegistryRecord) -> str:
-    """Build a unique PDF filename: "<titular> - <evento> - <codigo>.pdf".
+    """Build a unique PDF filename: "<titular>_<evento>_<codigo>.pdf".
 
     The validation code closes the name, so two participants with the same name
     (or one participant twice in an event) never overwrite each other's file.
