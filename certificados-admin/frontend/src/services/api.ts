@@ -314,8 +314,12 @@ export async function revokeCertificate(
 
 export interface BatchDownloadResult {
   blob: Blob;
+  /** Name suggested by the API; `certificados.zip` unless the header says otherwise. */
+  filename: string;
   skippedCodes: string[];
 }
+
+const BATCH_ZIP_FILENAME = "certificados.zip";
 
 export async function downloadCertificatesZip(
   codes: string[],
@@ -342,7 +346,14 @@ export async function downloadCertificatesZip(
       typeof rawSkipped === "string" && rawSkipped
         ? decodeURIComponent(rawSkipped).split(",").filter(Boolean)
         : [];
-    return { blob: response.data, skippedCodes };
+    return {
+      blob: response.data,
+      filename: filenameFromContentDisposition(
+        response.headers["content-disposition"],
+        BATCH_ZIP_FILENAME,
+      ),
+      skippedCodes,
+    };
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.data instanceof Blob) {
       try {
@@ -360,20 +371,46 @@ export async function downloadCertificatesZip(
 
 export interface DownloadedFile {
   blob: Blob;
-  /** Name suggested by the API (titular, evento e código), accents intact. */
+  /** Name suggested by the API (`Nome_Evento_Ano.pdf`), accents intact. */
   filename: string;
 }
 
-export async function downloadCertificateFile(code: string): Promise<DownloadedFile> {
+/**
+ * The certificate's PDF. On a per-work certificate `authorPosition` (1-based,
+ * the order shown in `authors`) names the copy after that author; the bytes
+ * are the same stored file either way.
+ */
+export async function downloadCertificateFile(
+  code: string,
+  authorPosition?: number,
+): Promise<DownloadedFile> {
   const response = await api.get<Blob>(
     `/certificate-file/${encodeURIComponent(code)}`,
-    { responseType: "blob" },
+    {
+      responseType: "blob",
+      params: authorPosition ? { autor: authorPosition } : undefined,
+    },
   );
   return {
     blob: response.data,
     filename: filenameFromContentDisposition(
       response.headers["content-disposition"],
       `${code}.pdf`,
+    ),
+  };
+}
+
+/** A ZIP with one copy of a per-work certificate per author. */
+export async function downloadCertificateAuthorsZip(code: string): Promise<DownloadedFile> {
+  const response = await api.get<Blob>(
+    `/certificate-file/${encodeURIComponent(code)}/autores.zip`,
+    { responseType: "blob" },
+  );
+  return {
+    blob: response.data,
+    filename: filenameFromContentDisposition(
+      response.headers["content-disposition"],
+      `${code}.zip`,
     ),
   };
 }

@@ -19,7 +19,6 @@ from certificados_backend.services.certificate_text import render_certificate_bo
 from certificados_backend.services.generator import (
     CertificateGenerator,
     CertificateGeneratorConfig,
-    build_pdf_filename,
 )
 from certificados_backend.services.spreadsheet import SpreadsheetRow, compute_business_key
 from certificados_backend.utils.dates import extenso_from_iso, normalize_date_text, to_iso
@@ -34,7 +33,7 @@ from database.certificate_types import (
 from database.repositories import authors_from_json
 from storage_service import CertificateStorage, StorageError, get_storage
 from storage_service import config as storage_config
-from storage_service.filenames import EXTENSION, clean_filename_part
+from storage_service.filenames import EXTENSION, certificate_filename, clean_filename_part
 
 LOGGER = logging.getLogger("certificados.saga")
 
@@ -343,8 +342,13 @@ class CertificateBatchService:
                 # The failure report already names the row; the message itself
                 # may reach logs, so it carries no personal data.
                 raise ValueError("O certificado gerado excede o tamanho máximo permitido.")
+            # Named from the persisted fields (event start date, issue date,
+            # code) by the same rule every download uses; the storage keeps
+            # a repeated name apart with "_2", "_3"… and never overwrites.
             stored = storage.save(
-                content, filename=build_pdf_filename(record), mime_type="application/pdf"
+                content,
+                filename=certificate_filename({**fields, "unique_code": code}),
+                mime_type="application/pdf",
             )
             if not db.finalize_certificate(code, stored.as_db_fields()):
                 raise RuntimeError(
@@ -472,11 +476,15 @@ class CertificateBatchService:
         }
         old_has_file = bool((cert.get("drive_file_id") or "") or (cert.get("pdf_path") or ""))
 
-        # 1) Upload the NEW file under the name the certificate already has; only
-        #    a certificate stored without one gets the current naming format.
-        stored = storage.save(
+        # 1) Store the NEW file: a reissue is the only operation allowed to
+        #    overwrite, and only the certificate's own file. Local storage
+        #    rewrites the path the row points at; Drive uploads a new file under
+        #    the name the certificate already has (a certificate stored without
+        #    one gets the current naming format) and the old one goes below.
+        stored = storage.replace(
             content,
-            filename=_stored_filename(cert) or build_pdf_filename(record),
+            cert_row=cert,
+            filename=_stored_filename(cert) or certificate_filename(cert),
             mime_type="application/pdf",
         )
 
@@ -651,9 +659,9 @@ def _stored_filename(cert: dict) -> str:
 def _same_storage_target(old_locator: dict, stored) -> bool:
     """True if the old and new uploads point at the SAME underlying file.
 
-    On local storage the filename is deterministic, so a reissue overwrites the
-    same path — deleting "the old one" would delete the new file. On Drive each
-    upload is a new file id, so they always differ.
+    On local storage a reissue rewrites the path the certificate points at, so
+    deleting "the old one" would delete the new file. On Drive each upload is a
+    new file id, so they always differ.
     """
     old_drive = (old_locator.get("drive_file_id") or "").strip()
     new_drive = (getattr(stored, "drive_file_id", None) or "").strip()

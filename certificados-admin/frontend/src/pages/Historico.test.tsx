@@ -4,6 +4,7 @@ import { beforeEach, vi } from "vitest";
 import Historico from "./Historico";
 import { renderWithProviders } from "../test/renderWithProviders";
 import {
+  downloadCertificateAuthorsZip,
   downloadCertificateFile,
   downloadCertificatesZip,
   getCertificate,
@@ -17,6 +18,7 @@ vi.mock("../services/api", () => ({
   revokeCertificate: vi.fn(),
   downloadCertificatesZip: vi.fn(),
   downloadCertificateFile: vi.fn(),
+  downloadCertificateAuthorsZip: vi.fn(),
   getCertificate: vi.fn(),
   reissueCertificate: vi.fn(),
   classifyError: () => "server",
@@ -104,9 +106,24 @@ beforeEach(() => {
   vi.mocked(revokeCertificate).mockResolvedValue({ ...active, status: "revogado" });
   vi.mocked(downloadCertificatesZip).mockImplementation(async (_codes, progress) => {
     progress?.(50);
-    return { blob: new Blob(["zip"]), skippedCodes: ["CERT-2026-MISSING"] };
+    return {
+      blob: new Blob(["zip"]),
+      filename: "certificados.zip",
+      skippedCodes: ["CERT-2026-MISSING"],
+    };
   });
 });
+
+/** Records the names handed to the browser instead of navigating to blob URLs. */
+function spyOnSavedFilenames(): string[] {
+  const saved: string[] = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push(this.download);
+  });
+  return saved;
+}
 
 test("seleciona apenas disponíveis e informa download ZIP parcial", async () => {
   const user = userEvent.setup();
@@ -125,20 +142,144 @@ test("seleciona apenas disponíveis e informa download ZIP parcial", async () =>
 
 test("salva o certificado com o nome sugerido pela API", async () => {
   const user = userEvent.setup();
-  const filename = "Ana Ativa_Evento de Inovação_CERT-2026-ACTIVE.pdf";
+  const filename = "Ana Ativa_Evento_2026.pdf";
   vi.mocked(downloadCertificateFile).mockResolvedValue({ blob: new Blob(["pdf"]), filename });
-  const saved: string[] = [];
-  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
-    this: HTMLAnchorElement,
-  ) {
-    saved.push(this.download);
-  });
+  const saved = spyOnSavedFilenames();
   render();
   await screen.findByText("Ana Ativa");
-  await user.click(screen.getAllByRole("button", { name: "Baixar certificado de Ana Ativa" })[0]);
+  // An ordinary certificate is a plain button: no menu, one file.
+  const button = screen.getAllByRole("button", { name: "Baixar certificado de Ana Ativa" })[0];
+  expect(button.getAttribute("aria-haspopup")).toBeNull();
+  await user.click(button);
 
   await waitFor(() => expect(saved).toEqual([filename]));
   expect(downloadCertificateFile).toHaveBeenCalledWith(active.unique_code);
+  expect(screen.queryByRole("menu")).toBeNull();
+});
+
+test("o ZIP da seleção é salvo com o nome que a API sugere", async () => {
+  const user = userEvent.setup();
+  vi.mocked(downloadCertificatesZip).mockResolvedValue({
+    blob: new Blob(["zip"]),
+    filename: "Horta vertical automatizada_Mostra 2026.zip",
+    skippedCodes: [],
+  });
+  const saved = spyOnSavedFilenames();
+  render();
+  await screen.findByText("Ana Ativa");
+  await user.click(screen.getByRole("button", { name: "Selecionar página" }));
+  await user.click(screen.getByRole("button", { name: "Baixar ZIP (1)" }));
+  await waitFor(() => expect(saved).toEqual(["Horta vertical automatizada_Mostra 2026.zip"]));
+});
+
+test("Mostra: o download oferece o ZIP e uma cópia por autor, pela posição", async () => {
+  const user = userEvent.setup();
+  listMostra();
+  vi.mocked(downloadCertificateFile).mockResolvedValue({
+    blob: new Blob(["pdf"]),
+    filename: "Pessoa Exemplo Beta_Evento_2026.pdf",
+  });
+  vi.mocked(downloadCertificateAuthorsZip).mockResolvedValue({
+    blob: new Blob(["zip"]),
+    filename: "Horta vertical automatizada_Evento_2026.zip",
+  });
+  const saved = spyOnSavedFilenames();
+  render();
+  await screen.findByText("Horta vertical automatizada");
+
+  const trigger = within(rowOf("Horta vertical automatizada")).getByRole("button", {
+    name: "Baixar certificado do trabalho “Horta vertical automatizada”",
+  });
+  expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+  await user.click(trigger);
+  const menu = screen.getByRole("menu", {
+    name: "Baixar certificado do trabalho “Horta vertical automatizada”",
+  });
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Todos os autores (ZIP)",
+    ...AUTHORS.slice(0, 3),
+  ]);
+
+  // One author: the same PDF, named after that author, asked for by position.
+  await user.click(within(menu).getByRole("menuitem", { name: AUTHORS[1] }));
+  await waitFor(() => expect(saved).toEqual(["Pessoa Exemplo Beta_Evento_2026.pdf"]));
+  expect(downloadCertificateFile).toHaveBeenCalledWith(mostra3.unique_code, 2);
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+
+  // Every author at once: the ZIP named after the work.
+  await user.click(trigger);
+  await user.click(screen.getByRole("menuitem", { name: "Todos os autores (ZIP)" }));
+  await waitFor(() => expect(saved).toHaveLength(2));
+  expect(saved[1]).toBe("Horta vertical automatizada_Evento_2026.zip");
+  expect(downloadCertificateAuthorsZip).toHaveBeenCalledWith(mostra3.unique_code);
+});
+
+test("Mostra: o menu de download fecha com Escape e lista os oito autores", async () => {
+  const user = userEvent.setup();
+  listMostra();
+  render();
+  await screen.findByText("Robô seguidor de linha");
+  const trigger = within(rowOf("Robô seguidor de linha")).getByRole("button", {
+    name: "Baixar certificado do trabalho “Robô seguidor de linha”",
+  });
+  await user.click(trigger);
+  expect(screen.getAllByRole("menuitem")).toHaveLength(9);
+  expect(document.activeElement?.textContent).toBe("Todos os autores (ZIP)");
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+test("o detalhe oferece o download: botão no comum, menu por autor na Mostra", async () => {
+  const user = userEvent.setup();
+  listMostra();
+  vi.mocked(downloadCertificateFile).mockResolvedValue({
+    blob: new Blob(["pdf"]),
+    filename: "x.pdf",
+  });
+  const saved = spyOnSavedFilenames();
+  render();
+  await screen.findByText("Robô seguidor de linha");
+
+  vi.mocked(getCertificate).mockResolvedValue(active);
+  await user.click(screen.getByRole("button", { name: "Ver detalhes de Ana Ativa" }));
+  let dialog = await screen.findByRole("dialog");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Baixar certificado de Ana Ativa" }),
+  );
+  await waitFor(() => expect(downloadCertificateFile).toHaveBeenCalledWith(active.unique_code));
+  // The header's X and the footer button are both named "Fechar": close by key.
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+  vi.mocked(getCertificate).mockResolvedValue(mostra8);
+  await user.click(
+    screen.getByRole("button", { name: "Ver detalhes do trabalho “Robô seguidor de linha”" }),
+  );
+  dialog = await screen.findByRole("dialog");
+  await user.click(
+    within(dialog).getByRole("button", {
+      name: "Baixar certificado do trabalho “Robô seguidor de linha”",
+    }),
+  );
+  await user.click(screen.getByRole("menuitem", { name: AUTHORS[7] }));
+  await waitFor(() => expect(downloadCertificateFile).toHaveBeenCalledWith(mostra8.unique_code, 8));
+  expect(saved).toHaveLength(2);
+});
+
+test("sem permissão de download, nem a linha nem o detalhe oferecem o botão", async () => {
+  const user = userEvent.setup();
+  listMostra();
+  vi.mocked(getCertificate).mockResolvedValue(mostra8);
+  render("auditor");
+  await screen.findByText("Robô seguidor de linha");
+  expect(screen.queryAllByRole("button", { name: /^Baixar/ })).toHaveLength(0);
+  await user.click(
+    screen.getByRole("button", { name: "Ver detalhes do trabalho “Robô seguidor de linha”" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).queryByRole("button", { name: /^Baixar/ })).toBeNull();
 });
 
 test("exige motivo e preserva erro específico ao revogar", async () => {

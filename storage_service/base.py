@@ -152,7 +152,29 @@ class CertificateStorage(ABC):
         filename: str,
         mime_type: str = DEFAULT_MIME_TYPE,
     ) -> StoredFile:
-        """Persist ``content`` and return its storage metadata."""
+        """Persist ``content`` as a NEW file and return its storage metadata.
+
+        A new certificate never replaces an existing file: when ``filename`` is
+        taken, the provider stores the content under its ``_2``, ``_3``…
+        variant and reports the name actually used in ``original_filename``.
+        """
+
+    def replace(
+        self,
+        content: bytes,
+        *,
+        cert_row: Mapping[str, Any],
+        filename: str,
+        mime_type: str = DEFAULT_MIME_TYPE,
+    ) -> StoredFile:
+        """Store the reissued PDF of ``cert_row`` under ``filename``.
+
+        The only operation allowed to overwrite, and only the file the
+        certificate itself points at. A remote provider cannot overwrite in
+        place: the default uploads a new file under the same name and the
+        caller deletes the old one once the new pointer is persisted.
+        """
+        return self.save(content, filename=filename, mime_type=mime_type)
 
     @abstractmethod
     def download(self, cert_row: Mapping[str, Any]) -> bytes:

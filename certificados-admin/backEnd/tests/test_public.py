@@ -271,7 +271,7 @@ def test_public_download_requires_code_and_streams_pdf(public):
     assert resp.headers["cache-control"] == "no-store, private"
 
 
-def test_public_download_names_file_with_holder_event_and_code(public):
+def test_public_download_names_file_with_holder_event_and_year(public):
     from storage_service.filenames import content_disposition
 
     client, db, tmp_path = public
@@ -280,13 +280,136 @@ def test_public_download_names_file_with_holder_event_and_code(public):
     _seed_certificate(db, tmp_path)
     resp = client.get(f"/public/certificates/{CODE}/download")
     assert resp.status_code == 200
-    expected = f"João Público_Semana Acadêmica_{CODE}.pdf"
+    expected = "João Público_Semana Acadêmica_2026.pdf"
     assert resp.headers["content-disposition"] == content_disposition(expected)
     assert (
-        f'filename="Joao Publico_Semana Academica_{CODE}.pdf"'
-        in (resp.headers["content-disposition"])
+        'filename="Joao Publico_Semana Academica_2026.pdf"' in (resp.headers["content-disposition"])
     )
+    assert CODE not in resp.headers["content-disposition"]
     assert db.get_by_code(CODE)["original_filename"] == "j.pdf"
+
+
+def _suggested_filename(response) -> str:
+    from urllib.parse import unquote
+
+    return unquote(response.headers["content-disposition"].split("filename*=UTF-8''", 1)[1])
+
+
+WORK = {
+    "certificate_type": "scientific_initiation",
+    "authors": ["Primeira Autora", "Segundo Autor"],
+    "work_title": "Robô seguidor de linha",
+}
+
+
+def test_download_by_code_or_qr_names_a_work_after_its_title(public):
+    client, db, tmp_path = public
+    _seed_certificate(db, tmp_path, name="Primeira Autora", **WORK)
+    resp = client.get(f"/public/certificates/{CODE}/download")
+    assert resp.status_code == 200
+    assert _suggested_filename(resp) == "Robô seguidor de linha_Semana Acadêmica_2026.pdf"
+
+
+def test_email_search_download_names_the_copy_after_the_author_of_that_email(public):
+    client, db, tmp_path = public
+    _seed_certificate(
+        db,
+        tmp_path,
+        name="Primeira Autora",
+        emails=["primeira@exemplo.com", "segundo@exemplo.com"],
+        **WORK,
+    )
+    for email, name, expected in (
+        ("segundo@exemplo.com", "Segundo Autor", "Segundo Autor_Semana Acadêmica_2026.pdf"),
+        ("primeira@exemplo.com", "Primeira Autora", "Primeira Autora_Semana Acadêmica_2026.pdf"),
+    ):
+        item = client.post("/public/search/email", json={"email": email}).json()["items"][0]
+        response = client.post(
+            "/public/certificates/download-by-search",
+            data={
+                "search_type": "email",
+                "result_ref": item["result_ref"],
+                "confirmacao": email,
+                "nome": name,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.content.startswith(b"%PDF")
+        assert _suggested_filename(response) == expected
+        assert "exemplo.com" not in response.headers["content-disposition"]
+
+
+def test_name_search_confirmed_by_email_names_the_copy_after_the_confirming_author(public):
+    client, db, tmp_path = public
+    _seed_certificate(
+        db,
+        tmp_path,
+        name="Primeira Autora",
+        emails=["primeira@exemplo.com", "segundo@exemplo.com"],
+        **WORK,
+    )
+    # The term matched the first author, yet the e-mail that confirmed is the
+    # second author's: the verified factor names the copy.
+    item = client.post("/public/search", json={"nome": "Primeira"}).json()["items"][0]
+    response = client.post(
+        "/public/certificates/download-by-search",
+        data={
+            "search_type": "nome",
+            "nome": "Primeira",
+            "result_ref": item["result_ref"],
+            "page": 1,
+            "confirmacao": "segundo@exemplo.com",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert _suggested_filename(response) == "Segundo Autor_Semana Acadêmica_2026.pdf"
+
+
+def test_name_search_confirmed_by_the_document_names_the_single_matching_author(public):
+    client, db, tmp_path = public
+    # Issued before e-mails were recorded: only the document confirms it.
+    _seed_certificate(db, tmp_path, name="Primeira Autora", document="2026007788", **WORK)
+
+    def download(term: str):
+        item = client.post("/public/search", json={"nome": term}).json()["items"][0]
+        return client.post(
+            "/public/certificates/download-by-search",
+            data={
+                "search_type": "nome",
+                "nome": term,
+                "result_ref": item["result_ref"],
+                "page": 1,
+                "confirmacao": "2026007788",
+            },
+        )
+
+    by_second = download("segundo autor")
+    assert by_second.status_code == 200, by_second.text
+    assert _suggested_filename(by_second) == "Segundo Autor_Semana Acadêmica_2026.pdf"
+
+    # "autor" is inside both names: ambiguous, so the work title names the file.
+    ambiguous = download("autor")
+    assert ambiguous.status_code == 200, ambiguous.text
+    assert _suggested_filename(ambiguous) == "Robô seguidor de linha_Semana Acadêmica_2026.pdf"
+
+
+def test_ordinary_certificate_download_after_search_keeps_the_holder_name(public):
+    client, db, tmp_path = public
+    _seed_certificate(db, tmp_path, name="João Público", emails=["joao@exemplo.com"])
+    item = client.post("/public/search/email", json={"email": "joao@exemplo.com"}).json()["items"][
+        0
+    ]
+    response = client.post(
+        "/public/certificates/download-by-search",
+        data={
+            "search_type": "email",
+            "result_ref": item["result_ref"],
+            "confirmacao": "joao@exemplo.com",
+            "nome": "João Público",
+        },
+    )
+    assert response.status_code == 200
+    assert _suggested_filename(response) == "João Público_Semana Acadêmica_2026.pdf"
 
 
 def test_code_validation_responses_are_not_cached(public):

@@ -304,6 +304,18 @@ function contentDisposition(filename) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
+/**
+ * Same rule as storage_service/filenames.py: `<titular>_<evento>_<ano>`, the
+ * year being the event start (else issue) year, left out when the event already
+ * ends with it ("Mostra de Iniciação Científica 2026").
+ */
+function downloadName(row, holder, extension = ".pdf") {
+  const year = (row.start_date ?? row.issue_date_iso ?? "").slice(0, 4) || row.unique_code.slice(5, 9);
+  const parts = [holder, row.event_name];
+  if (!new RegExp(`(^|\\D)${year}$`).test(row.event_name ?? "")) parts.push(year);
+  return parts.filter(Boolean).join("_") + extension;
+}
+
 function sendBinary(res, status, body, contentType, filename) {
   res.writeHead(status, {
     "content-type": contentType,
@@ -661,12 +673,27 @@ const server = createServer(async (req, res) => {
   if (path === "/certificates/download-zip" && req.method === "POST") {
     return sendBinary(res, 200, Buffer.from("PK\u0003\u0004mock-zip"), "application/zip", "certificados.zip");
   }
+  const authorsZip = path.match(/^\/certificate-file\/([^/]+)\/autores\.zip$/);
+  if (authorsZip && req.method === "GET") {
+    const row = LISTED.find((item) => item.unique_code === decodeURIComponent(authorsZip[1]));
+    if (!row?.authors?.length) {
+      return send(res, 422, { detail: "Este certificado não é por trabalho: baixe o arquivo único." });
+    }
+    const filename = downloadName(row, row.work_title, ".zip");
+    return sendBinary(res, 200, Buffer.from("PK\u0003\u0004mock-zip"), "application/zip", filename);
+  }
   if (path.startsWith("/certificate-file/") && req.method === "GET") {
     const code = decodeURIComponent(path.slice("/certificate-file/".length));
     const row = LISTED.find((item) => item.unique_code === code);
-    const holder = row?.work_title && row.certificate_type === "scientific_initiation" ? row.work_title : row?.participant_name;
-    const filename = row ? `${holder}_${row.event_name}_${code}.pdf` : `${code}.pdf`;
-    return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", filename);
+    if (!row) return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", `${code}.pdf`);
+    const position = Number(url.searchParams.get("autor") ?? 0);
+    let holder = row.work_title && row.certificate_type === "scientific_initiation" ? row.work_title : row.participant_name;
+    if (position) {
+      const author = row.authors?.[position - 1];
+      if (!author) return send(res, 422, { detail: "Este certificado não tem esse autor." });
+      holder = author;
+    }
+    return sendBinary(res, 200, Buffer.from("%PDF-1.4 mock"), "application/pdf", downloadName(row, holder));
   }
   if (path === "/certificates" && req.method === "GET") {
     const limit = Number(url.searchParams.get("limit") ?? 20);

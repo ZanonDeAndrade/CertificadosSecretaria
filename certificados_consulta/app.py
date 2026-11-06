@@ -10,6 +10,11 @@ O download após uma busca exige confirmar o e-mail cadastrado na emissão; o
 Registro Acadêmico (RA) só confirma certificados emitidos antes de o e-mail
 ser registrado. Nem o e-mail nem o RA aparecem em página, resposta ou log.
 
+O arquivo baixado chama-se ``Nome_Evento_Ano.pdf``. Num certificado por
+trabalho (Mostra) a cópia leva o nome do autor que a pessoa encontrou: pelo
+e-mail que confirmou, ou pelo nome buscado quando o RA confirmou; pelo código
+ou pelo QR, o título do trabalho.
+
 Lê o mesmo PostgreSQL configurado para o painel administrativo e entrega os
 PDFs pelo backend a partir do storage privado configurado.
 """
@@ -771,19 +776,56 @@ async def public_download_by_name(
         )
 
     _rotate_confirmation_hash(selected, proof, email=email, academic_record=academic_record)
-    return _stream_public_certificate(selected["unique_code"])
+    return _stream_public_certificate(
+        selected["unique_code"], author=_found_author(selected, proof, name)
+    )
 
 
 class _Proof:
-    """Which stored hash confirmed the person, and under which key version."""
+    """Which stored hash confirmed the person, and under which key version.
 
-    __slots__ = ("kind", "row_id", "expected_hash", "key_id")
+    ``position`` is the author order of the e-mail that confirmed (1 is the
+    holder or first author), read from the stored row, never from the request.
+    """
 
-    def __init__(self, kind: str, row_id: int | None, expected_hash: str, key_id: str) -> None:
+    __slots__ = ("kind", "row_id", "expected_hash", "key_id", "position")
+
+    def __init__(
+        self,
+        kind: str,
+        row_id: int | None,
+        expected_hash: str,
+        key_id: str,
+        position: int | None = None,
+    ) -> None:
         self.kind = kind
         self.row_id = row_id
         self.expected_hash = expected_hash
         self.key_id = key_id
+        self.position = position
+
+
+def _found_author(cert: dict, proof: _Proof, name_term: str) -> str | None:
+    """The author the person was found as, to name the downloaded copy.
+
+    On a per-work certificate the copy is named after the author whose e-mail
+    confirmed the download (its stored position in the author order). When the
+    academic record confirmed instead, the only signal is the search term the
+    server itself re-ran: the single author whose name contains it. Anything
+    else (no match, several matches, an ordinary certificate) returns ``None``
+    and the file keeps the work title. Nothing here authorizes: the page never
+    chooses, and the only names involved are those printed on the certificate.
+    """
+    if not is_per_work_type(cert.get("certificate_type")):
+        return None
+    authors = authors_from_json(cert.get("authors_json"))
+    if not authors:
+        return None
+    if proof.position and 1 <= proof.position <= len(authors):
+        return authors[proof.position - 1]
+    wanted = normalize_name(name_term)
+    matches = [author for author in authors if wanted and wanted in normalize_name(author)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _name_matches(cert: dict, name: str) -> bool:
@@ -818,7 +860,13 @@ def _confirmation_proof(
                 row.get("email_hash"), email, key_id=row.get("hash_key_id")
             )
             if key_id and proof is None:
-                proof = _Proof("email", int(row["id"]), str(row["email_hash"]), key_id)
+                proof = _Proof(
+                    "email",
+                    int(row["id"]),
+                    str(row["email_hash"]),
+                    key_id,
+                    position=int(row.get("position") or 0) or None,
+                )
     elif academic_record and not email_rows:
         key_id = matching_document_key_id(
             cert.get("participant_document_hash"),
@@ -874,8 +922,12 @@ async def legacy_download_route(
     )
 
 
-def _stream_public_certificate(unique_code: str) -> StreamingResponse:
-    """Stream a certificate by code. Never exposes a Drive link; blocks revoked."""
+def _stream_public_certificate(unique_code: str, *, author: str | None = None) -> StreamingResponse:
+    """Stream a certificate by code. Never exposes a Drive link; blocks revoked.
+
+    ``author`` names the copy of a per-work certificate after the author the
+    person was found as; by code or QR the file keeps the work title.
+    """
     cert = db.get_by_code(unique_code.strip())
     if not cert:
         raise HTTPException(status_code=404, detail="Certificado não encontrado.")
@@ -905,10 +957,11 @@ def _stream_public_certificate(unique_code: str) -> StreamingResponse:
         raise HTTPException(status_code=502, detail="Falha ao obter o arquivo.") from exc
 
     observability.metrics.increment(observability.CERT_DOWNLOADS)
+    filename = certificate_filename(cert, author=author)
     return StreamingResponse(
         BytesIO(retrieved.content),
         media_type=retrieved.mime_type,
-        headers={"Content-Disposition": content_disposition(certificate_filename(cert))},
+        headers={"Content-Disposition": content_disposition(filename)},
     )
 
 

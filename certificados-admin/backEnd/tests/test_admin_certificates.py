@@ -10,6 +10,7 @@ from itertools import count
 from zipfile import ZipFile
 
 import pandas as pd
+import pytest
 
 from database import db
 from database.certificate_types import is_per_work_type
@@ -466,7 +467,7 @@ def test_history_event_and_course_filters_take_wildcards_literally(client, auth_
 
 def test_emission_stores_readable_filename_and_admin_download_uses_it(client, auth_headers):
     code = _emit(client, auth_headers, [VALID])["generated"][0]["code"]
-    expected = f"Ana Souza_Semana Jurídica_{code}.pdf"
+    expected = "Ana Souza_Semana Jurídica_2026.pdf"
 
     stored = db.get_by_code(code)
     assert stored["original_filename"] == expected
@@ -477,8 +478,33 @@ def test_emission_stores_readable_filename_and_admin_download_uses_it(client, au
     assert response.status_code == 200
     disposition = response.headers["content-disposition"]
     assert disposition == content_disposition(expected)
-    assert f'filename="Ana Souza_Semana Juridica_{code}.pdf"' in disposition
-    assert "filename*=UTF-8''Ana%20Souza_Semana%20Jur%C3%ADdica_" in disposition
+    assert 'filename="Ana Souza_Semana Juridica_2026.pdf"' in disposition
+    assert "filename*=UTF-8''Ana%20Souza_Semana%20Jur%C3%ADdica_2026.pdf" in disposition
+    assert code not in disposition
+
+
+def test_year_in_the_filename_is_the_event_start_year(client, auth_headers):
+    row = {**VALID, "data_inicio": "20/11/2025", "data_fim": "22/11/2025"}
+    code = _emit(client, auth_headers, [row])["generated"][0]["code"]
+    assert db.get_by_code(code)["original_filename"] == "Ana Souza_Semana Jurídica_2025.pdf"
+
+
+def test_same_person_twice_in_one_event_is_stored_under_two_names(client, auth_headers):
+    # Same name, no code in it: the storage numbers the second file instead of
+    # overwriting the first, whose hash must survive.
+    generated = _emit(client, auth_headers, [VALID, {**VALID, "carga_horaria": 20}])["generated"]
+    first, second = (db.get_by_code(item["code"]) for item in generated)
+    assert first["original_filename"] == "Ana Souza_Semana Jurídica_2026.pdf"
+    assert second["original_filename"] == "Ana Souza_Semana Jurídica_2026_2.pdf"
+    assert second["pdf_path"] == "pdfs/Ana Souza_Semana Jurídica_2026_2.pdf"
+    for cert in (first, second):
+        content = (db.STORAGE_DIR / cert["pdf_path"]).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == cert["checksum_sha256"]
+    # The download of either offers the plain name; the browser numbers repeats.
+    response = client.get(f"/certificate-file/{second['unique_code']}", headers=auth_headers)
+    assert response.headers["content-disposition"] == content_disposition(
+        "Ana Souza_Semana Jurídica_2026.pdf"
+    )
 
 
 def test_certificate_issued_before_the_format_downloads_under_it_without_renaming(
@@ -506,7 +532,7 @@ def test_certificate_issued_before_the_format_downloads_under_it_without_renamin
     response = client.get(f"/certificate-file/{code}", headers=auth_headers)
     assert response.status_code == 200
     assert response.headers["content-disposition"] == content_disposition(
-        f"João Antigo_Semana de Inovação_{code}.pdf"
+        "João Antigo_Semana de Inovação_2025.pdf"
     )
     # Only the suggested name changes: the stored file and its record stay put.
     assert db.get_by_code(code)["original_filename"] == legacy_name
@@ -514,8 +540,8 @@ def test_certificate_issued_before_the_format_downloads_under_it_without_renamin
     assert (db.PDFS_DIR / legacy_name).read_bytes() == b"%PDF-1.4 legado"
 
 
-def test_history_zip_names_entries_with_holder_event_and_code(client, auth_headers):
-    # The same person twice in the same event: the code keeps the names apart.
+def test_history_zip_names_entries_with_holder_event_and_year(client, auth_headers):
+    # The same person twice in the same event: the second entry gets "_2".
     second = {**VALID, "carga_horaria": 20}
     third = {**VALID, "nome": "Lúcia Ávila", "evento": "Jornada: Ética/Direito"}
     generated = _emit(client, auth_headers, [VALID, second, third])["generated"]
@@ -529,11 +555,173 @@ def test_history_zip_names_entries_with_holder_event_and_code(client, auth_heade
         names = sorted(archive.namelist())
     assert names == sorted(
         [
-            f"Ana Souza_Semana Jurídica_{codes[0]}.pdf",
-            f"Ana Souza_Semana Jurídica_{codes[1]}.pdf",
-            f"Lúcia Ávila_Jornada Ética Direito_{codes[2]}.pdf",
+            "Ana Souza_Semana Jurídica_2026.pdf",
+            "Ana Souza_Semana Jurídica_2026_2.pdf",
+            "Lúcia Ávila_Jornada Ética Direito_2026.pdf",
         ]
     )
+
+
+# ── Per-work certificates: one copy per author ────────────────────────────────
+
+MOSTRA = "scientific_initiation"
+MOSTRA_BODY = {"texto_padrao": "apresentou o trabalho {{titulo_trabalho}}."}
+AUTHORS = (
+    "Pessoa Exemplo Alfa",
+    "Pessoa Exemplo Beta",
+    "Pessoa Exemplo Gama",
+    "Pessoa Exemplo Delta",
+    "Pessoa Exemplo Épsilon",
+    "Pessoa Exemplo Zeta",
+    "Pessoa Exemplo Eta",
+    "Pessoa Exemplo Teta",
+)
+EVENT = "Mostra de Iniciação Científica 2026"
+WORK_TITLE = "Horta vertical automatizada"
+
+
+def _work(*authors: str, **extra) -> dict:
+    row: dict = {f"autor{index}": name for index, name in enumerate(authors, start=1)}
+    row.update(
+        {"evento": EVENT, "titulo_trabalho": WORK_TITLE, "data_emissao": "10/06/2026", **extra}
+    )
+    return row
+
+
+def _emit_work(client, auth_headers, *authors: str, **extra) -> dict:
+    code = _emit(
+        client, auth_headers, [_work(*authors, **extra)], data=MOSTRA_BODY, certificate_type=MOSTRA
+    )["generated"][0]["code"]
+    return db.get_by_code(code)
+
+
+def _zip_entries(response) -> dict[str, str]:
+    """``{entry name: sha256 of its bytes}`` of a ZIP response."""
+    with ZipFile(io.BytesIO(response.content)) as archive:
+        return {name: hashlib.sha256(archive.read(name)).hexdigest() for name in archive.namelist()}
+
+
+def _suggested(response) -> str:
+    from urllib.parse import unquote
+
+    return unquote(response.headers["content-disposition"].split("filename*=UTF-8''", 1)[1])
+
+
+def test_work_download_is_named_after_the_work_or_after_one_author(
+    client, auth_headers, mostra_template
+):
+    cert = _emit_work(client, auth_headers, *AUTHORS[:3])
+    code = cert["unique_code"]
+    assert cert["original_filename"] == f"{WORK_TITLE}_{EVENT}.pdf"  # the event has the year
+
+    whole = client.get(f"/certificate-file/{code}", headers=auth_headers)
+    assert whole.status_code == 200
+    assert _suggested(whole) == f"{WORK_TITLE}_{EVENT}.pdf"
+
+    for position, author in enumerate(AUTHORS[:3], start=1):
+        copy = client.get(
+            f"/certificate-file/{code}", params={"autor": position}, headers=auth_headers
+        )
+        assert copy.status_code == 200, copy.text
+        assert _suggested(copy) == f"{author}_{EVENT}.pdf"
+        # The copy is the stored PDF itself: same bytes, same hash, same code.
+        assert copy.content == whole.content
+        assert hashlib.sha256(copy.content).hexdigest() == cert["checksum_sha256"]
+
+    assert client.get(f"/certificate-file/{code}?autor=4", headers=auth_headers).status_code == 422
+    assert client.get(f"/certificate-file/{code}?autor=0", headers=auth_headers).status_code == 422
+    assert client.get(f"/certificate-file/{code}?autor=9", headers=auth_headers).status_code == 422
+    assert client.get(f"/certificate-file/{code}?autor=x", headers=auth_headers).status_code == 422
+
+
+def test_an_ordinary_certificate_has_no_author_copies(client, auth_headers):
+    code = _emit(client, auth_headers, [VALID])["generated"][0]["code"]
+    assert client.get(f"/certificate-file/{code}?autor=1", headers=auth_headers).status_code == 422
+    assert (
+        client.get(f"/certificate-file/{code}/autores.zip", headers=auth_headers).status_code == 422
+    )
+
+
+@pytest.mark.parametrize("count", [1, 3, 8])
+def test_authors_zip_holds_one_identical_copy_per_author(
+    client, auth_headers, mostra_template, count
+):
+    cert = _emit_work(client, auth_headers, *AUTHORS[:count])
+    response = client.get(
+        f"/certificate-file/{cert['unique_code']}/autores.zip", headers=auth_headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+    assert _suggested(response) == f"{WORK_TITLE}_{EVENT}.zip"
+
+    entries = _zip_entries(response)
+    assert list(entries) == [f"{author}_{EVENT}.pdf" for author in AUTHORS[:count]]
+    assert set(entries.values()) == {cert["checksum_sha256"]}
+
+
+def test_authors_zip_numbers_homonymous_authors(client, auth_headers):
+    code = "CERT-2026-HOMON1"
+    db.PDFS_DIR.mkdir(parents=True, exist_ok=True)
+    content = b"%PDF-1.4 trabalho"
+    (db.PDFS_DIR / "trabalho.pdf").write_bytes(content)
+    db.insert_certificates(
+        [
+            {
+                "unique_code": code,
+                "participant_name": "Ana Lima",
+                "event_name": "Micamf",
+                "issue_date": "2026-06-10",
+                "certificate_type": MOSTRA,
+                "authors_json": json.dumps(["Ana Lima", "Ana Lima", "Beto Reis"]),
+                "work_title": "Robô seguidor de linha",
+                "pdf_path": "pdfs/trabalho.pdf",
+                "original_filename": "trabalho.pdf",
+                "storage_provider": "local",
+                "file_size": len(content),
+                "checksum_sha256": hashlib.sha256(content).hexdigest(),
+                "status": "ativo",
+            }
+        ]
+    )
+    response = client.get(f"/certificate-file/{code}/autores.zip", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert _suggested(response) == "Robô seguidor de linha_Micamf_2026.zip"
+    assert list(_zip_entries(response)) == [
+        "Ana Lima_Micamf_2026.pdf",
+        "Ana Lima_Micamf_2026_2.pdf",
+        "Beto Reis_Micamf_2026.pdf",
+    ]
+    # Single copies by position are offered under the plain name.
+    second = client.get(f"/certificate-file/{code}?autor=2", headers=auth_headers)
+    assert _suggested(second) == "Ana Lima_Micamf_2026.pdf"
+
+
+def test_mixed_history_zip_expands_works_into_author_copies(client, auth_headers, mostra_template):
+    ordinary = _emit(client, auth_headers, [VALID])["generated"][0]["code"]
+    work = _emit_work(client, auth_headers, *AUTHORS[:3])
+    # A second work whose first author repeats a name of the first one.
+    other = _emit_work(client, auth_headers, AUTHORS[1], titulo_trabalho="Compostagem doméstica")
+
+    response = client.post(
+        "/certificates/download-zip",
+        json={"codes": [ordinary, work["unique_code"], other["unique_code"]]},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    entries = _zip_entries(response)
+    assert list(entries) == [
+        "Ana Souza_Semana Jurídica_2026.pdf",
+        f"{AUTHORS[0]}_{EVENT}.pdf",
+        f"{AUTHORS[1]}_{EVENT}.pdf",
+        f"{AUTHORS[2]}_{EVENT}.pdf",
+        f"{AUTHORS[1]}_{EVENT}_2.pdf",
+    ]
+    assert (
+        entries["Ana Souza_Semana Jurídica_2026.pdf"] == db.get_by_code(ordinary)["checksum_sha256"]
+    )
+    for author in AUTHORS[:3]:
+        assert entries[f"{author}_{EVENT}.pdf"] == work["checksum_sha256"]
+    assert entries[f"{AUTHORS[1]}_{EVENT}_2.pdf"] == other["checksum_sha256"]
 
 
 def test_legacy_synchronous_generation_is_gone(client, auth_headers):

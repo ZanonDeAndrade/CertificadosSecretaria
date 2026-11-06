@@ -94,6 +94,220 @@ def test_local_storage_save_writes_file_and_metadata(tmp_path):
     assert (tmp_path / "pdfs" / "Joao_CERT-2026-AB1234.pdf").read_bytes() == PDF_BYTES
 
 
+def _local(tmp_path) -> LocalStorage:
+    return LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
+
+
+def test_local_storage_never_overwrites_and_numbers_a_repeated_name(tmp_path):
+    storage = _local(tmp_path)
+    first = storage.save(b"%PDF-1.4 first", filename="Ana Lima_Evento_2026.pdf")
+    second = storage.save(b"%PDF-1.4 second", filename="Ana Lima_Evento_2026.pdf")
+    third = storage.save(b"%PDF-1.4 third", filename="Ana Lima_Evento_2026.pdf")
+
+    assert first.pdf_path == "pdfs/Ana Lima_Evento_2026.pdf"
+    assert second.pdf_path == "pdfs/Ana Lima_Evento_2026_2.pdf"
+    assert third.pdf_path == "pdfs/Ana Lima_Evento_2026_3.pdf"
+    assert second.original_filename == "Ana Lima_Evento_2026_2.pdf"
+    # The first file, and therefore its recorded hash, is untouched.
+    assert (tmp_path / first.pdf_path).read_bytes() == b"%PDF-1.4 first"
+    assert first.checksum_sha256 == sha256_hex(b"%PDF-1.4 first")
+    assert (tmp_path / second.pdf_path).read_bytes() == b"%PDF-1.4 second"
+    assert (tmp_path / third.pdf_path).read_bytes() == b"%PDF-1.4 third"
+
+
+def test_local_storage_steps_over_a_file_it_did_not_write(tmp_path):
+    (tmp_path / "pdfs").mkdir()
+    (tmp_path / "pdfs" / "Ana_Evento_2026.pdf").write_bytes(b"%PDF-1.4 legacy")
+    stored = _local(tmp_path).save(b"%PDF-1.4 new", filename="Ana_Evento_2026.pdf")
+    assert stored.pdf_path == "pdfs/Ana_Evento_2026_2.pdf"
+    assert (tmp_path / "pdfs" / "Ana_Evento_2026.pdf").read_bytes() == b"%PDF-1.4 legacy"
+
+
+def test_simultaneous_saves_of_the_same_name_all_succeed_under_distinct_names(tmp_path):
+    """Exclusive creation, not "check then write": racing emissions never share a file."""
+    import threading
+
+    storage = _local(tmp_path)
+    workers = 8
+    barrier = threading.Barrier(workers)
+    results: list[StoredFile | BaseException | None] = [None] * workers
+
+    def run(index: int) -> None:
+        content = f"%PDF-1.4 copy {index}".encode()
+        try:
+            barrier.wait()
+            results[index] = storage.save(content, filename="Mesmo Nome_Evento_2026.pdf")
+        except BaseException as exc:  # noqa: BLE001 - reported by the assertion below
+            results[index] = exc
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert all(isinstance(result, StoredFile) for result in results), results
+    stored = [result for result in results if isinstance(result, StoredFile)]
+    assert sorted(item.pdf_path for item in stored) == sorted(
+        ["pdfs/Mesmo Nome_Evento_2026.pdf"]
+        + [f"pdfs/Mesmo Nome_Evento_2026_{number}.pdf" for number in range(2, workers + 1)]
+    )
+    for index, item in enumerate(stored):
+        content = f"%PDF-1.4 copy {index}".encode()
+        assert (tmp_path / item.pdf_path).read_bytes() == content
+        assert item.checksum_sha256 == sha256_hex(content)
+    assert len(list((tmp_path / "pdfs").iterdir())) == workers
+
+
+@pytest.mark.parametrize("filename", ["../fora.pdf", "sub/arquivo.pdf", "..", ".", "", "  "])
+def test_local_storage_refuses_a_name_that_is_not_a_single_component(tmp_path, filename):
+    from storage_service import StorageError
+
+    with pytest.raises(StorageError):
+        _local(tmp_path).save(b"%PDF-1.4", filename=filename)
+    assert not (tmp_path / "fora.pdf").exists()
+
+
+def test_replace_rewrites_only_the_file_the_certificate_points_at(tmp_path):
+    storage = _local(tmp_path)
+    mine = storage.save(b"%PDF-1.4 mine", filename="Ana_Evento_2026.pdf")
+    sibling = storage.save(b"%PDF-1.4 sibling", filename="Ana_Evento_2026.pdf")
+
+    replaced = storage.replace(
+        b"%PDF-1.4 reissued", cert_row={"pdf_path": mine.pdf_path}, filename="Outro Nome.pdf"
+    )
+
+    assert replaced.pdf_path == mine.pdf_path
+    assert replaced.original_filename == "Ana_Evento_2026.pdf"
+    assert replaced.checksum_sha256 == sha256_hex(b"%PDF-1.4 reissued")
+    assert (tmp_path / mine.pdf_path).read_bytes() == b"%PDF-1.4 reissued"
+    assert (tmp_path / sibling.pdf_path).read_bytes() == b"%PDF-1.4 sibling"
+    # Neither the requested name nor a temporary file is left behind.
+    assert sorted(path.name for path in (tmp_path / "pdfs").iterdir()) == [
+        "Ana_Evento_2026.pdf",
+        "Ana_Evento_2026_2.pdf",
+    ]
+
+
+def test_replace_without_a_local_file_creates_a_new_exclusive_one(tmp_path):
+    storage = _local(tmp_path)
+    (tmp_path / "pdfs").mkdir()
+    (tmp_path / "pdfs" / "Novo_2026.pdf").write_bytes(b"%PDF-1.4 someone else's")
+    stored = storage.replace(b"%PDF-1.4 new", cert_row={"pdf_path": ""}, filename="Novo_2026.pdf")
+    assert stored.pdf_path == "pdfs/Novo_2026_2.pdf"
+    assert (tmp_path / "pdfs" / "Novo_2026.pdf").read_bytes() == b"%PDF-1.4 someone else's"
+
+
+def test_replace_refuses_a_path_outside_the_storage(tmp_path):
+    from storage_service import StorageError
+
+    for pdf_path in ("../fora.pdf", str((tmp_path.parent / "fora.pdf").resolve())):
+        with pytest.raises(StorageError):
+            _local(tmp_path).replace(b"%PDF-1.4", cert_row={"pdf_path": pdf_path}, filename="a.pdf")
+    assert not (tmp_path.parent / "fora.pdf").exists()
+
+
+# ── Google Drive: a repeated name gets _2, _3 ────────────────────────────────
+
+
+class _DriveCall:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def execute(self):
+        return self._payload
+
+
+class _FakeDriveService:
+    """``files().list`` / ``files().create`` over a set of names in one folder."""
+
+    def __init__(self, names):
+        self.names = set(names)
+        self.created: list[str] = []
+        self.queries: list[str] = []
+
+    def files(self):
+        return self
+
+    def list(self, *, q, fields, pageSize, supportsAllDrives, includeItemsFromAllDrives):
+        import re
+
+        self.queries.append(q)
+        match = re.match(r"name = '((?:[^'\\]|\\.)*)' and '(.+)' in parents and trashed = false", q)
+        assert match, q
+        name = match.group(1).replace("\\'", "'").replace("\\\\", "\\")
+        return _DriveCall({"files": [{"id": "taken"}] if name in self.names else []})
+
+    def create(self, *, body, media_body, fields, supportsAllDrives):
+        self.created.append(body["name"])
+        self.names.add(body["name"])
+        return _DriveCall({"id": f"drive-{len(self.created)}"})
+
+
+def test_drive_upload_takes_the_first_free_numbered_name(monkeypatch):
+    from storage_service.google_drive import GoogleDriveStorage
+
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "read_write")
+    service = _FakeDriveService({"Ana Lima_Evento_2026.pdf", "Ana Lima_Evento_2026_2.pdf"})
+    storage = GoogleDriveStorage(folder_id="folder-id", service=service)
+
+    stored = storage.save(PDF_BYTES, filename="Ana Lima_Evento_2026.pdf")
+
+    assert stored.original_filename == "Ana Lima_Evento_2026_3.pdf"
+    assert service.created == ["Ana Lima_Evento_2026_3.pdf"]
+    assert stored.drive_file_id == "drive-1"
+    assert len(service.queries) == 3
+    assert all("'folder-id' in parents" in query for query in service.queries)
+
+
+def test_drive_upload_escapes_quotes_in_the_name_lookup(monkeypatch):
+    from storage_service.google_drive import GoogleDriveStorage
+
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "read_write")
+    service = _FakeDriveService({"Ana D'Ávila_Evento_2026.pdf"})
+    storage = GoogleDriveStorage(folder_id="folder-id", service=service)
+
+    stored = storage.save(PDF_BYTES, filename="Ana D'Ávila_Evento_2026.pdf")
+
+    assert stored.original_filename == "Ana D'Ávila_Evento_2026_2.pdf"
+    assert service.queries[0].startswith("name = 'Ana D\\'Ávila_Evento_2026.pdf' and")
+
+
+def test_drive_reissue_uploads_under_the_certificates_own_name_without_numbering(monkeypatch):
+    from storage_service.google_drive import GoogleDriveStorage
+
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "read_write")
+    # The certificate's old file still carries the name when the new one goes up.
+    service = _FakeDriveService({"Ana Lima_Evento_2026.pdf"})
+    storage = GoogleDriveStorage(folder_id="folder-id", service=service)
+
+    stored = storage.replace(
+        PDF_BYTES,
+        cert_row={"drive_file_id": "old-file", "original_filename": "Ana Lima_Evento_2026.pdf"},
+        filename="Ana Lima_Evento_2026.pdf",
+    )
+
+    assert stored.original_filename == "Ana Lima_Evento_2026.pdf"
+    assert service.created == ["Ana Lima_Evento_2026.pdf"]
+    assert stored.drive_file_id == "drive-1"
+    assert service.queries == []
+
+
+def test_drive_reissue_of_a_certificate_without_a_file_creates_a_numbered_new_one(monkeypatch):
+    from storage_service.google_drive import GoogleDriveStorage
+
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_MODE", "read_write")
+    service = _FakeDriveService({"Ana Lima_Evento_2026.pdf"})
+    storage = GoogleDriveStorage(folder_id="folder-id", service=service)
+
+    stored = storage.replace(
+        PDF_BYTES, cert_row={"drive_file_id": ""}, filename="Ana Lima_Evento_2026.pdf"
+    )
+
+    assert stored.original_filename == "Ana Lima_Evento_2026_2.pdf"
+    assert service.created == ["Ana Lima_Evento_2026_2.pdf"]
+
+
 def test_local_storage_download_roundtrip(tmp_path):
     storage = LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
     stored = storage.save(PDF_BYTES, filename="x.pdf")

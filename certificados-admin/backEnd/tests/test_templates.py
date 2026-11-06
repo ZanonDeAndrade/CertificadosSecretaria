@@ -304,11 +304,12 @@ def test_reissue_uses_original_version_not_active(monkeypatch, tmp_path):
     assert db.get_by_code(cert["unique_code"])["template_version_id"] == 1
 
 
-def test_new_certificate_is_stored_under_holder_event_and_code(monkeypatch, tmp_path):
+def test_new_certificate_is_stored_under_holder_event_and_year(monkeypatch, tmp_path):
     db = _point_db(monkeypatch, tmp_path)
     service = _service(tmp_path, storage=RecordingDriveStorage())
     cert = _generate_one(db, service)
-    assert cert["original_filename"] == (f"Ana Souza_Semana Jurídica_{cert['unique_code']}.pdf")
+    assert cert["original_filename"] == "Ana Souza_Semana Jurídica_2026.pdf"
+    assert cert["unique_code"] not in cert["original_filename"]
 
 
 def _set_original_filename(db, code: str, name: str | None) -> None:
@@ -343,24 +344,35 @@ def test_reissue_without_a_stored_name_uses_the_current_format(monkeypatch, tmp_
 
     service.reissue_certificate(db.get_by_code(code))
 
-    assert db.get_by_code(code)["original_filename"] == (f"Ana Souza_Semana Jurídica_{code}.pdf")
+    assert db.get_by_code(code)["original_filename"] == "Ana Souza_Semana Jurídica_2026.pdf"
 
 
-def test_reissue_never_writes_a_tampered_stored_name_outside_the_pdf_folder(monkeypatch, tmp_path):
+def test_local_reissue_rewrites_the_certificates_own_file_and_ignores_a_tampered_name(
+    monkeypatch, tmp_path
+):
     from storage_service.local import LocalStorage
 
     db = _point_db(monkeypatch, tmp_path)
     storage = LocalStorage(pdfs_dir=tmp_path / "pdfs", storage_dir=tmp_path)
     service = _service(tmp_path, storage=storage)
-    code = _generate_one(db, service)["unique_code"]
+    cert = _generate_one(db, service)
+    code = cert["unique_code"]
+    assert cert["pdf_path"] == "pdfs/Ana Souza_Semana Jurídica_2026.pdf"
+    # Another certificate with the same name lives beside it and must survive.
+    sibling = storage.save(b"%PDF-1.4 sibling", filename="Ana Souza_Semana Jurídica_2026.pdf")
+    assert sibling.pdf_path == "pdfs/Ana Souza_Semana Jurídica_2026_2.pdf"
     _set_original_filename(db, code, "../../fora.pdf")
 
     service.reissue_certificate(db.get_by_code(code))
 
     reissued = db.get_by_code(code)
-    assert reissued["original_filename"] == "fora.pdf"
-    assert reissued["pdf_path"] == "pdfs/fora.pdf"
+    # The reissue overwrote the file the row points at, under its real name.
+    assert reissued["pdf_path"] == cert["pdf_path"]
+    assert reissued["original_filename"] == "Ana Souza_Semana Jurídica_2026.pdf"
+    assert (tmp_path / reissued["pdf_path"]).read_bytes() == PDF_BYTES
+    assert (tmp_path / sibling.pdf_path).read_bytes() == b"%PDF-1.4 sibling"
     assert not (tmp_path.parent / "fora.pdf").exists()
+    assert not (tmp_path / "pdfs" / "fora.pdf").exists()
 
 
 def test_reissue_requires_version_and_snapshot(monkeypatch, tmp_path):

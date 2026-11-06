@@ -5,6 +5,7 @@ import EmitirCertificados from "./EmitirCertificados";
 import { renderWithProviders } from "../test/renderWithProviders";
 import {
   disconnectGoogleDrive,
+  downloadCertificateFile,
   getGoogleDrivePickerSession,
   getGoogleDriveStatus,
   listBodyVariables,
@@ -30,6 +31,8 @@ vi.mock("../services/api", () => ({
   selectGoogleDriveFolder: vi.fn(),
   disconnectGoogleDrive: vi.fn(),
   listBodyVariables: vi.fn(),
+  downloadCertificateFile: vi.fn(),
+  downloadCertificateAuthorsZip: vi.fn(),
   getApiErrorMessage: (_error: unknown, fallback: string) => fallback,
   classifyError: () => "server",
 }));
@@ -763,7 +766,7 @@ test("Resumo final da Mostra nomeia cada trabalho pelo título e por todos os au
   const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
   expect(
     within(generated).getAllByRole("columnheader").map((cell) => cell.textContent),
-  ).toEqual(["Trabalho", "Código"]);
+  ).toEqual(["Trabalho", "Código", "Download"]);
   const work = within(generated).getByRole("rowheader");
   expect(work.textContent).toContain("Horta vertical automatizada");
   expect(work.textContent).toContain(`Autores: ${EIGHT_AUTHORS.slice(0, 3).join(", ")} +5`);
@@ -790,8 +793,69 @@ test("Resumo final de um tipo comum continua pelo participante", async () => {
   const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
   expect(
     within(generated).getAllByRole("columnheader").map((cell) => cell.textContent),
-  ).toEqual(["Participante", "Código"]);
+  ).toEqual(["Participante", "Código", "Download"]);
   expect(within(generated).getByRole("rowheader").textContent).toBe("Ana");
+});
+
+test("Resumo final baixa cada certificado gerado: botão no comum, menu por autor na Mostra", async () => {
+  const user = userEvent.setup();
+  vi.mocked(downloadCertificateFile).mockResolvedValue({
+    blob: new Blob(["pdf"]),
+    filename: "Ana_Semana_2026.pdf",
+  });
+  const saved: string[] = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+    this: HTMLAnchorElement,
+  ) {
+    saved.push(this.download);
+  });
+  resumeSavedBatch();
+  expect(await screen.findByText("Resumo final")).not.toBeNull();
+  const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
+  await user.click(within(generated).getByRole("button", { name: "Baixar certificado de Ana" }));
+  await waitFor(() => expect(downloadCertificateFile).toHaveBeenCalledWith("CERT-2026-TESTE"));
+  await waitFor(() => expect(saved).toEqual(["Ana_Semana_2026.pdf"]));
+});
+
+test("Resumo final da Mostra oferece o ZIP e uma cópia por autor", async () => {
+  const user = userEvent.setup();
+  vi.mocked(resumeEmissionBatch).mockResolvedValue(WORK_BATCH);
+  vi.mocked(downloadCertificateFile).mockResolvedValue({
+    blob: new Blob(["pdf"]),
+    filename: "Pessoa Exemplo Gama_Mostra 2026.pdf",
+  });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  resumeSavedBatch();
+  expect(await screen.findByText("Resumo final")).not.toBeNull();
+
+  const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
+  await user.click(
+    within(generated).getByRole("button", {
+      name: "Baixar certificado do trabalho “Horta vertical automatizada”",
+    }),
+  );
+  const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+  expect(items).toEqual(["Todos os autores (ZIP)", ...EIGHT_AUTHORS]);
+  await user.click(screen.getByRole("menuitem", { name: EIGHT_AUTHORS[2] }));
+  await waitFor(() =>
+    expect(downloadCertificateFile).toHaveBeenCalledWith("CERT-2026-MOSTRA8", 3),
+  );
+  // Duplicates kept are existing certificates: the summary does not download them.
+  const duplicates = screen.getByRole("table", { name: "Duplicados mantidos (1)" });
+  expect(within(duplicates).queryByRole("button", { name: /^Baixar/ })).toBeNull();
+});
+
+test("sem permissão de download, o Resumo final não mostra a coluna", async () => {
+  localStorage.setItem(
+    "certificados:emission-batch:1",
+    JSON.stringify({ idempotencyKey: "batch-key-1234567890" }),
+  );
+  renderWithProviders(<EmitirCertificados />, { role: "auditor" });
+  expect(await screen.findByText("Resumo final")).not.toBeNull();
+  const generated = screen.getByRole("table", { name: "Certificados gerados (1)" });
+  expect(
+    within(generated).getAllByRole("columnheader").map((cell) => cell.textContent),
+  ).toEqual(["Participante", "Código"]);
 });
 
 test("avisos da conferência da Mostra citam a linha pelo título do trabalho", async () => {

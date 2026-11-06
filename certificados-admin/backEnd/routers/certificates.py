@@ -14,7 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from database import db
-from database.certificate_types import certificate_type_label, parse_certificate_type
+from database.certificate_types import (
+    MAX_WORK_AUTHORS,
+    certificate_type_label,
+    parse_certificate_type,
+)
 
 router = APIRouter(tags=["certificates"])
 _STATUSES = frozenset({"pending", "ativo", "revogado", "failed"})
@@ -125,9 +129,24 @@ def reissue_certificate(
 )
 def download_certificate_file(
     code: str,
+    autor: int | None = Query(default=None, ge=1, le=MAX_WORK_AUTHORS),
     current: dict = Depends(require_permission(Permission.CERTIFICATES_DOWNLOAD)),
 ) -> StreamingResponse:
-    return certificate_management.stream(code, actor=current)
+    """The PDF; ``autor`` (1-based) names the copy of a per-work certificate
+    after that author. The same file is returned either way."""
+    return certificate_management.stream(code, actor=current, author_position=autor)
+
+
+@router.get(
+    "/certificate-file/{code}/autores.zip",
+    operation_id="download_certificate_author_copies",
+    response_class=StreamingResponse,
+)
+def download_certificate_author_copies(
+    code: str,
+    current: dict = Depends(require_permission(Permission.CERTIFICATES_DOWNLOAD)),
+) -> StreamingResponse:
+    return certificate_management.stream_author_copies(code, actor=current)
 
 
 @router.post(

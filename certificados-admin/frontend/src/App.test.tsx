@@ -42,6 +42,7 @@ vi.mock("./services/api", () => ({
   revokeCertificate: vi.fn(),
   downloadCertificatesZip: vi.fn(),
   downloadCertificateFile: vi.fn(),
+  downloadCertificateAuthorsZip: vi.fn(),
   getDashboardStats: vi.fn().mockResolvedValue({
     total: 0,
     active: 0,

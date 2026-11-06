@@ -35,6 +35,8 @@ import CertificateSubject, {
   certificateOf,
   workSubject,
 } from "../components/CertificateSubject";
+import DownloadCertificate from "../components/DownloadCertificate";
+import { saveBlob } from "../lib/download";
 import ConfirmDialog from "../ui/ConfirmDialog";
 import { Field, Select, TextInput, Textarea, Checkbox } from "../ui/Field";
 import { EmptyState, ErrorState, TableSkeleton } from "../ui/Feedback";
@@ -50,7 +52,6 @@ import {
 import {
   AdminCertificate,
   classifyError,
-  downloadCertificateFile,
   downloadCertificatesZip,
   getCertificate,
   listCertificates,
@@ -61,15 +62,6 @@ import {
 const PAGE_SIZE = 20;
 const MAX_ZIP_SELECTION = 200;
 const NAME_HINT_ID = "historico-name-hint";
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
 
 function canDownload(cert: AdminCertificate) {
   return cert.status === "ativo" && cert.download_available;
@@ -283,7 +275,7 @@ export default function Historico() {
     setDownloadStatus("");
     try {
       const result = await downloadCertificatesZip([...selected], setProgress);
-      saveBlob(result.blob, "certificados.zip");
+      saveBlob(result.blob, result.filename);
       if (result.skippedCodes.length) {
         setDownloadStatus(
           `ZIP gerado parcialmente. ${result.skippedCodes.length} certificado(s) ficaram indisponíveis: ${result.skippedCodes.join(", ")}.`,
@@ -299,18 +291,6 @@ export default function Historico() {
     } finally {
       setDownloading(false);
       setProgress(null);
-    }
-  };
-
-  const handleSingleDownload = async (cert: AdminCertificate) => {
-    setDownloadStatus("");
-    try {
-      const { blob, filename } = await downloadCertificateFile(cert.unique_code);
-      saveBlob(blob, filename);
-    } catch (requestError) {
-      setDownloadStatus(
-        failureMessage(requestError, "Não foi possível baixar o certificado."),
-      );
     }
   };
 
@@ -688,12 +668,12 @@ export default function Historico() {
                                   onClick={() => void openDetail(cert)}
                                 />
                                 {can("certificates.download") && (
-                                  <IconButton
+                                  <DownloadCertificate
+                                    cert={cert}
+                                    appearance="icon"
                                     size="sm"
-                                    icon="download"
-                                    label={`Baixar certificado ${certificateOf(cert)}`}
                                     disabled={!available}
-                                    onClick={() => handleSingleDownload(cert)}
+                                    onError={setDownloadStatus}
                                   />
                                 )}
                                 {can("certificates.revoke") &&
@@ -782,15 +762,13 @@ export default function Historico() {
                                 Detalhes
                               </Button>
                               {can("certificates.download") && (
-                                <Button
+                                <DownloadCertificate
+                                  cert={cert}
+                                  appearance="button"
                                   size="sm"
-                                  variant="secondary"
-                                  icon="download"
                                   disabled={!available}
-                                  onClick={() => handleSingleDownload(cert)}
-                                >
-                                  Baixar
-                                </Button>
+                                  onError={setDownloadStatus}
+                                />
                               )}
                               {can("certificates.revoke") && cert.status !== "revogado" && (
                                 <Button
@@ -918,9 +896,18 @@ export default function Historico() {
         onClose={() => setDetail(null)}
         size="lg"
         footer={
-          <Button variant="secondary" onClick={() => setDetail(null)}>
-            Fechar
-          </Button>
+          <>
+            {detail && can("certificates.download") && canDownload(detail) && (
+              <DownloadCertificate
+                cert={detail}
+                appearance="button"
+                onError={setDetailError}
+              />
+            )}
+            <Button variant="secondary" onClick={() => setDetail(null)}>
+              Fechar
+            </Button>
+          </>
         }
       >
         {detailLoading && (

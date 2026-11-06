@@ -65,7 +65,11 @@ e o código de erro; não envie planilha ou Registro Acadêmico (RA) por canal i
   mais de três, toque em **+N** ou abra o detalhe para ver todos. O filtro de
   nome encontra o trabalho por qualquer autor;
 - abra o detalhe para verificar template, emissor, integridade e ciclo de vida;
-- download individual ou ZIP só é oferecido quando autorizado e íntegro;
+- download individual ou ZIP só é oferecido quando autorizado e íntegro. O
+  arquivo chama-se `Nome_Evento_Ano.pdf` (o código fica só dentro do PDF). Num
+  certificado da Mostra o botão vira um menu: **Todos os autores (ZIP)** ou uma
+  cópia por autor, todas o mesmo PDF, com o nome de cada autor. O detalhe e o
+  Resumo final da emissão têm o mesmo botão;
 - itens revogados, ausentes ou bloqueados são ignorados/informados no ZIP.
 
 ## 6. Revogar e reemitir

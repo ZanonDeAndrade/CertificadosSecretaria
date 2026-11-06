@@ -29,6 +29,7 @@ from .base import (
     sha256_hex,
     utc_now_iso,
 )
+from .filenames import numbered_filenames
 
 LOGGER = logging.getLogger("certificados.storage.gdrive")
 
@@ -123,11 +124,39 @@ class GoogleDriveStorage(CertificateStorage):
         filename: str,
         mime_type: str = DEFAULT_MIME_TYPE,
     ) -> StoredFile:
+        """Upload a NEW file under ``filename`` or its first free ``_n`` variant."""
+        folder_id = self._writable_folder()
+        name = self._free_name(folder_id, filename)
+        return self._upload(content, name=name, mime_type=mime_type, folder_id=folder_id)
+
+    def replace(
+        self,
+        content: bytes,
+        *,
+        cert_row: Mapping[str, Any],
+        filename: str,
+        mime_type: str = DEFAULT_MIME_TYPE,
+    ) -> StoredFile:
+        """Upload the reissued PDF under the name the certificate already carries.
+
+        Drive cannot overwrite in place: the new file takes the exact name, with
+        no ``_2``, because the only file sharing it is the certificate's own old
+        one, which the caller deletes once the new id is persisted. A row that
+        has no Drive file yet gets a new, numbered file like any other.
+        """
+        if not (cert_row.get("drive_file_id") or "").strip():
+            return self.save(content, filename=filename, mime_type=mime_type)
+        folder_id = self._writable_folder()
+        return self._upload(content, name=filename, mime_type=mime_type, folder_id=folder_id)
+
+    def _writable_folder(self) -> str:
         if self.read_only:
             raise StorageConfigError(
                 "O perfil público somente leitura não pode enviar arquivos ao Drive."
             )
-        folder_id = self._require_folder()
+        return self._require_folder()
+
+    def _upload(self, content: bytes, *, name: str, mime_type: str, folder_id: str) -> StoredFile:
         try:
             from googleapiclient.errors import HttpError
             from googleapiclient.http import MediaIoBaseUpload
@@ -135,7 +164,7 @@ class GoogleDriveStorage(CertificateStorage):
             raise StorageConfigError("Bibliotecas do Google ausentes para upload.") from exc
 
         media = MediaIoBaseUpload(BytesIO(content), mimetype=mime_type, resumable=False)
-        metadata = {"name": filename, "parents": [folder_id]}
+        metadata = {"name": name, "parents": [folder_id]}
         try:
             created = (
                 self.service.files()
@@ -155,7 +184,7 @@ class GoogleDriveStorage(CertificateStorage):
         LOGGER.info("Certificado enviado ao Drive")
         return StoredFile(
             storage_provider=self.provider,
-            original_filename=filename,
+            original_filename=name,
             mime_type=mime_type,
             file_size=len(content),
             checksum_sha256=sha256_hex(content),
@@ -192,6 +221,41 @@ class GoogleDriveStorage(CertificateStorage):
             raise StorageError("Falha ao obter o certificado do Google Drive.") from exc
 
         return buffer.getvalue()
+
+    def _free_name(self, folder_id: str, filename: str) -> str:
+        """``filename`` or its first ``_2``, ``_3``… variant not yet in the folder.
+
+        Drive accepts two files with one name, so unlike the local storage this
+        cannot be exclusive: a race between two emissions yields two files with
+        the same name, never an overwritten one. The lookup is by exact name
+        and fetches only ids.
+        """
+        try:
+            from googleapiclient.errors import HttpError
+        except ImportError as exc:  # pragma: no cover
+            raise StorageConfigError("Bibliotecas do Google ausentes para upload.") from exc
+
+        for candidate in numbered_filenames(filename):
+            escaped = candidate.replace("\\", "\\\\").replace("'", "\\'")
+            query = f"name = '{escaped}' and '{folder_id}' in parents and trashed = false"
+            try:
+                found = (
+                    self.service.files()
+                    .list(
+                        q=query,
+                        fields="files(id)",
+                        pageSize=1,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                )
+            except HttpError as exc:
+                LOGGER.error("Falha ao consultar nomes no Drive: %s", type(exc).__name__)
+                raise StorageError("Falha ao enviar o certificado para o Google Drive.") from exc
+            if not found.get("files"):
+                return candidate
+        raise StorageError("Não há nome livre para o certificado na pasta do Drive.")
 
     def list_folder(self) -> list[dict]:
         """List files in the certificates folder for Drive×DB reconciliation.

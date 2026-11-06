@@ -21,7 +21,7 @@ from starlette.background import BackgroundTask
 
 import observability
 from database import db
-from database.certificate_types import certificate_type_label
+from database.certificate_types import certificate_type_label, is_per_work_type
 from database.repositories import authors_from_json
 from storage_service import (
     RetrievedFile,
@@ -29,7 +29,13 @@ from storage_service import (
     StorageIntegrityError,
     download_certificate,
 )
-from storage_service.filenames import certificate_filename, content_disposition
+from storage_service.filenames import (
+    certificate_filename,
+    certificate_zip_filename,
+    content_disposition,
+    copy_filenames,
+    unique_filename,
+)
 
 LOGGER = logging.getLogger("certificados.certificates")
 
@@ -237,9 +243,45 @@ def retrieve(code: str) -> tuple[dict, RetrievedFile]:
         ) from exc
 
 
-def stream(code: str, *, actor: dict, disposition: str = "attachment") -> StreamingResponse:
+def work_authors(cert: dict) -> list[str]:
+    """The authors a per-work certificate is valid for; empty for any other."""
+    if not is_per_work_type(cert.get("certificate_type")):
+        return []
+    return authors_from_json(cert.get("authors_json"))
+
+
+def _author_copy(cert: dict, position: int | None) -> str | None:
+    """The author whose copy was asked for (1-based), or ``None`` for the file itself.
+
+    The position, not the name, travels in the request: no name reaches a URL
+    or an access log, and the server only hands out names already printed on
+    the certificate.
+    """
+    if position is None:
+        return None
+    authors = work_authors(cert)
+    if not authors:
+        raise HTTPException(
+            status_code=422,
+            detail="Este certificado não é por trabalho: baixe-o sem indicar o autor.",
+        )
+    if not 1 <= position <= len(authors):
+        raise HTTPException(status_code=422, detail="Este certificado não tem esse autor.")
+    return authors[position - 1]
+
+
+def stream(
+    code: str,
+    *,
+    actor: dict,
+    disposition: str = "attachment",
+    author_position: int | None = None,
+) -> StreamingResponse:
+    """The certificate's PDF, named after its holder or, on a per-work
+    certificate, after the author at ``author_position``. Same bytes either way."""
     _download_limit(actor, bulk=False)
     cert, retrieved = retrieve(code)
+    author = _author_copy(cert, author_position)
     observability.metrics.increment(observability.CERT_DOWNLOADS)
     audit_service.record(
         "certificate_downloaded",
@@ -248,26 +290,47 @@ def stream(code: str, *, actor: dict, disposition: str = "attachment") -> Stream
         target_id=cert["unique_code"],
         details={"count": 1},
     )
+    filename = certificate_filename(cert, author=author)
     return StreamingResponse(
         BytesIO(retrieved.content),
         media_type=retrieved.mime_type,
-        headers={
-            "Content-Disposition": content_disposition(certificate_filename(cert), disposition)
-        },
+        headers={"Content-Disposition": content_disposition(filename, disposition)},
     )
 
 
-def _unique_name(filename: str, used: set[str]) -> str:
-    # The code inside each name already keeps entries apart; this only guards
-    # against a repeated name on case-insensitive file systems.
-    stem, extension = os.path.splitext(filename)
-    candidate = filename
-    counter = 2
-    while candidate.casefold() in used:
-        candidate = f"{stem} ({counter}){extension}"
-        counter += 1
-    used.add(candidate.casefold())
-    return candidate
+def stream_author_copies(code: str, *, actor: dict) -> StreamingResponse:
+    """A ZIP with one copy of a per-work certificate per author.
+
+    Every entry is the stored PDF, byte for byte (same code, QR and hash); only
+    the names differ, and two authors with the same name get ``_2``. Counts as
+    one download for the rate limit, like the single file it packs.
+    """
+    _download_limit(actor, bulk=False)
+    cert, retrieved = retrieve(code)
+    authors = work_authors(cert)
+    if not authors:
+        raise HTTPException(
+            status_code=422,
+            detail="Este certificado não é por trabalho: baixe o arquivo único.",
+        )
+    used: set[str] = set()
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for name in copy_filenames(cert, authors):
+            archive.writestr(unique_filename(name, used), retrieved.content)
+    observability.metrics.increment(observability.CERT_DOWNLOADS)
+    audit_service.record(
+        "certificate_downloaded",
+        actor=actor,
+        target_type="certificate",
+        target_id=cert["unique_code"],
+        details={"count": 1, "copies": len(authors)},
+    )
+    return StreamingResponse(
+        BytesIO(buffer.getvalue()),
+        media_type="application/zip",
+        headers={"Content-Disposition": content_disposition(certificate_zip_filename(cert))},
+    )
 
 
 def _remove_temp_file(path: str) -> None:
@@ -312,6 +375,7 @@ def download_zip(codes: list[str], *, actor: dict) -> FileResponse:
     skipped: list[str] = []
     used: set[str] = set()
     included = 0
+    copies = 0
     total_uncompressed = 0
     try:
         with ZipFile(temp_path, "w", ZIP_DEFLATED, allowZip64=True) as archive:
@@ -321,15 +385,21 @@ def download_zip(codes: list[str], *, actor: dict) -> FileResponse:
                 except HTTPException:
                     skipped.append(code)
                     continue
-                content_size = len(retrieved.content)
+                # A per-work certificate enters once per author, each copy the
+                # same bytes under that author's name; a repeated name anywhere
+                # in the archive gets "_2", "_3"…
+                names = copy_filenames(cert, work_authors(cert))
+                content_size = len(retrieved.content) * len(names)
                 if total_uncompressed + content_size > max_total_bytes:
                     raise HTTPException(
                         status_code=413,
                         detail="O conteúdo total dos certificados excede o limite do ZIP.",
                     )
-                archive.writestr(_unique_name(certificate_filename(cert), used), retrieved.content)
+                for name in names:
+                    archive.writestr(unique_filename(name, used), retrieved.content)
                 total_uncompressed += content_size
                 included += 1
+                copies += len(names)
                 # Drop the only per-PDF byte reference before retrieving the next file.
                 del retrieved
             if skipped:
@@ -356,6 +426,7 @@ def download_zip(codes: list[str], *, actor: dict) -> FileResponse:
         target_type="certificate_batch_download",
         details={
             "count": included,
+            "copies": copies,
             "failed": len(skipped),
             "bytes": total_uncompressed,
         },

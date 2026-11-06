@@ -21,7 +21,12 @@ from certificados_backend.utils.text_utils import (
 from PIL import Image, ImageDraw, ImageFont
 
 from database.certificate_types import MAX_WORK_AUTHORS
-from storage_service.filenames import build_certificate_filename, certificate_holder
+from storage_service.filenames import (
+    build_certificate_filename,
+    certificate_holder,
+    year_from_code,
+    year_of,
+)
 
 _SYSTEM = platform.system()
 _WINDOWS_FONTS = Path("C:/Windows/Fonts")
@@ -166,15 +171,18 @@ class CertificateGeneratorConfig:
 
 
 def build_pdf_filename(participant: ParticipantRegistryRecord) -> str:
-    """Build a unique PDF filename: "<titular>_<evento>_<codigo>.pdf".
+    """PDF filename of a render record: "<titular>_<evento>_<ano>.pdf".
 
-    The validation code closes the name, so two participants with the same name
-    (or one participant twice in an event) never overwrite each other's file.
-    Rules live in :mod:`storage_service.filenames`, shared with the downloads."""
+    The render record carries the issue date (por extenso) and the code, so the
+    year comes from the issue date, else from the code. The emission saga names
+    the stored file from the persisted row instead, which also knows the event
+    start date. Rules live in :mod:`storage_service.filenames`, shared with the
+    downloads; the storage keeps two equal names apart with ``_2``, ``_3``…"""
     holder = certificate_holder(
         participant.nome, participant.titulo_trabalho, participant.certificate_type
     )
-    return build_certificate_filename(holder, participant.evento, participant.validation_code)
+    year = year_of(participant.data_emissao) or year_from_code(participant.validation_code)
+    return build_certificate_filename(holder, participant.evento, year)
 
 
 def _image_to_pdf_bytes(image: Image.Image) -> bytes:

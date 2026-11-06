@@ -2,6 +2,8 @@ import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../app/AuthContext";
 import { failureMessage, useAsyncData } from "../app/useAsyncData";
 import CertificateSubject from "../components/CertificateSubject";
+import DownloadCertificate from "../components/DownloadCertificate";
+import { saveBlob } from "../lib/download";
 import {
   cancelEmissionBatch,
   disconnectGoogleDrive,
@@ -64,15 +66,6 @@ interface StoredBatch {
 interface FolderChoice {
   folderId: string;
   folderName: string;
-}
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 function exportInvalidRows(preview: SpreadsheetPreview) {
@@ -147,7 +140,7 @@ function fallbackSummary(batch: EmissionBatch): GenerationSummary {
 }
 
 export default function EmitirCertificados() {
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const storageKey = `certificados:emission-batch:${user?.id ?? "session"}`;
   const [step, setStep] = useState<Step>("upload");
   const [file, setFile] = useState<File | null>(null);
@@ -160,6 +153,7 @@ export default function EmitirCertificados() {
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
   const [batch, setBatch] = useState<EmissionBatch | null>(null);
   const [summary, setSummary] = useState<GenerationSummary | null>(null);
+  const [downloadError, setDownloadError] = useState("");
   const [validating, setValidating] = useState(false);
   const [starting, setStarting] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -385,6 +379,7 @@ export default function EmitirCertificados() {
     setPreview(null);
     setBatch(null);
     setSummary(null);
+    setDownloadError("");
     setFolderChoices({});
     setError("");
   };
@@ -1134,13 +1129,34 @@ export default function EmitirCertificados() {
           {summary.generated.length > 0 && (
             <ResultTable
               title={`Certificados gerados (${summary.generated_count})`}
-              headers={[summaryPerWork ? "Trabalho" : "Participante", "Código"]}
+              headers={[
+                summaryPerWork ? "Trabalho" : "Participante",
+                "Código",
+                ...(can("certificates.download") ? ["Download"] : []),
+              ]}
               rows={summary.generated.map((item) => [
                 <SummarySubject item={item} certificateType={summaryType} />,
                 item.code,
+                ...(can("certificates.download")
+                  ? [
+                      <DownloadCertificate
+                        cert={{
+                          unique_code: item.code,
+                          participant_name: item.name,
+                          certificate_type: summaryType,
+                          work_title: item.work_title,
+                          authors: item.authors,
+                        }}
+                        appearance="button"
+                        size="sm"
+                        onError={setDownloadError}
+                      />,
+                    ]
+                  : []),
               ])}
             />
           )}
+          {downloadError && <Alert tone="warn">{downloadError}</Alert>}
           {summary.duplicates.length > 0 && (
             <ResultTable
               title={`Duplicados mantidos (${summary.duplicate_count})`}
@@ -1236,6 +1252,7 @@ function SummarySubject({
   );
 }
 
+/** The first cell of each row is its header; the rest follow `headers`. */
 function ResultTable({
   title,
   headers,
@@ -1243,8 +1260,8 @@ function ResultTable({
   danger = false,
 }: {
   title: string;
-  headers: [string, string];
-  rows: [ReactNode, string][];
+  headers: string[];
+  rows: ReactNode[][];
   danger?: boolean;
 }) {
   return (
@@ -1252,11 +1269,15 @@ function ResultTable({
       <PanelHeader title={title} />
       <TableScroll label={title} className="rounded-none border-0 border-t">
         <Table caption={title}>
-          <Thead><Tr><Th>{headers[0]}</Th><Th>{headers[1]}</Th></Tr></Thead>
+          <Thead><Tr>{headers.map((header) => <Th key={header}>{header}</Th>)}</Tr></Thead>
           <Tbody>{rows.map((row, index) => (
-            <Tr key={`${row[1]}-${index}`}>
+            <Tr key={index}>
               <TdHeader>{row[0]}</TdHeader>
-              <Td className={danger ? "text-[color:var(--danger-fg)]" : undefined}>{row[1]}</Td>
+              {row.slice(1).map((cell, cellIndex) => (
+                <Td key={cellIndex} className={danger ? "text-[color:var(--danger-fg)]" : undefined}>
+                  {cell}
+                </Td>
+              ))}
             </Tr>
           ))}</Tbody>
         </Table>

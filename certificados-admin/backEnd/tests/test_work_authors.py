@@ -428,9 +428,10 @@ def test_mostra_batch_issues_one_certificate_per_work_and_lists_the_authors(
     assert [item["participant_name"] for item in found] == [AUTHORS[0]]
 
     code = by_holder[AUTHORS[0]]["unique_code"]
-    # The stored PDF is named after the work, not its first author.
+    # The stored PDF is named after the work, not its first author, and the
+    # event already carries the year, so it is not repeated.
     assert db.get_by_code(code)["original_filename"] == (
-        f"Horta vertical automatizada_Mostra de Iniciação Científica 2026_{code}.pdf"
+        "Horta vertical automatizada_Mostra de Iniciação Científica 2026.pdf"
     )
     public = _public_client(monkeypatch)
     verify = public.get(f"/public/verify/{code}").json()

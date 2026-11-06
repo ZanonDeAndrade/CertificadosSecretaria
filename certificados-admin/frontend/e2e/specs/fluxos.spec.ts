@@ -254,18 +254,20 @@ test.describe("histórico", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
   });
 
-  test("download individual usa titular, evento e código no nome", async ({ page }) => {
+  test("download individual usa titular, evento e ano no nome, sem o código", async ({ page }) => {
     await scenario(page, "default");
     await page.goto("/historico");
     await expect(page.getByText("João Pedro Lima").first()).toBeVisible();
 
-    // Desktop shows an icon button per row, mobile a "Baixar" button per card.
+    // An ordinary certificate: a plain button on desktop and mobile alike.
     const download = page
-      .getByRole("button", { name: /^Baixar( certificado de .+)?$/ })
+      .getByRole("button", { name: /^Baixar certificado de .+$/ })
       .and(page.locator(":enabled"))
       .first();
+    await expect(download).not.toHaveAttribute("aria-haspopup", "menu");
     const [file] = await Promise.all([page.waitForEvent("download"), download.click()]);
-    expect(file.suggestedFilename()).toMatch(/^[^_]+ [^_]+_[^_]+ [^_]+_CERT-2026-\d{4}A\.pdf$/);
+    expect(file.suggestedFilename()).toMatch(/^[^_]+_[^_]+_2026\.pdf$/);
+    expect(file.suggestedFilename()).not.toContain("CERT-");
   });
 
   test("seleção em lote habilita o ZIP", async ({ page }) => {
@@ -351,6 +353,75 @@ test.describe("histórico da Mostra", () => {
     await expect(dialog.getByText("Equipe Verde")).toBeVisible();
     await expect(dialog.getByText("Participante", { exact: true })).toHaveCount(0);
     await expect(dialog.getByRole("listitem")).toHaveText(WORK_AUTHORS);
+  });
+
+  test("o download de um trabalho oferece o ZIP e uma cópia por autor", async ({ page }, testInfo) => {
+    const wide = testInfo.project.name === "desktop";
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await expect(page.getByText("Horta vertical automatizada", { exact: true })).toBeVisible();
+
+    const entry = wide
+      ? page.getByRole("row").filter({ has: workEntry(page, wide, "Horta vertical automatizada") })
+      : workEntry(page, wide, "Horta vertical automatizada");
+    const name = "Baixar certificado do trabalho “Horta vertical automatizada”";
+    const trigger = entry.getByRole("button", { name });
+    await expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+    await trigger.click();
+    const menu = page.getByRole("menu", { name });
+    await expect(menu.getByRole("menuitem")).toHaveText([
+      "Todos os autores (ZIP)",
+      ...WORK_AUTHORS.slice(0, 3),
+    ]);
+
+    // One author: the stored PDF under that author's name.
+    const [copy] = await Promise.all([
+      page.waitForEvent("download"),
+      menu.getByRole("menuitem", { name: WORK_AUTHORS[1] }).click(),
+    ]);
+    expect(copy.suggestedFilename()).toBe(
+      "Pessoa Exemplo Beta_Mostra de Iniciação Científica 2026.pdf",
+    );
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    // Every author: the ZIP named after the work (the event carries the year).
+    await trigger.click();
+    const [zip] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("menuitem", { name: "Todos os autores (ZIP)" }).click(),
+    ]);
+    expect(zip.suggestedFilename()).toBe(
+      "Horta vertical automatizada_Mostra de Iniciação Científica 2026.zip",
+    );
+  });
+
+  test("o detalhe baixa o certificado: menu por autor na Mostra", async ({ page }, testInfo) => {
+    const wide = testInfo.project.name === "desktop";
+    await scenario(page, "default");
+    await page.goto("/historico");
+    await expect(page.getByText("Robô seguidor de linha", { exact: true })).toBeVisible();
+
+    if (wide) {
+      await page
+        .getByRole("button", { name: "Ver detalhes do trabalho “Robô seguidor de linha”" })
+        .click();
+    } else {
+      await workEntry(page, wide, "Robô seguidor de linha").getByRole("button", { name: "Detalhes" }).tap();
+    }
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Detalhes do certificado" })).toBeVisible();
+    await dialog
+      .getByRole("button", { name: "Baixar certificado do trabalho “Robô seguidor de linha”" })
+      .click();
+    await expect(page.getByRole("menuitem")).toHaveCount(9);
+    const [copy] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("menuitem", { name: WORK_AUTHORS[7] }).click(),
+    ]);
+    expect(copy.suggestedFilename()).toBe(
+      "Pessoa Exemplo Teta_Mostra de Iniciação Científica 2026.pdf",
+    );
+    await expect(dialog).toBeVisible();
   });
 
   test("a busca por nome encontra o trabalho por qualquer autor, sem acento", async ({ page }) => {
